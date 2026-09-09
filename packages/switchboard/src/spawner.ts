@@ -11,7 +11,7 @@
  *    禁止留下"既不成功也不消亡"的僵尸代。
  */
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
-import { closeSync, mkdirSync, openSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface SpawnOptions {
@@ -99,9 +99,31 @@ export function spawnGen(opts: SpawnOptions): SpawnedGen {
     logFd = -1
   }
   const proc = spawn(opts.nodeBin, args, { env, stdio: ['ignore', logFd, logFd], windowsHide: true })
-  // 底层进程自行退出（崩溃/被杀）时顺带释放我们的 fd，避免泄漏。
-  proc.on('exit', closeLog)
-  proc.on('error', closeLog)
+  // 进程退出生亡的根因轨迹：记入 <genDir>/lifecycle.log（持久、控制面重启也不丢），
+  // 便于复盘"gen 为什么消失"——exit code/signal（崩溃/被杀/OOM）或 spawn error（端口冲突等）。
+  const logLifecycle = (msg: string): void => {
+    const line = `[${new Date().toISOString()}] ${msg}\n`
+    try {
+      appendFileSync(join(opts.genDir, 'lifecycle.log'), line)
+    } catch {
+      /* genDir 不可写时忽略，仅 console */
+    }
+    try {
+      console.log(`[switchboard:spawn] ${msg.trim()}`)
+    } catch {
+      /* 忽略 */
+    }
+  }
+  // 底层进程自行退出（崩溃/被杀）时顺带释放 fd，并记录退出码/信号。
+  proc.on('exit', (code, signal) => {
+    closeLog()
+    logLifecycle(`gen EXIT gen=${opts.gen} pid=${proc.pid ?? 0} code=${code ?? ''} signal=${signal ?? ''} runtimeStopped=${proc.killed}`)
+  })
+  proc.on('error', (err) => {
+    closeLog()
+    const ec = (err as NodeJS.ErrnoException).code ?? ''
+    logLifecycle(`gen SPAWN_ERROR gen=${opts.gen} pid=${proc.pid ?? 0} errCode=${ec} msg=${err.message}`)
+  })
 
   const awaitExit = (ms: number): Promise<boolean> => {
     if (proc.exitCode !== null || proc.killed) return Promise.resolve(true)
