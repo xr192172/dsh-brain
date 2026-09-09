@@ -238,26 +238,29 @@ export function apply(ctx: Context, config: Config): void {
       ctx.tools.register(defineTool({
         name: 'symbol_edit',
         description:
-          '符号级精准编辑（编排壳）：按 文件+符号名 定位 AST 边界后 replace/insert/delete/range。' +
-          '先算影响面（find_references 引用摘要），再精准落盘（edit_code 自带 re-parse 语法门 + 同名消歧，' +
-          'replace 要求新代码解析出同名符号防粘贴错函数），最后精简回报。不信行号/old_string，杜绝改错行/改错函数。' +
-          '注意：dry_run 仅对 op="range" 生效（其它操作会实际写盘）；replace 的 code 必须自包含（只含目标符号本身定义，' +
-          '不要重复定义文件内已有的类型/函数，否则报重复定义）。',
+          '符号级精准编辑（编排壳）：按 文件+符号名 定位 AST 边界后 replace/insert/delete/range，' +
+          '或按唯一文本 replace_text（edit 工具的安全版）。先算影响面（find_references 引用摘要，仅索引内符号），' +
+          '再精准落盘（edit_code 自带 re-parse 语法门 + 同名消歧，replace 要求新代码解析出同名符号防粘贴错函数），' +
+          '最后精简回报。不信行号/old_string（replace_text 除外，它要求 old_text 在文件内恰好唯一）。' +
+          '注意：dry_run 对所有 op 生效（只预览 diff + 语法门，不写盘）；replace 的 code 必须自包含（只含目标符号本身定义，' +
+          '不要重复定义文件内已有的类型/函数，否则报重复定义——复杂修改请用 range 或 replace_text）。',
         parameters: {
           project_dir: { type: 'string', description: '项目根目录（缺省取最近已预热工作区）' },
           file: { type: 'string', description: '目标文件（相对 project_dir 或绝对路径）' },
           op: {
             type: 'string',
-            enum: ['replace', 'insert', 'delete', 'range'],
-            description: 'replace=替换符号(symbol+code 必填，code 须自包含)；insert=插入新符号(code 必填, symbol 可选锚点=其后插入, 缺省文件末尾)；delete=删除符号(symbol 必填)；range=显式行区间(start/end+code)',
+            enum: ['replace', 'insert', 'delete', 'range', 'replace_text'],
+            description: 'replace=替换符号(symbol+code 必填，code 须自包含)；insert=插入新符号(code 必填, symbol 可选锚点=其后插入, 缺省文件末尾)；delete=删除符号(symbol 必填)；range=显式行区间(start/end+code)；replace_text=按唯一文本替换(old_text 必填且须唯一, new_text 新文本)',
           },
-          symbol: { type: 'string', description: '目标符号：replace/delete 必填（qualified_name 优先，短名兜底）；insert 可选锚点；range 不需要' },
+          symbol: { type: 'string', description: '目标符号：replace/delete 必填（qualified_name 优先，短名兜底）；insert 可选锚点；range/replace_text 不需要' },
           parent: { type: 'string', description: '符号父级（类名 / Go receiver 类型名），同名消歧' },
           code: { type: 'string', description: 'replace/insert 的新代码（完整符号定义，自包含）；range=区间新内容（空串=删除区间）' },
+          old_text: { type: 'string', description: 'replace_text 专用：要替换的旧文本（须在文件中恰好出现 1 次，否则报歧义）' },
+          new_text: { type: 'string', description: 'replace_text 专用：替换后的新文本（空串=删除该文本）' },
           start: { type: 'integer', description: 'range 专用：1-based 含端点起始行' },
           end: { type: 'integer', description: 'range 专用：1-based 含端点结束行' },
-          dry_run: { type: 'boolean', description: '仅 range 支持：true=只出 diff 预览 + 语法门结果，不写盘、不改索引；其它 op 传 true 会被拒绝，不写盘' },
-          preflight: { type: 'boolean', description: '编辑前是否先算 find_references 影响面（默认 true）' },
+          dry_run: { type: 'boolean', description: '所有 op 支持：true=只出 diff 预览 + 语法门结果，不写盘、不改索引' },
+          preflight: { type: 'boolean', description: '编辑前是否先算 find_references 影响面（默认 true，仅 symbol 存在时）' },
           quiet_overlap: { type: 'boolean', description: 'range 专用：true=区间穿透只报符号计数、不展开明细列表（减少视觉噪声）' },
         },
         output: {
@@ -275,10 +278,7 @@ export function apply(ctx: Context, config: Config): void {
             if (!projectDir) {
               return 'project_dir 未指定，且当前无已预热工作区。请先选中/新建工作区（自动预热），或显式传 project_dir。'
             }
-            // dry_run 一致性门：仅 range 支持，其它 op 传 dry_run=true 直接拒绝、绝不写盘。
-            if (args.op !== 'range' && args.dry_run === true) {
-              return 'dry_run 仅支持 op="range"（insert/delete/replace 都会实际写盘，传 dry_run 会被忽略）。本次未执行、未写盘；如需预览请改用 range 或先 read 文件确认。'
-            }
+            // dry_run 由内核统一处理（所有 op 均支持，只预览不写盘）。
             const kernel = await loadKernel(config.kernelDir)
             const lines: string[] = []
             console.log(`[dsb-edit] call project=${projectDir} file=${args.file ?? ''} op=${args.op ?? ''} symbol=${args.symbol ?? ''} preflight=${args.preflight !== false}`)
@@ -324,6 +324,8 @@ export function apply(ctx: Context, config: Config): void {
               end: args.end,
               dry_run: args.dry_run,
               quiet: args.quiet_overlap === true,
+              old_text: args.old_text,
+              new_text: args.new_text,
             })
             lines.push(res.message)
 
