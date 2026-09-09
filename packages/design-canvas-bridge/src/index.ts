@@ -254,7 +254,8 @@ export function apply(ctx: Context, config: Config): void {
           },
           symbol: { type: 'string', description: '目标符号：replace/delete 必填（qualified_name 优先，短名兜底）；insert 可选锚点；range/replace_text 不需要' },
           parent: { type: 'string', description: '符号父级（类名 / Go receiver 类型名），同名消歧' },
-          code: { type: 'string', description: 'replace/insert 的新代码（完整符号定义，自包含）；range=区间新内容（空串=删除区间）' },
+          sub: { type: 'string', enum: ['body'], description: 'replace 专用：body=只替换函数/方法体（code 只给新函数体内容含大括号，签名与大括号保留，引用外部符号无需自包含）' },
+          code: { type: 'string', description: 'replace/insert 的新代码（完整符号定义，自包含）；replace+sub=body 时=新函数体（含大括号）；range=区间新内容（空串=删除区间）' },
           old_text: { type: 'string', description: 'replace_text 专用：要替换的旧文本（须在文件中恰好出现 1 次，否则报歧义）' },
           new_text: { type: 'string', description: 'replace_text 专用：替换后的新文本（空串=删除该文本）' },
           start: { type: 'integer', description: 'range 专用：1-based 含端点起始行' },
@@ -326,6 +327,7 @@ export function apply(ctx: Context, config: Config): void {
               quiet: args.quiet_overlap === true,
               old_text: args.old_text,
               new_text: args.new_text,
+              sub: args.sub,
             })
             lines.push(res.message)
 
