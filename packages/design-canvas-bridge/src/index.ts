@@ -17,6 +17,7 @@ import type { Context, Service } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import path from 'node:path'
 import fs from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 // 触发 @deepseek-ai/dsh-tools 的 Context.tools 声明合并（纯类型，无运行时副作用）
@@ -144,6 +145,27 @@ function shortErr(e: unknown): string {
   return m.length > 200 ? `${m.slice(0, 200)}…` : m
 }
 
+/** 目标文件是否已进入目标项目的符号/import 索引（cache.db files 表）。未索引时跑
+ *  find_references 会 fallback 对全依赖闭包即时解析——未预热大仓极慢，这里据此降级。 */
+function isFileIndexed(projectDir: string, file?: string): boolean {
+  if (!file) return false
+  try {
+    const abs = path.isAbsolute(file) ? file : path.resolve(projectDir, file)
+    const rel = path.relative(projectDir, abs).split(path.sep).join('/')
+    const dbPath = path.join(projectDir, '.design-canvas', 'cache.db')
+    if (!fs.existsSync(dbPath)) return false
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      const row = db.prepare('SELECT path FROM files WHERE path = ?').get(rel) as { path?: string } | undefined
+      return !!row
+    } finally {
+      try { db.close() } catch { /* ignore */ }
+    }
+  } catch {
+    return false
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   const importToolName = `mcp__${config.serverName}__import_project`
   const capMapToolName = `mcp__${config.serverName}__capability_map`
@@ -254,20 +276,26 @@ export function apply(ctx: Context, config: Config): void {
             const lines: string[] = []
 
             // 第一步：影响面（find_references），只读；失败不阻断编辑。
+            // 智能降级：仅当目标文件已在目标项目的索引(cache.db)中才跑影响面——否则其 fallback
+            // 即时展开全依赖闭包，对未预热大仓会拖死编辑。未索引则跳过并提示，编辑仍进行。
             if (args.preflight !== false && args.symbol) {
-              try {
-                const refs = await kernel.findReferences({ project_dir: projectDir, file: args.file, symbol: args.symbol })
-                if (refs.ok) {
-                  const imp = (refs.importers ?? [])
-                    .slice(0, 6)
-                    .map((i) => `${i.file}[${i.refs.length}]`)
-                    .join(', ')
-                  lines.push(`● 影响面(${refs.symbol ?? args.symbol}): importer ${refs.importerCount ?? 0} 处${imp ? ` · ${imp}` : ''}`)
-                } else {
-                  lines.push(`● 影响面: ${(refs.blocked ?? ['无引用信息']).join('; ')}`)
+              if (isFileIndexed(projectDir, args.file)) {
+                try {
+                  const refs = await kernel.findReferences({ project_dir: projectDir, file: args.file, symbol: args.symbol })
+                  if (refs.ok) {
+                    const imp = (refs.importers ?? [])
+                      .slice(0, 6)
+                      .map((i) => `${i.file}[${i.refs.length}]`)
+                      .join(', ')
+                    lines.push(`● 影响面(${refs.symbol ?? args.symbol}): importer ${refs.importerCount ?? 0} 处${imp ? ` · ${imp}` : ''}`)
+                  } else {
+                    lines.push(`● 影响面: ${(refs.blocked ?? ['无引用信息']).join('; ')}`)
+                  }
+                } catch (e) {
+                  lines.push(`● 影响面: 计算失败(${shortErr(e)})，继续编辑`)
                 }
-              } catch (e) {
-                lines.push(`● 影响面: 计算失败(${shortErr(e)})，继续编辑`)
+              } else {
+                lines.push(`● 影响面: 目标文件尚未被索引，已跳过（可先对该项目 import_project 预热后再算影响面）`)
               }
             }
 
