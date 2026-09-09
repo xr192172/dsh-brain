@@ -1,0 +1,48 @@
+{
+  "name": "@dsh-brain/switchboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "脑代际蓝绿交接控制面 + gen 交接插件，合并为一个模块（原 switchboard + handover-agent + three-brain）双入口：bin 跑控制面进程，dsh.bundle 打进每个 gen 提供交接能力。",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./handover-protocol": {
+      "types": "./lib/types/handover-protocol.d.ts",
+      "default": "./lib/handover-protocol.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "switchboard": "bin.cjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-session-projection": "*",
+    "@deepseek-ai/dsh-session-projection-cache": "*",
+    "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^5.4.0"
+  }
+}

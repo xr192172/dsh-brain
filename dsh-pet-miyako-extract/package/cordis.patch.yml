@@ -1,0 +1,7 @@
+# Miyako pet bundle patch: inserts its plugin row into the web plugin roster.
+# The single row mounts both halves: the host side (pet state machine, pet.*
+# RPC service, asset routes) and the browser side (the pet UI, served from
+# lib/client.js plus the custom assets under assets/whale).
+- insert:
+    - id: pet-miyako
+      name: dsh-pet-miyako

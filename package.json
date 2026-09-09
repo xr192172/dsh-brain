@@ -1,0 +1,21 @@
+{
+  "name": "dsh-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "在 DeepSeek Harness (DSH) 底座上，将 agent-shell 工程思路解耦重做为 Cordis 插件：传送带上下文 / 三脑编排 / 工具自进化 / 护栏 / LLM 路由。",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "web": "dsh web",
+    "plugin": "dsh plugin"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "^0.1.1-rc.2",
+    "@dsh-brain/conveyor-context": "file:packages/conveyor-context"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

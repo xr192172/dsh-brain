@@ -1,0 +1,13 @@
+# key-pool-proxy bundle patch — 起本地多 key 轮换反代，作为 AGNES 路由的下游。
+- insert:
+    - id: key-pool-proxy
+      name: '@dsh-brain/key-pool-proxy'
+      config:
+        poolEnv: AGENTSHELL_MAIN_LLM_API_KEYS
+        fallbackEnvs:
+          - AGENTSHELL_MAIN_LLM_API_KEY
+        upstreamBase: https://apihub.agnes-ai.com
+        port: 3101
+        cooldownMs: 15000
+        maxRetries: 3
+        retryStatuses: [429, 500, 502, 503, 504]

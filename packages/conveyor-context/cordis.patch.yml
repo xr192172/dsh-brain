@@ -1,0 +1,8 @@
+# conveyor-context bundle patch — insert the plugin row into the profile cordis.yml.
+# activateConveyor: default true when the session-projection seam is composed.
+- insert:
+    - id: conveyor-context
+      name: '@dsh-brain/conveyor-context'
+      config:
+        foldEveryTurns: 6
+        maxKeptFacts: 32

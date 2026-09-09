@@ -1,0 +1,34 @@
+{
+  "name": "@dsh-brain/tool-evolution",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "description": "工具自进化插件（思路 #3）：适应度采集（tool/call + tool/result → 成功率/耗时/错误模式）+ LLM 打分（tool_score → tool/review 事件）。slice A 落地 I3.1/I3.2；失败即变异 + 描述锚定（I3.3/I3.4）留待 slice B。",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-session-projection": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,11 @@
+# design-canvas-bridge bundle patch — insert the plugin row into the profile cordis.yml.
+- insert:
+    - id: design-canvas-bridge
+      name: '@dsh-brain/design-canvas-bridge'
+      config:
+        enabled: true
+        serverName: design-canvas
+        maxFiles: 300
+        includeTests: false
+        includeArchive: false
+        designMode: false

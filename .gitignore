@@ -1,0 +1,43 @@
+# ===== 敏感：绝不被提交 =====
+.env
+*.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+*.credential
+*.token
+
+# ===== 依赖 / 运行时 / 本地工具 =====
+node_modules/
+.tools/
+out/
+logs/
+.design-canvas/
+**/dist/
+**/lib/
+*.tsbuildinfo
+.tmp-*/
+
+# ===== 归档 / 二进制打包 =====
+*.tgz
+*.zip
+*.rar
+
+# @dsh-brain 分包产物（junction-link 到 profile node_modules，构建产物不入库）
+packages/*/node_modules/
+
+# ===== 一次性 / AI 会话残留脚本 =====
+_read_session.mjs
+test_resolve.js
+test_resolve.mjs
+_probe_*.mjs
+_probe_tools.mjs
+
+# ===== IDE / OS =====
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

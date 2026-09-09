@@ -1,0 +1,10 @@
+# switchboard bundle patch — 打进每个 gen（控制面 + gen 交接插件的合并模块）。
+# 该插入让每个 gen 具备交接能力（admin / freeze / promote / guard / tool_apply / 两脑探针）。
+# 不要求 profile 提前装配额外服务（所需服务均在 web profile 内）。
+- insert:
+    - id: switchboard
+      name: '@dsh-brain/switchboard'
+      config:
+        adminPort: 0
+        gen: ''
+        mode: staging

@@ -1,0 +1,32 @@
+{
+  "name": "catpet-desktop-pet",
+  "version": "1.0.11",
+  "description": "DSH Cat Meme Desktop Pet Plugin - 在Web界面右下角显示猫MEME宠物，根据Agent工作状态做出不同动作",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "client": "./client/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "client"
+  ],
+  "peerDependencies": {
+    "cordis": "^3.0.0"
+  },
+  "keywords": [
+    "dsh",
+    "cordis",
+    "plugin",
+    "desktop-pet",
+    "cat",
+    "meme"
+  ],
+  "author": "",
+  "license": "MIT"
+}

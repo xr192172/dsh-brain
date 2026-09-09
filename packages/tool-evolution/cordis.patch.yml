@@ -1,0 +1,6 @@
+# tool-evolution bundle patch — 工具自进化（适应度采集 + LLM 打分）。
+- insert:
+    - id: tool-evolution
+      name: '@dsh-brain/tool-evolution'
+      config:
+        maxReviews: 8

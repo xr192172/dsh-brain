@@ -1,0 +1,31 @@
+{
+  "name": "@dsh-brain/key-pool-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "description": "多 key 轮换反代插件：在本地端口起一个 OpenAI 兼容反向代理，按 key 池轮换作为 AGNES 下游凭据。遇 429/5xx/网络错误标记该 key 冷却并换 key 重试（CACHE_AWARE=false 的限流即轮换语义）。",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^22.0.0"
+  }
+}

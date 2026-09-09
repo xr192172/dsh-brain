@@ -1,0 +1,308 @@
+/**
+ * design-canvas-bridge — design-canvas 原生接入桥（@dsh-brain/design-canvas-bridge）。
+ *
+ * 分工：
+ *   - MCP 承载：DSH 原生 @deepseek-ai/dsh-mcp-client 以 stdio 连 design-canvas，
+ *     把 55 个工具注册到 ctx.tools，命名空间 `mcp__<serverName>__<rawName>`
+ *     （如 `mcp__design-canvas__import_project` / `explore_code` / `impact_analysis`）。
+ *   - 本插件：在用户“选中/新建工作区”时，自动调用 `import_project` 对工作区做
+ *     前置解析 —— tree-sitter 建立符号/import/调用边/类型引用索引并持久化 DSL，
+ *     之后 explore_code / find_references / impact_analysis 等直接走已建索引（AST 前置工作）。
+ *
+ * 触发点：包一层 `ctx.workspaceRegistry.create(path, title)`。工作区建立即取
+ * `workspace.path`（realpath 规范路径）→ 预热 import_project。按规范路径去重 + 在途合并，
+ * 不阻塞 create 返回；工具未就绪（mcp-client 尚未连上）时静默跳过、不抛错。
+ */
+import type { Context, Service } from '@deepseek-ai/cordis'
+import { z } from 'zod'
+import path from 'node:path'
+import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+import type { Workspace } from '@deepseek-ai/dsh-workspace'
+// 触发 @deepseek-ai/dsh-tools 的 Context.tools 声明合并（纯类型，无运行时副作用）
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { CallId } from '@deepseek-ai/dsh-llm'
+
+let callSeq = 0
+
+export const name = 'design-canvas-bridge'
+// 顶层声明这两个关节：apply 时已就绪；mcp-client 的 ToolRuntime 同属 ctx.tools，
+// 但其工具注册是异步的，故预热前仍需 get() 判在。
+export const inject: string[] = ['workspaceRegistry', 'tools']
+
+export interface Config {
+  /** 总开关。 */
+  enabled: boolean
+  /** mcp-client 实例的 serverName（与它的 StdioConfig.serverName 一致，决定 mcp__<serverName>__ 前缀）。 */
+  serverName: string
+  /** import_project.max_files：默认 300，防大项目失控。 */
+  maxFiles: number
+  /** 是否索引测试文件（默认 false，测试通常是架构噪声）。 */
+  includeTests: boolean
+  /** 是否索引归档/历史目录（默认 false）。 */
+  includeArchive: boolean
+  /** 设计模式：聚合文件到目录层级而非每个文件一个节点（默认 false）。 */
+  designMode: boolean
+  /**
+   * 深度注入的内核仓库根目录（含 dist/src/tools/）。非空则启用 `symbol_edit`
+   * 复合工具：本进程直接 `import` design-canvas 内核的 editCode / findReferences
+   * 纯函数串联（不走 stdio MCP 子进程）。这也绕开了"工具内再 execute 其它 MCP
+   * 工具"的嵌套调度问题——深度注入没有经 ctx.tools 的二次工具调用。
+   */
+  kernelDir: string
+}
+
+export const Config = z.object({
+  enabled: z.boolean().default(true),
+  serverName: z.string().default('design-canvas'),
+  maxFiles: z.number().int().min(1).max(10000).default(300),
+  includeTests: z.boolean().default(false),
+  includeArchive: z.boolean().default(false),
+  designMode: z.boolean().default(false),
+  kernelDir: z.string().default(''),
+})
+
+/** 从规范路径取一个 import_project 可用的 feature 名（只允许 [a-zA-Z0-9_-]）。 */
+function featureNameFrom(canonicalPath: string): string {
+  const base = canonicalPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? 'ws'
+  const feat = base.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '')
+  return feat || 'ws'
+}
+
+/**
+ * 预热一次工作区：去重 + 在途合并。工具未注册（MCP 还没连上）时静默跳过，
+ * import_project 失败记录日志但不外抛（create 链不能被预热拖垮）。
+ */
+function warm(ctx: Context, inFlight: Set<string>, imported: Set<string>, toolName: string, canonicalPath: string, config: Config): void {
+  if (!config.enabled) return
+  if (imported.has(canonicalPath) || inFlight.has(canonicalPath)) return
+  if (!ctx.tools.get(toolName)) {
+    console.log(`[design-canvas-bridge] '${toolName}' 尚未就绪，跳过 ${canonicalPath} 预热（mcp-client 连接中？）`)
+    return
+  }
+  const feature = featureNameFrom(canonicalPath)
+  inFlight.add(canonicalPath)
+  const run = ctx.tools
+    .execute({
+      name: toolName,
+      callId: CallId(`ws-prewarm-${++callSeq}-${Date.now()}`),
+      arguments: {
+        project_dir: canonicalPath,
+        feature,
+        max_files: config.maxFiles,
+        include_tests: config.includeTests,
+        include_archive: config.includeArchive,
+        ...(config.designMode ? { design_mode: true } : {}),
+      },
+      signal: new AbortController().signal,
+    })
+    .then(() => {
+      imported.add(canonicalPath)
+      console.log(`[design-canvas-bridge] 已预热 ${canonicalPath} -> feature "${feature}"`)
+    })
+    .catch((err: unknown) => {
+      console.log(`[design-canvas-bridge] 预热失败 ${canonicalPath}: ${err instanceof Error ? err.message : String(err)}`)
+    })
+    .finally(() => inFlight.delete(canonicalPath))
+  // 不 await：预热是后台工作，不阻塞 create。run 内部的 catch 已吞掉错误。
+  void run
+}
+
+interface ReferenceFileLite {
+  file: string
+  refs: Array<{ offset: number; line: number; kind?: string }>
+}
+interface FoundRefsLite {
+  ok: boolean
+  symbol?: string
+  importerCount?: number
+  importers?: ReferenceFileLite[]
+  blocked?: string[]
+}
+interface EditResultLite {
+  message: string
+}
+interface KernelModule {
+  editCode: (args: Record<string, unknown>) => Promise<EditResultLite>
+  findReferences: (args: Record<string, unknown>) => Promise<FoundRefsLite>
+}
+
+/** 动态加载 design-canvas 内核（进程内，非 stdio 子进程）。失败即抛，由调用方兜底。 */
+async function loadKernel(kernelDir: string): Promise<KernelModule> {
+  const toolsDir = path.join(kernelDir, 'dist', 'src', 'tools')
+  const ec = (await import(pathToFileURL(path.join(toolsDir, 'edit_code.js')).href)) as {
+    editCode: KernelModule['editCode']
+  }
+  const fr = (await import(pathToFileURL(path.join(toolsDir, 'find_references.js')).href)) as {
+    findReferences: KernelModule['findReferences']
+  }
+  return { editCode: ec.editCode, findReferences: fr.findReferences }
+}
+
+function shortErr(e: unknown): string {
+  const m = e instanceof Error ? e.message : String(e)
+  return m.length > 200 ? `${m.slice(0, 200)}…` : m
+}
+
+export function apply(ctx: Context, config: Config): void {
+  const importToolName = `mcp__${config.serverName}__import_project`
+  const capMapToolName = `mcp__${config.serverName}__capability_map`
+  console.log(`[design-canvas-bridge] config: serverName=${config.serverName} kernelDir=${JSON.stringify(config.kernelDir)} enabled=${config.enabled}`)
+  const imported = new Set<string>()
+  const inFlight = new Set<string>()
+  // 记录已索引的项目（feature → 状态），供轻量工具按需返回，不把 AST 全量回灌模型上下文。
+  const indexedFeatures = new Map<string, { projectDir: string; feature: string; importedAt: number }>()
+
+  // 拦截工作区建立：选中/新建工作区即触发 AST + 符号索引前置。
+  const registry = ctx.workspaceRegistry as WorkspaceRegistryLike
+  const originalCreate = registry.create.bind(registry)
+  registry.create = (async (path: string, title?: string): Promise<Workspace> => {
+    const workspace = await originalCreate(path, title)
+    const feature = featureNameFrom(workspace.path)
+    warm(ctx, inFlight, imported, importToolName, workspace.path, config)
+    indexedFeatures.set(feature, { projectDir: workspace.path, feature, importedAt: Date.now() })
+    return workspace
+  }) as never
+
+  // 轻量工具：design_canvas_index —— 返回"已索引工作区 + 能力线导航地图（capability_map）"，head 截断，
+  // 让模型先看地图再挑具体工具精查，而非反复 import_project 全量；对标"索引先行 + 按需精取"。
+  ctx.tools.register(defineTool({
+    name: 'design_canvas_index',
+    description:
+      '查询所有已被 design-canvas 预热/索引完成的工作区，以及 design-canvas 全量能力线和工具导航地图（轻量、按需），用于在需要符号/关系检索前先定位该用哪个工具。',
+    parameters: {
+      lane: {
+        type: 'string',
+        description: '可选：只取某条能力线（design/refactor/observe/harvest/cross/meta），不传返回全量地图',
+      },
+    },
+    output: {
+      schema: { type: 'string', description: '精简文本：索引状态 + 能力地图（超 4096 字符会头部截断）' },
+      render: (_args, value) => [{ type: 'text' as const, text: value }],
+    },
+    async execute(args) {
+      const lane = args.lane
+      const featureList = Array.from(indexedFeatures.values())
+        .map((v) => `  - ${v.feature} -> \`${v.projectDir}\``)
+        .join('\n')
+      const header = `### Design Canvas 索引状态\n\n已预热索引的工作区：\n${featureList || '  (暂无，选中/新建工作区后自动预热)'}\n\n### 能力导航地图\n\n`
+
+      if (!ctx.tools.get(capMapToolName)) {
+        return `${header}[design-canvas-bridge] capability_map 工具未就绪（MCP server 未启动/连接中），请稍后重试。`
+      }
+      const capResult = (await ctx.tools.execute({
+        name: capMapToolName,
+        callId: CallId(`capmap-index-${Date.now()}`),
+        arguments: lane ? { lane } : {},
+        signal: new AbortController().signal,
+      })) as unknown as { content?: { type?: string; text?: string }[] }
+      const mapText = capResult?.content?.[0]?.text ?? '(capability_map 无返回)'
+      const full = header + mapText
+      return full.length > 4096 ? full.slice(0, 4096) + '\n...(尾部截断；按需传 lane 精查单条能力线)' : full
+    },
+  }))
+
+  // ── 深度注入 / 精准编辑（symbol_edit）──────────────────────────────────────
+  // 探针与 V1 合一：不走 stdio MCP 子进程，而是本进程动态 `import` design-canvas
+  // 内核的 editCode / findReferences 纯函数直接串联（见 loadKernel）。因此不存在
+  // "工具内再 ctx.tools.execute 其它 MCP 工具"的嵌套调度坑——深度注入天然绕开。
+  // 不引内嵌 LLM：模型先给出结构化 file/op/symbol/code，工具负责"影响面→精准落盘→回报"。
+  // 命名：用 symbol_edit（而非 design_canvas_edit），不与原生 edit_code/edit_dsl 混淆，
+  // 也契合"基础 AST 解析层 + 自动编排能力"的定位。
+  if (config.kernelDir) {
+    const editEntry = path.join(config.kernelDir, 'dist', 'src', 'tools', 'edit_code.js')
+    const kernelReady = fs.existsSync(editEntry)
+    if (kernelReady) {
+      ctx.tools.register(defineTool({
+        name: 'symbol_edit',
+        description:
+          '符号级精准编辑（编排壳）：按 文件+符号名 定位 AST 边界后 replace/insert/delete/range。' +
+          '先算影响面（find_references 引用摘要），再精准落盘（edit_code 自带 re-parse 语法门 + 同名消歧，' +
+          'replace 要求新代码解析出同名符号防粘贴错函数），最后精简回报。不信行号/old_string，杜绝改错行/改错函数。',
+        parameters: {
+          project_dir: { type: 'string', description: '项目根目录（缺省取最近已预热工作区）' },
+          file: { type: 'string', description: '目标文件（相对 project_dir 或绝对路径）' },
+          op: {
+            type: 'string',
+            enum: ['replace', 'insert', 'delete', 'range'],
+            description: 'replace=替换符号(symbol+code 必填)；insert=插入新符号(code 必填, symbol 可选锚点=其后插入, 缺省文件末尾)；delete=删除符号(symbol 必填)；range=显式行区间(start/end+code)',
+          },
+          symbol: { type: 'string', description: '目标符号：replace/delete 必填（qualified_name 优先，短名兜底）；insert 可选锚点；range 不需要' },
+          parent: { type: 'string', description: '符号父级（类名 / Go receiver 类型名），同名消歧' },
+          code: { type: 'string', description: 'replace/insert 的新代码（完整符号定义）；range=区间新内容（空串=删除区间）' },
+          start: { type: 'integer', description: 'range 专用：1-based 含端点起始行' },
+          end: { type: 'integer', description: 'range 专用：1-based 含端点结束行' },
+          dry_run: { type: 'boolean', description: 'range 专用：true=只出 diff 预览 + 语法门结果，不写盘、不改索引' },
+          preflight: { type: 'boolean', description: '编辑前是否先算 find_references 影响面（默认 true）' },
+        },
+        output: {
+          schema: { type: 'string', description: '精简文本：影响面摘要 + 编辑结果（超 4096 字符头部截断）' },
+          render: (_args, value) => [{ type: 'text' as const, text: value }],
+        },
+        async execute(args) {
+          try {
+            const projectDir =
+              args.project_dir ??
+              (() => {
+                const list = Array.from(indexedFeatures.values())
+                return list.length > 0 ? list[list.length - 1].projectDir : null
+              })()
+            if (!projectDir) {
+              return 'project_dir 未指定，且当前无已预热工作区。请先选中/新建工作区（自动预热），或显式传 project_dir。'
+            }
+            const kernel = await loadKernel(config.kernelDir)
+            const lines: string[] = []
+
+            // 第一步：影响面（find_references），只读；失败不阻断编辑。
+            if (args.preflight !== false && args.symbol) {
+              try {
+                const refs = await kernel.findReferences({ project_dir: projectDir, file: args.file, symbol: args.symbol })
+                if (refs.ok) {
+                  const imp = (refs.importers ?? [])
+                    .slice(0, 6)
+                    .map((i) => `${i.file}[${i.refs.length}]`)
+                    .join(', ')
+                  lines.push(`● 影响面(${refs.symbol ?? args.symbol}): importer ${refs.importerCount ?? 0} 处${imp ? ` · ${imp}` : ''}`)
+                } else {
+                  lines.push(`● 影响面: ${(refs.blocked ?? ['无引用信息']).join('; ')}`)
+                }
+              } catch (e) {
+                lines.push(`● 影响面: 计算失败(${shortErr(e)})，继续编辑`)
+              }
+            }
+
+            // 第二步：精准落盘（edit_code，AST 定位 + 语法门，失败会拒绝写盘）。
+            const res = await kernel.editCode({
+              project_dir: projectDir,
+              file: args.file,
+              op: args.op,
+              symbol: args.symbol,
+              parent: args.parent,
+              code: args.code,
+              start: args.start,
+              end: args.end,
+              dry_run: args.dry_run,
+            })
+            lines.push(res.message)
+
+            const out = lines.join('\n')
+            return out.length > 4096 ? `${out.slice(0, 4096)}\n...（尾部截断）` : out
+          } catch (e) {
+            // 编辑失败下放 friendly error（不带 isError 崩溃），并提示核对参数。
+            return `符号编辑未执行：${shortErr(e)}（未写盘或原样返回；请核对 file/op/symbol/code 后重试，replace/delete 需给 symbol，replace/insert 需给 code）`
+          }
+        },
+      }))
+      console.log(`[design-canvas-bridge] symbol_edit 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+    } else {
+      console.log(`[design-canvas-bridge] 深度注入跳过：内核入口缺失 ${editEntry}`)
+    }
+  }
+
+  console.log(`[design-canvas-bridge] apply running; 预热工具=${importToolName} enabled=${config.enabled}`)
+}
+
+/** 便于拦截的类型别名（真正的实例由 @deepseek-ai/dsh-workspace 提供，类型上不透出可变 create）。 */
+interface WorkspaceRegistryLike extends Service {
+  create(path: string, title?: string): Promise<Workspace>
+}
