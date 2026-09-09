@@ -33,6 +33,8 @@ export interface Config {
   maxFolds: number
   /** 是否注入"价值选择"尾段指令（LLM 手动标记有价值内容，否则允许折叠）。默认开。 */
   enableValueRules: boolean
+  /** 是否注入"Code Mode 工具呈现"显式指令（顶层仅 run_code，其余走 tools.*）。默认开。 */
+  enableCodeModePrompt: boolean
 }
 
 export const Config = z.object({
@@ -40,6 +42,7 @@ export const Config = z.object({
   maxKeptFacts: z.number().int().min(1).default(32),
   maxFolds: z.number().int().min(1).default(40),
   enableValueRules: z.boolean().default(true),
+  enableCodeModePrompt: z.boolean().default(true),
 })
 
 /**
@@ -51,6 +54,13 @@ export const Config = z.object({
 const VALUE_RULES = `【价值保留规则】
 凡你觉得"后续可能还要用"的内容——尤其是工具返回里带有跨轮价值的事实——在下一行用 [[KEEP]]…[[/KEEP]] 包住一个要点标出（每次少而精，最多约 3 条）。conveyor 会把它持久保留进 kept[]，压缩折叠时不会丢失；未标记的冗余/长内容允许被折叠回收。
 对已滚到早期、即将被压缩的旧工具内容，也先确认其中是否仍有值得保留的要点，有就标出再放手。`
+
+/** Code Mode 工具呈现的显式指令：DSH 把此教学藏在 run_code description 里，
+ *  易被上下文压缩掩盖、以致模型仍去顶层试 grep/glob/read。这里以独立 tail 指令打明。 */
+const CODE_MODE_RULES = `【当前工具呈现模式：Code Mode】
+顶层面板仅在可直接调用 run_code 这一种工具。
+grep / glob / read / explore_code 等其余工具都只能作为 run_code 程序内的子工具调用：在 run_code 里写 \`await tools.<name>(args)\`（或 \`import { name } from "./tools"\`）来用它们——不要把 grep/glob/read 当作顶层面板里的独立函数直接调用，它们在 Code Mode 下顶层不可用。
+run_code 的入参是「一个 async 程序体」，不是普通工具参数表；如需直接顶层原生工具，请主动提示切换 native / dual 工具呈现模式。`
 
 /** 从工具结果文本里提取 `[[KEEP]]…[[/KEEP]]` 关键事实（I1.5 升格）。 */
 function extractKept(text: string, turn: number, seq: number): { text: string; turn: number; seq: number }[] {
@@ -218,6 +228,17 @@ export function apply(ctx: Context, config: Config): void {
         name: 'conveyor:value',
         order: 10_000, // 靠后，落在稳定的 system/tools 前缀之后
         text: () => VALUE_RULES,
+      })
+    })
+  }
+
+  // Code Mode 显式指令：让模型明确"顶层仅 run_code，其余经 tools.*"，避免它反复试顶层 grep。
+  if (config.enableCodeModePrompt) {
+    ctx.inject(['systemPrompt'], (spCtx) => {
+      spCtx.systemPrompt.context({
+        name: 'conveyor:tool-mode',
+        order: 10_100, // 比 value 规则更靠后，贴近尾端最醒目
+        text: () => CODE_MODE_RULES,
       })
     })
   }
