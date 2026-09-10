@@ -17,6 +17,8 @@ import type { Context, Service } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import path from 'node:path'
 import fs from 'node:fs'
+import os from 'node:os'
+import { execFile } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import v8 from 'node:v8'
 import { pathToFileURL } from 'node:url'
@@ -614,6 +616,52 @@ export function apply(ctx: Context, config: Config): void {
         },
       }))
       console.log(`[design-canvas-bridge] move_symbol 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+
+      ctx.tools.register(defineTool({
+        name: 'self_evolve',
+        description:
+          '自进化·单指令闭环（实验脑）：把一组改动(patch=文件+新内容)建进独立实验内核产物，' +
+          '让本次 staging 单独加载它并跑验证闸，通过才 flip、失败回滚且生产无损。' +
+          '内部复用 scripts/build-experiment-kernel.mjs + scripts/evolve.mjs。' +
+          '入参：patch（[{file,content}]，源在 src/src 下）、src（design-canvas 源码根，缺省用内核 kernelDir）、' +
+          'verify（可选验证脚本，须在控制面启动 env 的 VERIFY_ALLOW 白名单内）。返回交接结果。',
+        parameters: {
+          patch: { type: 'array', description: '改动列表 [{file:"src/tools/xxx.ts", content:"整文件新内容"}]' },
+          src: { type: 'string', description: 'design-canvas 源码根（缺省 kernelDir）' },
+          verify: { type: 'string', description: '可选验证脚本绝对路径（须在 VERIFY_ALLOW 白名单内）' },
+          out: { type: 'string', description: '可选实验内核产物目录（缺省自动临时目录）' },
+          admin: { type: 'string', description: '可选 switchboard admin 端口（默认 31800）' },
+        },
+        output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text' as const, text: v }] },
+        async execute(args) {
+          try {
+            const evolve = process.env.DSH_BRAIN_SCRIPTS
+              ? path.join(process.env.DSH_BRAIN_SCRIPTS, 'evolve.mjs')
+              : path.join(process.cwd(), 'scripts', 'evolve.mjs')
+            if (!fs.existsSync(evolve)) return `self_evolve 找不到 evolve.mjs（试了 ${evolve}）。可设 env DSH_BRAIN_SCRIPTS 指向 dsh-brain/scripts。`
+            const patches = Array.isArray(args.patch) ? (args.patch as Array<{ file: string; content?: string }>) : []
+            if (patches.length === 0) return 'self_evolve 需要 patch（[{file,content}]）——这是要实验的改动。'
+            const src = typeof args.src === 'string' && args.src ? args.src : config.kernelDir
+            const out = typeof args.out === 'string' && args.out ? args.out : path.join(os.tmpdir(), `evolve-kernel-${Date.now()}`)
+            const patchFile = path.join(os.tmpdir(), `evolve-patch-${Date.now()}.json`)
+            fs.writeFileSync(patchFile, JSON.stringify(patches), 'utf8')
+            const argv = [evolve, '--src', src, '--patch', patchFile, '--out', out]
+            if (typeof args.verify === 'string' && args.verify) argv.push('--verify', args.verify)
+            if (typeof args.admin === 'string' && args.admin) argv.push('--admin', args.admin)
+            const stdout = await new Promise<string>((res, rej) => {
+              execFile(process.execPath, argv, { cwd: process.cwd(), timeout: 500_000 }, (e, so, se) => {
+                if (e && !so) rej(new Error(se || e.message))
+                else res(so || se || '')
+              })
+            })
+            try { fs.rmSync(patchFile, { force: true }) } catch { /* 忽略 */ }
+            return stdout.length > 6000 ? `${stdout.slice(0, 6000)}\n...（尾部截断）` : stdout
+          } catch (e) {
+            return `self_evolve 失败：${shortErr(e)}`
+          }
+        },
+      }))
+      console.log(`[design-canvas-bridge] self_evolve 已注册（深度注入）`)
     } else {
       console.log(`[design-canvas-bridge] 深度注入跳过：内核入口缺失 ${editEntry}`)
     }
