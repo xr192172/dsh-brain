@@ -18,6 +18,7 @@ import { z } from 'zod'
 import path from 'node:path'
 import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import v8 from 'node:v8'
 import { pathToFileURL } from 'node:url'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 // 触发 @deepseek-ai/dsh-tools 的 Context.tools 声明合并（纯类型，无运行时副作用）
@@ -425,6 +426,13 @@ export function apply(ctx: Context, config: Config): void {
             if (!args.file || !args.symbol || !args.to) {
               return 'safe_rename 需要 file（定义文件）、symbol（旧名）、to（新名）。'
             }
+            // 未预热拦截：rename 需完整 import 闭包才保证不漏改；未预热时全仓即时扫描
+            // 会把整个项目解析常驻内存并卡死事件循环（已实测单进程升至 10GB）。定义文件不在
+            // 索引 → 拒绝执行，显式要求先 prewarm，从源头杜绝全仓扫描。
+            if (!isFileIndexed(projectDir, args.file)) {
+              console.log(`[dsb-rename] 未预热拦截 project=${projectDir} file=${args.file}`)
+              return '该项目未完整预热（符号/import 索引不完整）。为避免对全仓即时扫描导致卡顿与内存暴涨，本次未执行。请先调 design_canvas_prewarm({ "project_dir": <根路径> }) 建立索引后重试。'
+            }
             const kernel = await loadKernel(config.kernelDir)
             const dryRun = args.dry_run !== false // 默认安全预览
             const wantLiteral = args.report_literals !== false
@@ -486,6 +494,83 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  // ── 项目范围选择 + 预热工具：design_canvas_prewarm_scan ──
+  // 自动扫描已知路径（workspaceDir / home/临时等）列出候选项目，
+  // 供模型在调用 safe_rename/find_references 前明确选择目标目录，
+  // 避免盲目预热大仓或选错目录导致卡死。
+  ctx.tools.register(defineTool({
+    name: 'design_canvas_prewarm_scan',
+    description:
+      '扫描已知路径，列出候选项目目录（含 .design-canvas 索引状态），' +
+      '供模型在 safe_rename/find_references/symbol_edit 前明确选择目标。' +
+      '扫描路径：workspaceDir、home 下级常见源码目录、session 工作目录。' +
+      '返回格式：[{path, feature, indexed, fileCount, suggestion}]，' +
+      'suggestion=ready|prewarm|empty。建议先对 suggestion=empty 的候选跑 design_canvas_prewarm。',
+    parameters: {
+      scan_dirs: { type: 'array', items: { type: 'string' }, description: '额外扫描目录（可选，缺省用内置启发式）' },
+      max_depth: { type: 'integer', description: '扫描目录深度（缺省 3，防遍历过多）' },
+    },
+    output: {
+      schema: { type: 'string', description: '候选项目清单 + 索引状态 + 预热建议（头部截断）' },
+      render: (_args, value) => [{ type: 'text' as const, text: value }],
+    },
+    async execute(args) {
+      try {
+        const scanDirs: string[] = args.scan_dirs ?? []
+        const maxDepth = typeof args.max_depth === 'number' ? args.max_depth : 3
+        // 内置启发式扫描路径
+        const builtins: string[] = []
+        try { builtins.push(process.env.WORKSPACE_DIR ?? '') } catch { /* ignore */ }
+        try { builtins.push(process.env.HOME ?? process.env.USERPROFILE ?? '') } catch { /* ignore */ }
+        try { builtins.push(process.cwd()) } catch { /* ignore */ }
+        const candidates: Array<{ path: string; feature: string; indexed: boolean; fileCount: number; suggestion: string }> = []
+        const seen = new Set<string>()
+        const addCandidate = (p: string) => {
+          const rp = path.resolve(p)
+          if (seen.has(rp) || !fs.existsSync(rp)) return
+          seen.add(rp)
+          // 检查是否为项目根（含 .design-canvas 或 package.json/go.mod）
+          const hasDS = fs.existsSync(path.join(rp, '.design-canvas'))
+          const hasPM = fs.existsSync(path.join(rp, 'package.json')) || fs.existsSync(path.join(rp, 'go.mod'))
+          if (!hasDS && !hasPM) return
+          const idx = indexCounts(rp)
+          candidates.push({
+            path: rp,
+            feature: featureNameFrom(rp),
+            indexed: !!hasDS,
+            fileCount: idx?.files ?? 0,
+            suggestion: hasDS ? 'ready' : (hasPM ? 'prewarm' : 'empty'),
+          })
+        }
+        // 扫描内置路径
+        for (const d of builtins) {
+          if (!d) continue
+          addCandidate(d)
+          // 子目录扫描（限深度）
+          try {
+            const entries = fs.readdirSync(d, { withFileTypes: true }).filter(e => e.isDirectory() && e.name !== 'node_modules')
+            for (const e of entries.slice(0, 20)) addCandidate(path.join(d, e.name))
+          } catch { /* ignore */ }
+        }
+        // 扫描额外目录
+        for (const d of scanDirs) addCandidate(d)
+        if (candidates.length === 0) return '未发现候选项目（扫描路径均无 package.json/go.mod/.design-canvas）'
+        const lines = ['### 候选项目目录\n']
+        for (const c of candidates) {
+          const tag = c.indexed ? '✅' : (c.suggestion === 'prewarm' ? '⚠️' : '❓')
+          lines.push(`${tag} \`${c.path}\` (${c.fileCount} 文件) - ${c.suggestion}`)
+        }
+        lines.push('\n### 建议操作')
+        lines.push('- 已索引候选：直接调用 safe_rename/find_references/symbol_edit')
+        lines.push('- 未索引候选：先调用 design_canvas_prewarm 预热')
+        return lines.join('\n').slice(0, 4096)
+      } catch (e) {
+        return `扫描失败：${shortErr(e)}`
+      }
+    },
+  }))
+  console.log(`[design-canvas-bridge] design_canvas_prewarm_scan 已注册`)
+
   // ── 显式预热工具：design_canvas_prewarm ──
   // DSH 不经 workspaceRegistry.create 建工作区（全仓无该调用），原 create 拦截的自动预热
   // 从未触发。这里把预热主动权交给工具层：模型对某仓库跑 find/rename 前，先对其 project_dir
@@ -541,6 +626,47 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
   console.log(`[design-canvas-bridge] design_canvas_prewarm 已注册`)
+
+  // ── 内存诊断：dsh_memory_probe ──
+  // bridge 就跑在 gen 进程内，用 V8 原生抓当前进程内存构成（区分 V8 JS 堆 vs native/external/
+  // arrayBuffer），并可选写 heap snapshot 落盘——供定位那个偶发 10GB 的堆到底装了什么。
+  ctx.tools.register(defineTool({
+    name: 'dsh_memory_probe',
+    description:
+      '抓当前 gen 进程内存构成（RSS / V8 heap / external / arrayBuffers），可选写 V8 heap snapshot 文件。' +
+      '用于定位进程内存暴涨/泄漏源：若 heapUsed 大→JS 对象堆；若 external/arrayBuffers 大→native(如 sqlite/tree-sitter)。',
+    parameters: {
+      snapshot: { type: 'boolean', description: 'true=写 heap snapshot 到 <project_dir>/.design-canvas/heap-<ts>.heapsnapshot' },
+      project_dir: { type: 'string', description: 'heap snapshot 落盘目录的归属项目根（缺省 process.cwd）' },
+    },
+    output: {
+      schema: { type: 'string', description: '内存构成统计 + 可选 snapshot 路径' },
+      render: (_args, value) => [{ type: 'text' as const, text: value }],
+    },
+    async execute(args) {
+      const mb = (b: number | undefined): number => Math.round((b ?? 0) / 1048576)
+      const mu = process.memoryUsage()
+      const hs = v8.getHeapStatistics ? v8.getHeapStatistics() : undefined
+      const lines: string[] = []
+      lines.push(`RSS=${mb(mu.rss)}MB  heapTotal=${mb(mu.heapTotal)}MB  heapUsed=${mb(mu.heapUsed)}MB  external=${mb(mu.external)}MB  arrayBuffers=${mb(mu.arrayBuffers ?? 0)}MB`)
+      if (hs) {
+        lines.push(`V8 heapSizeLimit=${mb(hs.heap_size_limit)}MB  totalHeap=${mb(hs.total_heap_size)}MB  usedHeap=${mb(hs.used_heap_size)}MB`)
+      }
+      if (args.snapshot) {
+        try {
+          const dir = args.project_dir ? path.join(path.resolve(String(args.project_dir)), '.design-canvas') : process.cwd()
+          fs.mkdirSync(dir, { recursive: true })
+          const file = path.join(dir, `heap-${Date.now()}.heapsnapshot`)
+          const wrote = v8.writeHeapSnapshot(file)
+          lines.push(`heap snapshot 已写: ${wrote}`)
+        } catch (e) {
+          lines.push(`heap snapshot 失败: ${shortErr(e)}`)
+        }
+      }
+      return lines.join('\n')
+    },
+  }))
+  console.log(`[design-canvas-bridge] dsh_memory_probe 已注册`)
   console.log(`[design-canvas-bridge] apply running; 预热工具=${importToolName} enabled=${config.enabled}`)
 }
 
