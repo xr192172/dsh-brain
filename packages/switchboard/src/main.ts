@@ -186,6 +186,15 @@ if (isMain) {
     deferMs: envInt('SWITCH_DEFER_MS', 20_000),
     // verify 稳定观察窗口（ms）：flip 后再稳 2s 并二次探测，拦"probe 假 ok、稍后崩"的假成功
     verifyStableMs: envInt('SWITCH_VERIFY_STABLE_MS', 2_000),
+    // 可选验证闸（自进化·实验脑）：verifyCmd 非空则 staging 须跑该命令且 ok 才 flip。
+    ...(envStr('VERIFY_CMD', '') ? { verifyCmd: envStr('VERIFY_CMD', '') } : {}),
+    // 安全白名单：VERIFY_ALLOW=<path1>;<path2>...（verifyCmd 脚本须落在其中某目录前缀内）
+    verifyAllowList: envStr('VERIFY_ALLOW', '')
+      .split(/[;,]/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+    verifyTimeoutMs: envInt('VERIFY_TIMEOUT_MS', 120_000),
+    ...(envStr('VERIFY_CWD', '') ? { verifyCwd: envStr('VERIFY_CWD', '') } : {}),
   }
   boot(config)
 }

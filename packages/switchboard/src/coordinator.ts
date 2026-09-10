@@ -7,8 +7,9 @@
  * verify 失败 → 非破坏回滚 flip 回旧 gen。退役由控制面触发（非 agent 强杀）。
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { LeaseStore } from './lease.js'
 import type { FrontDoor } from './proxy.js'
 import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
@@ -31,10 +32,18 @@ export interface CoordinatorConfig {
   readyTimeoutMs: number
   freezeTimeoutMs: number
   retainMs: number
-  /** 延迟切换：>0 时先请活跃代收尾本轮再 spawn 新代（等 turn/end 或该毫秒数兜底）；0=关（立即切）。 */
+  /** delay切换：>0 时先请活跃代收尾本轮再 spawn 新代（等 turn/end 或该毫秒数兜底）；0=关（立即切）。 */
   deferMs: number
   /** verify 稳定观察窗口：flip 后 probe ok 仍需稳定存活该毫秒数（再探一次成功）才判定成功，拦截"probe 假 ok、稍后进程才崩"的假成功。 */
   verifyStableMs: number
+  /** 可选验证闸（自进化·实验脑）：非空时，staging 除探活外还须跑该命令且返回 ok 才 flip。默认空=只探活。 */
+  verifyCmd?: string
+  /** 安全白名单：verifyCmd 指向的可执行/脚本的绝对路径（目录前缀匹配）。不在白名单 → 拒绝执行并回滚（安全失败）。 */
+  verifyAllowList?: string[]
+  /** verifyCmd 执行超时 ms（默认 120000）。超时视为失败。 */
+  verifyTimeoutMs?: number
+  /** verifyCmd 工作目录（缺省 cfg.workDir）。 */
+  verifyCwd?: string
 }
 
 interface Cage {
@@ -268,6 +277,22 @@ export class Coordinator {
       return this.stage
     }
 
+    // 可选验证闸（自进化·实验脑）：verifyCmd 非空时，staging 还须跑白名单内命令且返回 ok 才 flip。
+    if (cfg.verifyCmd) {
+      const gate = await this.runVerifyGate(cfg, b, old)
+      if (!gate.ok) {
+        this.swapActive(old)
+        old.inst.role = 'active'
+        old.inst.state = 'active'
+        this.stage = 'rolled-back'
+        this.recordResult({ t: Date.now(), result: 'rolled-back', note: `(verify-gate 失败) 已回滚旧代 ${old.inst.gen}：${gate.summary}`, gen: b.inst.gen })
+        await b.spawned.stop()
+        return this.stage
+      }
+      this.record('verify-gate ok: ' + gate.summary)
+      this.stage = 'verify'
+    }
+
     // verify 竞态修复：probe ok 后仍留稳定观察窗——sleep verifyStableMs 再探一次，
     // 两次连续 ok 才算成功。拦截 gen-3089 型"health 假 ok、隔几毫秒进程才崩"的假成功；
     // 窗口内晚崩会被第二次 probe 拦下并非破坏回滚。
@@ -300,6 +325,86 @@ export class Coordinator {
     } finally {
       this.front.setLocked(false)
     }
+  }
+
+  private async runVerifyGate(
+    cfg: CoordinatorConfig,
+    b: Cage,
+    old: Cage,
+  ): Promise<{ ok: boolean; summary: string }> {
+    const cmd = cfg.verifyCmd!
+    const allow = cfg.verifyAllowList ?? []
+    const timeoutMs = cfg.verifyTimeoutMs ?? 120_000
+    const parts = cmd.trim().split(/\s+/).filter(Boolean)
+    if (parts.length === 0) return { ok: false, summary: 'verifyCmd 为空' }
+    let exe = parts[0]
+    let script = parts[0]
+    let rest = parts.slice(1)
+    // 解释器（node/python…）：首 token 是解释器，真正脚本是第二 token
+    if (['node', 'node.exe', 'python', 'python3', 'deno'].includes(exe.toLowerCase())) {
+      script = parts[1] ?? ''
+      rest = parts.slice(2)
+    }
+    const scriptAbs = script && (isAbsolute(script) ? script : resolve(cfg.verifyCwd ?? cfg.workDir, script))
+    if (!scriptAbs || !this.inVerifyAllow(scriptAbs, allow)) {
+      return { ok: false, summary: `verifyCmd 脚本不在白名单(verifyAllowList)→安全拒绝：${scriptAbs || script}` }
+    }
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      STAGING_PORT: String(b.inst.port),
+      ACTIVE_PORT: String(old.inst.port),
+    }
+    return new Promise((res) => {
+      const child = spawn(exe, [scriptAbs, ...rest], {
+        cwd: cfg.verifyCwd ?? cfg.workDir,
+        env,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let out = ''
+      let err = ''
+      child.stdout.on('data', (d: Buffer) => {
+        out += d.toString()
+        if (out.length > 2_000_000) child.kill()
+      })
+      child.stderr.on('data', (d: Buffer) => {
+        err += d.toString()
+      })
+      const timer = setTimeout(() => {
+        try {
+          child.kill()
+        } catch {
+          /* ignore */
+        }
+      }, timeoutMs)
+      child.on('error', (e) => {
+        clearTimeout(timer)
+        res({ ok: false, summary: 'spawn 失败: ' + e.message })
+      })
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        const line = (out.trim().split(/\r?\n/).find((l) => l.trim().startsWith('{')) ?? out).trim()
+        let gate: { ok?: boolean; reason?: string } = {}
+        try {
+          gate = JSON.parse(line)
+        } catch {
+          gate = {}
+        }
+        res({
+          ok: gate.ok === true,
+          summary: gate.ok === true ? `cmd exit=${code ?? '?'}${gate.reason ? ' ' + gate.reason.slice(0, 120) : ''}` : `cmd exit=${code ?? '?'} 非ok：${(line || err).slice(0, 160)}`,
+        })
+      })
+    })
+  }
+
+  /** 校验脚本绝对路径是否落在白名单（allow 中任一项为目录前缀，或相等）。 */
+  private inVerifyAllow(scriptAbs: string, allow: string[]): boolean {
+    if (allow.length === 0) return false
+    return allow.some((a) => {
+      const p = resolve(a)
+      return scriptAbs === p || scriptAbs.startsWith(p.endsWith(join('\\', '/')) ? p : p + '\\')
+    })
   }
 
   private async waitCatchUp(b: Cage, target: number): Promise<boolean> {
