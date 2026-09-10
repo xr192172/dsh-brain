@@ -271,7 +271,10 @@ export class Coordinator {
   private async waitCatchUp(b: Cage, target: number): Promise<boolean> {
     const deadline = Date.now() + this.cfg.readyTimeoutMs
     for (;;) {
-      const h = await b.client.health(3000)
+      // 自愈核心：staging 进程已死（崩溃/强杀）→ 立即判失败回滚，不等 readyTimeout 假死。
+      // 此前只轮询 health()，staging 崩后连不上一个死进程，会一直磨到超时，表现为"换不了代卡死"。
+      if (!pidAliveFrom(b.inst.pid)) return false
+      const h = await b.client.health(3000).catch(() => null)
       if (h && h.caughtUpSeq >= target) return true
       if (Date.now() > deadline) return false
       await new Promise((r) => setTimeout(r, 500))
@@ -306,5 +309,15 @@ function tailFile(path: string, n: number): string {
     return lines.slice(-n).join('\n')
   } catch {
     return '(boot.log unreadable)'
+  }
+}
+
+/** PID 是否存活（signal 0 探活；ESRCH=不存在，EPERM=存在但无权，视为存活）。 */
+function pidAliveFrom(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
   }
 }
