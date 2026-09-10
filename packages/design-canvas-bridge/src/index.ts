@@ -237,6 +237,11 @@ function isFileIndexed(projectDir: string, file?: string): boolean {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  // 自进化·实验脑：允许逐 gen 用 env 覆盖内核目录（加载改动后的独立内核产物），不污染共享内核。
+  // switchboard 可用 GEN_ENV_EXTRA 只给某个（实验）gen 注入 DESIGN_CANVAS_KERNEL_DIR=<独立 dist>。
+  if (process.env.DESIGN_CANVAS_KERNEL_DIR) {
+    config.kernelDir = process.env.DESIGN_CANVAS_KERNEL_DIR
+  }
   const importToolName = `mcp__${config.serverName}__import_project`
   const capMapToolName = `mcp__${config.serverName}__capability_map`
   console.log(`[design-canvas-bridge] config: serverName=${config.serverName} kernelDir=${JSON.stringify(config.kernelDir)} enabled=${config.enabled}`)
