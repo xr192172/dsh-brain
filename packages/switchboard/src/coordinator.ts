@@ -267,27 +267,14 @@ export class Coordinator {
     this.stage = 'verify'
     const probe = await b.client.probe(5000)
     if (!probe.ok) {
-      // 非破坏回滚：指回旧 active，退役 B
-      this.swapActive(old)
-      old.inst.role = 'active'
-      old.inst.state = 'active'
-      this.stage = 'rolled-back'
-      this.recordResult({ t: Date.now(), result: 'rolled-back', note: '(probe 失败) 已回滚旧代 ' + old.inst.gen, gen: b.inst.gen })
-      await b.spawned.stop()
-      return this.stage
+      return this.rollbackFlip(old, b, cfg, '(probe 失败) 已回滚旧代 ' + old.inst.gen)
     }
 
     // 可选验证闸（自进化·实验脑）：verifyCmd 非空时，staging 还须跑白名单内命令且返回 ok 才 flip。
     if (cfg.verifyCmd) {
       const gate = await this.runVerifyGate(cfg, b, old)
       if (!gate.ok) {
-        this.swapActive(old)
-        old.inst.role = 'active'
-        old.inst.state = 'active'
-        this.stage = 'rolled-back'
-        this.recordResult({ t: Date.now(), result: 'rolled-back', note: `(verify-gate 失败) 已回滚旧代 ${old.inst.gen}：${gate.summary}`, gen: b.inst.gen })
-        await b.spawned.stop()
-        return this.stage
+        return this.rollbackFlip(old, b, cfg, `(verify-gate 失败) 已回滚旧代 ${old.inst.gen}：${gate.summary}`)
       }
       this.record('verify-gate ok: ' + gate.summary)
       this.stage = 'verify'
@@ -300,13 +287,7 @@ export class Coordinator {
       await new Promise((r) => setTimeout(r, cfg.verifyStableMs))
       const probe2 = await b.client.probe(5000)
       if (!probe2.ok) {
-        this.swapActive(old)
-        old.inst.role = 'active'
-        old.inst.state = 'active'
-        this.stage = 'rolled-back'
-        this.recordResult({ t: Date.now(), result: 'rolled-back', note: '(verify 稳定期探测失败) 已回滚旧代 ' + old.inst.gen, gen: b.inst.gen })
-        await b.spawned.stop()
-        return this.stage
+        return this.rollbackFlip(old, b, cfg, '(verify 稳定期探测失败) 已回滚旧代 ' + old.inst.gen)
       }
     }
 
@@ -405,6 +386,21 @@ export class Coordinator {
       const p = resolve(a)
       return scriptAbs === p || scriptAbs.startsWith(p.endsWith(join('\\', '/')) ? p : p + '\\')
     })
+  }
+
+  /** 非破坏回滚：指回旧 active + 写租约回授给它（flip 已 grant 给 b，需覆盖回旧代）+ 退役 staging + 记录。 */
+  private rollbackFlip(old: Cage, b: Cage, cfg: CoordinatorConfig, note: string): HandoverStage {
+    this.swapActive(old)
+    old.inst.role = 'active'
+    old.inst.state = 'active'
+    this.stage = 'rolled-back'
+    // 修位：flip 时 lease.grant 已把写租约/首门赋给 b(staging)；回滚必须回授给存活的旧 active，
+    // 否则 handover-status/status 的 standard activeGen 会指向已被 stop 的 staging（观察到的脏态）。
+    // 新 token 由 grant 生成，旧代心跳若不匹配由 coordinator 的 crash-recovery(lease.isHeld=false→re-grant) 兜底。
+    this.lease.grant(old.inst.gen, old.inst.port, old.inst.pid, cfg.ttlMs, -1, 'replay')
+    this.recordResult({ t: Date.now(), result: 'rolled-back', note, gen: b.inst.gen })
+    void b.spawned.stop()
+    return this.stage
   }
 
   private async waitCatchUp(b: Cage, target: number): Promise<boolean> {
