@@ -152,10 +152,26 @@ interface RenameSymbolsResultLite {
   literals?: Array<{ index: number; item?: { symbol?: string; to?: string }; needle: string; toSnake: string; matches: Array<{ file: string; line: number; snippet: string; decision?: string }> }>
   externalRefs?: Array<{ fromAbs: string; source: string; resolved: string }>
 }
+interface MoveSymbolResultLite {
+  ok: boolean
+  symbol?: string
+  to_file?: string
+  filesWritten?: number
+  dryRun?: boolean
+  source?: { file: string; removed?: string[]; startLine?: number; endLine?: number }
+  target?: { file: string; created?: boolean; symbol?: string }
+  redirects?: Array<{ file: string; oldSource: string; newSource: string; symbol: string }>
+  affectedFiles?: string[]
+  blocked?: string[]
+  externalRefs?: Array<{ fromAbs: string; source: string; resolved: string }>
+  toSymbolDeferred?: boolean
+}
+
 interface KernelModule {
   editCode: (args: Record<string, unknown>) => Promise<EditResultLite>
   findReferences: (args: Record<string, unknown>) => Promise<FoundRefsLite>
   renameSymbols: (args: Record<string, unknown>) => Promise<RenameSymbolsResultLite>
+  moveSymbol: (args: Record<string, unknown>) => Promise<MoveSymbolResultLite>
 }
 
 /** 动态加载 design-canvas 内核（进程内，非 stdio 子进程）。失败即抛，由调用方兜底。 */
@@ -170,7 +186,10 @@ async function loadKernel(kernelDir: string): Promise<KernelModule> {
   const rs = (await import(pathToFileURL(path.join(toolsDir, 'rename_symbols.js')).href)) as {
     renameSymbols: KernelModule['renameSymbols']
   }
-  return { editCode: ec.editCode, findReferences: fr.findReferences, renameSymbols: rs.renameSymbols }
+  const sm = (await import(pathToFileURL(path.join(toolsDir, 'symbol_move.js')).href)) as {
+    moveSymbol: KernelModule['moveSymbol']
+  }
+  return { editCode: ec.editCode, findReferences: fr.findReferences, renameSymbols: rs.renameSymbols, moveSymbol: sm.moveSymbol }
 }
 
 function shortErr(e: unknown): string {
@@ -517,6 +536,79 @@ export function apply(ctx: Context, config: Config): void {
         },
       }))
       console.log(`[design-canvas-bridge] safe_rename 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+
+      ctx.tools.register(defineTool({
+        name: 'move_symbol',
+        description:
+          '跨文件移动模块级符号（语义重构）：把 file 里的模块级符号 symbol 搬到 to_file，' +
+          '并自动把工作区内所有「仅引入该符号」的 import 目标从源文件重定向到 to_file；' +
+          '导入到工作区外（外部仓库）的引用只反馈不追外。目标撞名 / namespace import / ' +
+          'export * 转发 / 一条 import 混入其它符号 → 整体不落盘并说明。缺省安全预览，' +
+          'dry_run:false 才真正写盘。v1 仅 TS/JS 模块级符号，to_symbol 改名未启用。',
+        parameters: {
+          project_dir: { type: 'string', description: '目标项目根目录（相对/绝对均可定位文件）' },
+          file: { type: 'string', description: '定义符号的源文件' },
+          symbol: { type: 'string', description: '要移动的模块级符号名' },
+          to_file: { type: 'string', description: '目标文件（不存在则创建；仅 TS/JS）' },
+          to_symbol: { type: 'string', description: '可选：改名为该名（v1 未启用，仅提示）' },
+          dry_run: { type: 'boolean', description: '缺省 true=只预览不落盘；false=执行' },
+        },
+        output: {
+          schema: { type: 'string' },
+          render: (_args, value) => [{ type: 'text' as const, text: value }],
+        },
+        async execute(args) {
+          try {
+            const projectDir =
+              args.project_dir ??
+              (() => {
+                const list = Array.from(indexedFeatures.values())
+                return list.length > 0 ? list[list.length - 1].projectDir : null
+              })()
+            if (!projectDir) return 'move_symbol 需要 project_dir（或先选中/预热一个工作区）。'
+            if (!args.file || !args.symbol || !args.to_file) return 'move_symbol 需要 file（源）、symbol（要移动的符号）、to_file（目标）。'
+            // 未预热拦截：闭包找 importer 需 import 索引；无索引 fallback 全扫 root 会卡顿/爆内存
+            if (!isFileIndexed(projectDir, args.file)) {
+              console.log(`[dsb-move] 未预热拦截 project=${projectDir} file=${args.file}`)
+              return '该项目未完整预热。为避免全仓即时扫描导致卡顿与内存暴涨，本次未执行。请先 design_canvas_prewarm({ project_dir }) 建索引后重试。'
+            }
+            const kernel = await loadKernel(config.kernelDir)
+            const dryRun = args.dry_run !== false
+            const res = await kernel.moveSymbol({
+              project_dir: projectDir,
+              file: args.file,
+              symbol: args.symbol,
+              to_file: args.to_file,
+              to_symbol: args.to_symbol,
+              dry_run: dryRun,
+            })
+            if (!res.ok) return `移动未执行（${(res.blocked ?? []).join('; ') || '未知原因'}），本次未落盘。`
+            const lines: string[] = []
+            if (res.source) {
+              lines.push(`● 源文件删除 ${res.source.file}（L${res.source.startLine}-${res.source.endLine}）:`)
+              for (const l of (res.source.removed ?? []).slice(0, 12)) lines.push(`   - ${l.trimEnd()}`)
+            }
+            if (res.target) lines.push(`● 目标文件 ${res.target.file}（${res.target.created ? '新建' : '追加'}）: + ${res.target.symbol ?? res.symbol}`)
+            lines.push(`● import 重定向 ${res.redirects?.length ?? 0} 处（远程名/用法不变，仅 source 改向）:`)
+            for (const d of (res.redirects ?? []).slice(0, 10)) lines.push(`   - ${d.file}: ${d.oldSource} → ${d.newSource}`)
+            if (res.externalRefs && res.externalRefs.length > 0) {
+              lines.push(`● 项目边界（不追外）: ${res.externalRefs.length} 处 import 解析到工作区外，未改动外部`)
+              for (const e of res.externalRefs.slice(0, 8)) {
+                const shown = e.resolved ? (e.resolved.includes(projectDir) ? e.resolved.slice(projectDir.length + 1) : e.resolved) : e.source
+                lines.push(`   - ${shown}${e.source ? `（import ${e.source}）` : ''}`)
+              }
+            }
+            if (res.toSymbolDeferred) lines.push('⚠ to_symbol 改名未启用（v1 只移动不改名），改名请走 safe_rename。')
+            console.log(`[dsb-move] done dry=${dryRun} files=${res.filesWritten ?? 0} redirects=${res.redirects?.length ?? 0}`)
+            if (dryRun) lines.push('（以上为预览，未写盘；确认后请以 dry_run:false 重放执行）')
+            const joined = lines.join('\n')
+            return joined.length > 4096 ? `${joined.slice(0, 4096)}\n...（尾部截断）` : joined
+          } catch (e) {
+            return `移动未执行：${shortErr(e)}（本次未落盘；请核对 file/symbol/to_file 后重试）`
+          }
+        },
+      }))
+      console.log(`[design-canvas-bridge] move_symbol 已注册（深度注入，kernelDir=${config.kernelDir}）`)
     } else {
       console.log(`[design-canvas-bridge] 深度注入跳过：内核入口缺失 ${editEntry}`)
     }
