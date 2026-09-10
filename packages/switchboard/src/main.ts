@@ -59,6 +59,7 @@ function boot(config: CoordinatorConfig): void {
     mode: 'active',
     genDir,
     envExtra: config.envExtra,
+    inspectPort: config.inspectPortBase ? config.inspectPortBase + (port - config.portBase) : undefined,
   })
   const activeCage = {
     inst: {
@@ -172,6 +173,7 @@ if (isMain) {
     profile: envStr('WEB_PROFILE', 'web'),
     portBase: envInt('GEN_PORT_BASE', 3081),
     adminBase: envInt('HANDOVER_ADMIN_PORT_BASE', 31810),
+    inspectPortBase: envInt('SWITCH_INSPECT_PORT_BASE', 32810),
     coordDir: envStr('WORK_DIR', join(home, 'switchboard')),
     workDir: envStr('WORK_DIR', join(home, 'switchboard')),
     envExtra,

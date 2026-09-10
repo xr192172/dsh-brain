@@ -14,7 +14,7 @@ import type { FrontDoor } from './proxy.js'
 import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
 import { AdminClient } from './adminclient.js'
 import { writeOverlay } from './overlay.js'
-import type { GenInstance, HandoverStage, StateRecord } from './handover-protocol.js'
+import type { GenInstance, HandoverStage, StateRecord, FreezeReply } from './handover-protocol.js'
 
 export interface CoordinatorConfig {
   nodeBin: string
@@ -22,6 +22,8 @@ export interface CoordinatorConfig {
   profile: string
   portBase: number
   adminBase: number
+  /** 外部 memory_observe 观测用的 --inspect 端口基址；gen 的 inspect = base + (port - portBase)。0=关闭。 */
+  inspectPortBase: number
   coordDir: string
   workDir: string
   envExtra?: Record<string, string>
@@ -173,6 +175,7 @@ export class Coordinator {
       overlayFile,
       genDir,
       envExtra: cfg.envExtra,
+      inspectPort: cfg.inspectPortBase ? cfg.inspectPortBase + (port - cfg.portBase) : undefined,
     } satisfies SpawnOptions)
     const b: Cage = {
       inst: {
@@ -201,24 +204,43 @@ export class Coordinator {
 
     this.stage = 'freeze'
     if (fail === 'freeze') return this.abort(b, 'injected-fail-freeze')
-    const fr = await this.active.client.freeze(cfg.freezeTimeoutMs)
-    if (!fr.static || fr.lastSeq < 0) return this.abort(b, 'freeze-a-not-static')
-    this.record('freeze a lastSeq=' + fr.lastSeq)
+    // 强切兜底：freeze 依赖旧代配合（调用 gen 内 admin）。旧代主线程被占/僵死时，freeze 会超时抛错，
+    // 若不管它，handover 卡死在 freeze 且无 abort/无推进（观察到的"卡 freeze"现象）。
+    // → 失败不 abort、不挂死：吞掉，走"无冻结强切"，直接 promote 新一代 + flip + 退役旧代。
+    let fr: FreezeReply | null
+    try {
+      fr = await this.active.client.freeze(cfg.freezeTimeoutMs)
+    } catch {
+      fr = null
+    }
+    if (!fr || !fr.static) {
+      this.record('freeze 活跃代无响应 → 走强切（省去静态冻结，直接 promote）')
+      fr = null
+    } else {
+      this.record('freeze a lastSeq=' + fr.lastSeq)
+    }
 
     this.stage = 'promote'
     // 挑"主活跃会话"用于新代 resume，实现对话接续。
-    // 优先用常驻前门嗅探到的会话（最可靠，不依赖 gen 内部）；兜底用冻结代上报的会话。
+    // 优先用常驻前门嗅探到的会话（最可靠，不依赖 gen 内部）；有冻结再用其最高 seq 会话；都没有则空（冷启）。
     const frontSid = this.front.lastSessionId || ''
-    const freezeSid = fr.sessions && fr.sessions.length > 0 ? [...fr.sessions].sort((a, b) => b.seq - a.seq)[0].id : ''
+    const freezeSid = fr && fr.sessions && fr.sessions.length > 0 ? [...fr.sessions].sort((a, b) => b.seq - a.seq)[0].id : ''
     const resumeId = (frontSid || freezeSid) as string | undefined
-    this.record('freeze resume-session=' + (resumeId ?? 'none') + (frontSid ? ' (via-front-door)' : freezeSid ? ' (via-gen)' : ''))
-    if (!(await this.waitCatchUp(b, fr.lastSeq))) return this.abort(b, 're-ready-b-behind')
+    const via = frontSid ? ' (via-front-door)' : freezeSid ? ' (via-gen)' : fr ? '' : ' (hard-switch, no-freeze)'
+    this.record('resume-session=' + (resumeId ?? 'none') + via)
+    // 有冻结时才要求 staging 追平冻结 seq；追不平也**不 abort 挂死**，仍按强切推进
+    //（staging 已按自身日志/checkpoint 就绪即视为可接，不给"等旧代配合"留死锁面）。
+    if (fr) {
+      if (!(await this.waitCatchUp(b, fr.lastSeq))) {
+        this.record('re-ready-b-behind → 仍按强切继续（不阻塞旧代追平）')
+      }
+    }
 
     this.stage = 'promote'
     await b.client.promote(token, b.inst.gen, resumeId) // B 绑定 key-pool + 确认写权 token + 携带 resume 会话
 
     this.stage = 'flip'
-    this.lease.grant(b.inst.gen, b.inst.port, spawned.pid, cfg.ttlMs, fr.lastSeq, 'replay', token)
+    this.lease.grant(b.inst.gen, b.inst.port, spawned.pid, cfg.ttlMs, (fr?.lastSeq ?? 0), 'replay', token)
     const old = this.swapActive(b)
     b.inst.role = 'active'
     b.inst.state = 'active'

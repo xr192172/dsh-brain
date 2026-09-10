@@ -20,6 +20,8 @@ export interface SpawnOptions {
   profile: string
   port: number
   adminPort: number
+  /** 可选：gen 的 --inspect 调试端口（外部 memory_observe 等通过 CDP 连它做进程级内存观测）。缺省不开。 */
+  inspectPort?: number
   gen: string
   leaseToken: string
   mode: 'staging' | 'active'
@@ -74,6 +76,11 @@ export function spawnGen(opts: SpawnOptions): SpawnedGen {
     HANDOVER_CONTROL: process.env.HANDOVER_CONTROL || 'http://127.0.0.1:31800',
   }
   const args = [
+    // 前导 Node flag → globalThis.gc() 可见，memory_observe 的 action=gc 才能强制回收，
+    // 判断"瞬时占用 vs 疑似泄漏"。对正常 gen 无副作用。
+    '--expose-gc',
+    // 可选调试端口：外部 memory_observe 经 CDP 连此做进程级内存观测（绑定 127.0.0.1，不对外）。
+    ...(opts.inspectPort ? [`--inspect=127.0.0.1:${opts.inspectPort}`] : []),
     opts.dshBin,
     '--profile',
     opts.profile,
