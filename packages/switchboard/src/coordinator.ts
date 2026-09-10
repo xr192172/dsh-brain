@@ -90,6 +90,11 @@ export class Coordinator {
     return this.lastResult
   }
 
+  /** 交接窗口锁状态（`?cmd=status` 附带；便于运维/前端观察"切换中，请勿操作"）。 */
+  get switchLocked(): boolean {
+    return this.front.isLocked
+  }
+
   /** 记录一次交接结果：落盘 handover-status.jsonl + 控制台可读横幅。 */
   private recordResult(r: HandoverResult): void {
     this.lastResult = r
@@ -133,6 +138,10 @@ export class Coordinator {
   }
 
   async handover(fail?: string, profileOverride?: string): Promise<HandoverStage> {
+    // 交接窗口遮罩（后端口令锁）：整个交接期间前门拦截写操作/新建连接，避免不稳定态并发写入触发 kind 竞态。
+    // 用 try/finally 确保任何出口（成功/abort/回滚/异常）都释放锁，杜绝交接异常导致永久锁死。
+    this.front.setLocked(true)
+    try {
     const cfg = this.cfg
     // 覆盖 profile：允许 apply 指定 staging 代运行某个脑 profile（接入 three-brain/sandbox 代际）
     const profile = profileOverride && profileOverride.trim() ? profileOverride.trim() : cfg.profile
@@ -288,6 +297,9 @@ export class Coordinator {
       resumeSession: resumeId,
     })
     return 'idle'
+    } finally {
+      this.front.setLocked(false)
+    }
   }
 
   private async waitCatchUp(b: Cage, target: number): Promise<boolean> {

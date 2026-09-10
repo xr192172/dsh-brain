@@ -132,7 +132,7 @@ function boot(config: CoordinatorConfig): void {
       )
     } else if (cmd === 'status') {
       const lease = coord.getLease()
-      res.end(JSON.stringify({ ok: true, stage: coord.stageName, result: coord.lastHandoverResult, lease: lease?.current }))
+      res.end(JSON.stringify({ ok: true, stage: coord.stageName, result: coord.lastHandoverResult, lease: lease?.current, locked: coord.switchLocked }))
     } else if (cmd === 'result') {
       res.end(JSON.stringify({ ok: true, result: coord.lastHandoverResult }))
     } else if (cmd === 'fail') {
