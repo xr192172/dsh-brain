@@ -25,6 +25,9 @@ logs/
 *.zip
 *.rar
 
+# ===== design-canvas 开发 fork（从 Downloads 克隆 fork 进来，不入库） =====
+/design-canvas-dev/
+
 # @dsh-brain 分包产物（junction-link 到 profile node_modules，构建产物不入库）
 packages/*/node_modules/
 
