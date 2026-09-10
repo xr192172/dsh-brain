@@ -27,6 +27,23 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 
 let callSeq = 0
 
+// ── 内存观测：memory_observe 的跨调用状态（单进程内，本插件所在 gen 进程）──
+// 多次 LLM 工具调用之间需要记住基线，才能做"前次调用 → 本次调用"的内存增长/泄漏判定。
+interface MemorySample {
+  t: number
+  rss: number
+  heapUsed: number
+  heapTotal: number
+  external: number
+  arrayBuffers: number
+}
+/** 进程级内存基线（key='default'；单进程场景足够）。 */
+const memoryBase = new Map<string, MemorySample>()
+/** 当前进程是否可强制 GC（需 gen 启动时带 --expose-gc；缺省不可）。 */
+function canForceGc(): boolean {
+  return typeof (globalThis as { gc?: unknown }).gc === 'function'
+}
+
 export const name = 'design-canvas-bridge'
 // 顶层声明这两个关节：apply 时已就绪；mcp-client 的 ToolRuntime 同属 ctx.tools，
 // 但其工具注册是异步的，故预热前仍需 get() 判在。
@@ -133,6 +150,7 @@ interface RenameSymbolsResultLite {
   previews?: Array<{ index: number; ok: boolean; blocked?: string[]; result?: { symbol?: string; to?: string; importers?: Array<{ file: string; edits: number; note?: string }>; definition?: { file: string; edits: number } } }>
   applied?: Array<{ index: number }>
   literals?: Array<{ index: number; item?: { symbol?: string; to?: string }; needle: string; toSnake: string; matches: Array<{ file: string; line: number; snippet: string; decision?: string }> }>
+  externalRefs?: Array<{ fromAbs: string; source: string; resolved: string }>
 }
 interface KernelModule {
   editCode: (args: Record<string, unknown>) => Promise<EditResultLite>
@@ -478,6 +496,16 @@ export function apply(ctx: Context, config: Config): void {
             } else if (wantLiteral) {
               lines.push('● 文本层字面量: 未发现字符串/文档引用')
             }
+            // 项目边界（不追外）：本工作区内 import 解析到工作区外的引用——只提示去向，不落盘外部仓库
+            if (res.externalRefs && res.externalRefs.length > 0) {
+              lines.push(`● 项目边界（不追外）: ${res.externalRefs.length} 处 import 解析到工作区外，未改动外部`)
+              for (const e of res.externalRefs.slice(0, 8)) {
+                const shown = e.resolved ? (e.resolved.includes(projectDir) ? e.resolved.slice(projectDir.length + 1) : e.resolved) : e.source
+                lines.push(`   - ${shown}${e.source ? `（import ${e.source}）` : ''}`)
+              }
+              if (res.externalRefs.length > 8) lines.push(`   … 其余 ${res.externalRefs.length - 8} 处略`)
+              lines.push('   （如需联动处理这些外部引用，请在对应外部仓库上单独发起 rename）')
+            }
 
             console.log(`[dsb-rename] done dry=${dryRun} files=${res.filesWritten ?? 0} literals=${res.literalFilesWritten ?? 0}`)
             if (dryRun) lines.push('（以上为预览，未写盘；确认后请以 dry_run:false 重放执行）')
@@ -627,46 +655,123 @@ export function apply(ctx: Context, config: Config): void {
   }))
   console.log(`[design-canvas-bridge] design_canvas_prewarm 已注册`)
 
-  // ── 内存诊断：dsh_memory_probe ──
-  // bridge 就跑在 gen 进程内，用 V8 原生抓当前进程内存构成（区分 V8 JS 堆 vs native/external/
-  // arrayBuffer），并可选写 heap snapshot 落盘——供定位那个偶发 10GB 的堆到底装了什么。
+  // ── 内存观测：memory_observe（跨运行时通用的检测壳：基线→追踪→触发→快照）──
+  // 思路对 GC 与非 GC 运行时通用，换的只是"驱动诊断器"那一层。在 Node/V8 下用
+  // process.memoryUsage 采样 + v8.getHeapStatistics + v8.writeHeapSnapshot 落盘。
+  // 四个动作一次调用覆盖：
+  //   baseline → 记录起点；track → 对比基线算增长与可疑方向；
+  //   gc        → 强制 GC 后重采，回落到基线=瞬时占用，仍高于基线=疑似泄漏；
+  //   snapshot  → 对增长点写 heap snapshot（喂给 Chrome DevTools/heap diff 分析）。
+  // 区分泄漏侧：heapUsed 涨→JS 对象堆；RSS 涨但 heapUsed 稳→external/arrayBuffers(native)。
   ctx.tools.register(defineTool({
-    name: 'dsh_memory_probe',
+    name: 'memory_observe',
     description:
-      '抓当前 gen 进程内存构成（RSS / V8 heap / external / arrayBuffers），可选写 V8 heap snapshot 文件。' +
-      '用于定位进程内存暴涨/泄漏源：若 heapUsed 大→JS 对象堆；若 external/arrayBuffers 大→native(如 sqlite/tree-sitter)。',
+      '内存基线/追踪/触发/快照一体化观测。动作：baseline=记基线；track=对比基线报增量与泄漏方向；' +
+      'gc=强制 GC 后重采，判断是瞬时占用还是疑似泄漏；snapshot=写 V8 heap snapshot 到磁盘。' +
+      '用途：内存暴涨/疑似泄漏诊断。区分侧：heapUsed 涨→JS 对象堆；RSS 涨但 heapUsed 稳→native(external/arrayBuffers)。',
     parameters: {
-      snapshot: { type: 'boolean', description: 'true=写 heap snapshot 到 <project_dir>/.design-canvas/heap-<ts>.heapsnapshot' },
       project_dir: { type: 'string', description: 'heap snapshot 落盘目录的归属项目根（缺省 process.cwd）' },
+      action: {
+        type: 'string',
+        enum: ['status', 'baseline', 'track', 'gc', 'snapshot'],
+        description: 'status=仅一次性统计；baseline=记基线并返回；track=对比基线报增量；gc=强制GC后重采对比；snapshot=写heap snapshot。缺省 status',
+      },
     },
     output: {
-      schema: { type: 'string', description: '内存构成统计 + 可选 snapshot 路径' },
+      schema: { type: 'string', description: '内存统计 / 基线 / 增量 / 泄漏判定文本' },
       render: (_args, value) => [{ type: 'text' as const, text: value }],
     },
     async execute(args) {
+      const a = ((args.action ?? 'status') as string).toLowerCase()
       const mb = (b: number | undefined): number => Math.round((b ?? 0) / 1048576)
-      const mu = process.memoryUsage()
+      const sample = (): MemorySample => {
+        const mu = process.memoryUsage()
+        return {
+          t: Date.now(),
+          rss: mu.rss,
+          heapUsed: mu.heapUsed,
+          heapTotal: mu.heapTotal,
+          external: mu.external,
+          arrayBuffers: mu.arrayBuffers ?? 0,
+        }
+      }
+      const fmt = (s: MemorySample): string =>
+        `t+${Math.round((s.t - t0) / 1000)}s RSS=${mb(s.rss)}MB heapTotal=${mb(s.heapTotal)}MB heapUsed=${mb(s.heapUsed)}MB external=${mb(s.external)}MB arrayBuffers=${mb(s.arrayBuffers)}MB`
+      const t0 = Date.now()
+      const key = 'default'
       const hs = v8.getHeapStatistics ? v8.getHeapStatistics() : undefined
       const lines: string[] = []
-      lines.push(`RSS=${mb(mu.rss)}MB  heapTotal=${mb(mu.heapTotal)}MB  heapUsed=${mb(mu.heapUsed)}MB  external=${mb(mu.external)}MB  arrayBuffers=${mb(mu.arrayBuffers ?? 0)}MB`)
-      if (hs) {
-        lines.push(`V8 heapSizeLimit=${mb(hs.heap_size_limit)}MB  totalHeap=${mb(hs.total_heap_size)}MB  usedHeap=${mb(hs.used_heap_size)}MB`)
-      }
-      if (args.snapshot) {
+
+      if (a === 'baseline') {
+        const s = sample()
+        memoryBase.set(key, s)
+        lines.push(`[基线已记录] ${fmt(s)}`)
+        lines.push(`V8 heapSizeLimit=${mb(hs?.heap_size_limit)}MB usedHeap=${mb(hs?.used_heap_size)}MB 强制GC=${canForceGc() ? '可用' : '不可用(--expose-gc)'}`)
+      } else if (a === 'track') {
+        const base = memoryBase.get(key)
+        if (!base) {
+          lines.push('无基线，先调 action=baseline 记录起点。当前: ' + fmt(sample()))
+        } else {
+          const s = sample()
+          const dRss = mb(s.rss - base.rss)
+          const dHeap = mb(s.heapUsed - base.heapUsed)
+          const dExt = mb(s.external - base.external)
+          const dtSec = Math.max(1, Math.round((s.t - base.t) / 1000))
+          const rate = mb((s.rss - base.rss) / dtSec)
+          lines.push(fmt(s))
+          lines.push(`相对基线: RSS ${dRss >= 0 ? '+' : ''}${dRss}MB  heapUsed ${dHeap >= 0 ? '+' : ''}${dHeap}MB  external ${dExt >= 0 ? '+' : ''}${dExt}MB（约 ${dtSec}s → ~${rate}MB/s）`)
+          if (dHeap > 16) {
+            lines.push(`判定: heapUsed 增 ${dHeap}MB → 疑似 JS 对象堆增长；可 action=gc 确认是否可回收，或 snapshot 落盘分析。`)
+          } else if (dRss > 32 && dHeap <= 16) {
+            lines.push(`判定: RSS 增 ${dRss}MB 但 heapUsed 平稳(${dHeap}MB) → 更可能 native/external(${dExt}MB)/arrayBuffers 侧，V8 heap snapshot 看不到，需看 external。`)
+          } else if (dRss <= 16 && dHeap <= 16) {
+            lines.push(`判定: 相对基线基本平稳（RSS ${dRss}MB）→ 无明显增长。`)
+          } else {
+            lines.push(`判定: 温和变化（RSS ${dRss}MB / heapUsed ${dHeap}MB），建议多次 track 累计观察曲线。`)
+          }
+        }
+      } else if (a === 'gc') {
+        const gc = (globalThis as { gc?: () => void }).gc
+        if (!gc) {
+          lines.push('当前进程未带 --expose-gc，无法强制 GC；请给 gen 启动参数加 --expose-gc 后重试。')
+        } else {
+          const before = sample()
+          gc()
+          const after = sample()
+          const base = memoryBase.get(key)
+          lines.push(`[强制GC] 前: ${fmt(before)}`)
+          lines.push(`[强制GC] 后: ${fmt(after)}（回收 heapUsed ${mb(before.heapUsed - after.heapUsed)}MB / RSS ${mb(before.rss - after.rss)}MB）`)
+          if (base && after.heapUsed > base.heapUsed + 16) {
+            lines.push(`判定: GC 后 heapUsed 仍高于基线 ${mb(after.heapUsed - base.heapUsed)}MB → 疑似泄漏（被长期持有，非瞬时）。建议 snapshot 落盘用 heap diff 定位持有者。`)
+          } else if (base) {
+            lines.push(`判定: GC 后回落至基线附近 ${mb(after.heapUsed - base.heapUsed)}MB → 更可能是瞬时工作负载，非泄漏。`)
+          } else {
+            lines.push('无基线对比；请先 action=baseline。')
+          }
+        }
+      } else if (a === 'snapshot') {
+        const now = sample()
+        lines.push(fmt(now))
+        if (memoryBase.get(key)) lines.push('已有基线；此快照可与基线期场景对照，或两次快照之间做 heap diff 定位持有者。')
         try {
           const dir = args.project_dir ? path.join(path.resolve(String(args.project_dir)), '.design-canvas') : process.cwd()
           fs.mkdirSync(dir, { recursive: true })
           const file = path.join(dir, `heap-${Date.now()}.heapsnapshot`)
           const wrote = v8.writeHeapSnapshot(file)
-          lines.push(`heap snapshot 已写: ${wrote}`)
+          lines.push(`heap snapshot 已写: ${wrote}（用 Chrome DevTools 加载，或与另一份做 heap diff）`)
         } catch (e) {
           lines.push(`heap snapshot 失败: ${shortErr(e)}`)
         }
+      } else {
+        // status（缺省）
+        lines.push(fmt(sample()))
+        lines.push(`V8 heapSizeLimit=${mb(hs?.heap_size_limit)}MB usedHeap=${mb(hs?.used_heap_size)}MB 强制GC=${canForceGc() ? '可用' : '不可用(--expose-gc)'}`)
+        lines.push('用 action=baseline 记基线后 action=track/gc 追踪；或 snapshot 落盘深入。')
       }
       return lines.join('\n')
     },
   }))
-  console.log(`[design-canvas-bridge] dsh_memory_probe 已注册`)
+  console.log(`[design-canvas-bridge] memory_observe 已注册`)
   console.log(`[design-canvas-bridge] apply running; 预热工具=${importToolName} enabled=${config.enabled}`)
 }
 
