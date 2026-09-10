@@ -146,7 +146,7 @@ export class Coordinator {
     return h?.caughtUpSeq ?? -1
   }
 
-  async handover(fail?: string, profileOverride?: string): Promise<HandoverStage> {
+  async handover(fail?: string, profileOverride?: string, experimentKernelDir?: string): Promise<HandoverStage> {
     // 交接窗口遮罩（后端口令锁）：整个交接期间前门拦截写操作/新建连接，避免不稳定态并发写入触发 kind 竞态。
     // 用 try/finally 确保任何出口（成功/abort/回滚/异常）都释放锁，杜绝交接异常导致永久锁死。
     this.front.setLocked(true)
@@ -192,7 +192,11 @@ export class Coordinator {
       mode: 'staging',
       overlayFile,
       genDir,
-      envExtra: cfg.envExtra,
+      envExtra: {
+        ...cfg.envExtra,
+        // 自进化·实验脑：本次 staging 单独加载实验内核产物（P0-2），生产 gen 不受影响。
+        ...(experimentKernelDir ? { DESIGN_CANVAS_KERNEL_DIR: experimentKernelDir } : {}),
+      },
       inspectPort: cfg.inspectPortBase ? cfg.inspectPortBase + (port - cfg.portBase) : undefined,
     } satisfies SpawnOptions)
     const b: Cage = {

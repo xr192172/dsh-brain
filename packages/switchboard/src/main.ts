@@ -127,7 +127,7 @@ function boot(config: CoordinatorConfig): void {
       // 立即确认：handover 可能含 defer（等活跃代收尾，秒级~20s+），阻塞到这个结果会拖爆调用方（如 tool_apply 15s 超时）。
       // → 先回 stage=started，后台异步执行，最终结果落 state.jsonl / ?cmd=result 供轮询。
       res.end(JSON.stringify({ ok: true, cmd, stage: 'started', profile: url.searchParams.get('profile') ?? 'web' }))
-      void coord.handover(url.searchParams.get('fail') ?? undefined, url.searchParams.get('profile') ?? undefined).catch((e) =>
+      void coord.handover(url.searchParams.get('fail') ?? undefined, url.searchParams.get('profile') ?? undefined, url.searchParams.get('kernel') ?? undefined).catch((e) =>
         console.error('[switchboard] handover error:', e instanceof Error ? e.message : String(e)),
       )
     } else if (cmd === 'status') {
