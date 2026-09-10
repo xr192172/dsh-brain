@@ -123,9 +123,20 @@ interface FoundRefsLite {
 interface EditResultLite {
   message: string
 }
+interface RenameSymbolsResultLite {
+  ok: boolean
+  dryRun?: boolean
+  filesWritten?: number
+  literalFilesWritten?: number
+  blocked?: string[]
+  previews?: Array<{ index: number; ok: boolean; blocked?: string[]; result?: { symbol?: string; to?: string; importers?: Array<{ file: string; edits: number; note?: string }>; definition?: { file: string; edits: number } } }>
+  applied?: Array<{ index: number }>
+  literals?: Array<{ index: number; item?: { symbol?: string; to?: string }; needle: string; toSnake: string; matches: Array<{ file: string; line: number; snippet: string; decision?: string }> }>
+}
 interface KernelModule {
   editCode: (args: Record<string, unknown>) => Promise<EditResultLite>
   findReferences: (args: Record<string, unknown>) => Promise<FoundRefsLite>
+  renameSymbols: (args: Record<string, unknown>) => Promise<RenameSymbolsResultLite>
 }
 
 /** 动态加载 design-canvas 内核（进程内，非 stdio 子进程）。失败即抛，由调用方兜底。 */
@@ -137,7 +148,10 @@ async function loadKernel(kernelDir: string): Promise<KernelModule> {
   const fr = (await import(pathToFileURL(path.join(toolsDir, 'find_references.js')).href)) as {
     findReferences: KernelModule['findReferences']
   }
-  return { editCode: ec.editCode, findReferences: fr.findReferences }
+  const rs = (await import(pathToFileURL(path.join(toolsDir, 'rename_symbols.js')).href)) as {
+    renameSymbols: KernelModule['renameSymbols']
+  }
+  return { editCode: ec.editCode, findReferences: fr.findReferences, renameSymbols: rs.renameSymbols }
 }
 
 function shortErr(e: unknown): string {
@@ -353,6 +367,102 @@ export function apply(ctx: Context, config: Config): void {
         },
       }))
       console.log(`[design-canvas-bridge] symbol_edit 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+
+      // ── 安全重命名（safe_rename）：符号层跨文件 AST 重命名 + 文本层字面量引用一并改 ──
+      // 编排壳包 renameSymbols：两点原子（任一阻断整体不落盘）；report_literals 扫描旧符号
+      // snake 变体的文本命中（README/错误串/工具注册名/历史——正是"改名漏改别家标记"的痛点），
+      // apply_literals 自动替换 code/docs/test 且安全跳过 contract/历史/冻结行。
+      ctx.tools.register(defineTool({
+        name: 'safe_rename',
+        description:
+          '安全符号重命名（编排壳）：改一个符号名时，先算影响面，再跨文件 AST 重命名，并把项目文本里的字面量引用' +
+          '（README/错误串/工具注册名/snake 变体，即"改名常漏改的别家标记"）一并处理。默认 dry_run 先预览' +
+          '（符号层将改哪些 import/usage + 文本层 auto 可改/需人审/历史保留的分组），确认后再落盘。' +
+          '安全：任一处被阻断则整体不落盘；文本字面量按决策分组——code/docs/test 自动改，contract 需人审，历史与冻结行保留。',
+        parameters: {
+          project_dir: { type: 'string', description: '项目根目录（缺省取最近已预热工作区）' },
+          file: { type: 'string', description: '定义符号的文件（相对 project_dir 或绝对路径），必填' },
+          symbol: { type: 'string', description: '旧符号名（模块级声明名/被 import 的远程名），必填' },
+          to: { type: 'string', description: '新符号名（合法标识符），必填' },
+          rename_file_if_matching: { type: 'boolean', description: 'true=符号是文件主导出(文件名=符号名)时联动改文件名' },
+          dry_run: { type: 'boolean', description: 'true(默认)=只预览符号层+文本层决策，不落盘；false=确认真执行（含文本层 apply_literals 自动改）' },
+          apply_literals: { type: 'boolean', description: 'true+dry_run=false=执行时自动替换 decision=apply 的字面量(code/docs/test)；contract 需人审、历史/冻结行保留' },
+          report_literals: { type: 'boolean', description: 'true(默认)=预览/汇报里包含文本层字面量命中分组' },
+        },
+        output: {
+          schema: { type: 'string', description: '精简文本：符号层重命名结果 + 文本层字面量分组（超 4096 字符头部截断）' },
+          render: (_args, value) => [{ type: 'text' as const, text: value }],
+        },
+        async execute(args) {
+          try {
+            const projectDir =
+              args.project_dir ??
+              (() => {
+                const list = Array.from(indexedFeatures.values())
+                return list.length > 0 ? list[list.length - 1].projectDir : null
+              })()
+            if (!projectDir) {
+              return 'project_dir 未指定，且当前无已预热工作区。请先选中/新建工作区，或显式传 project_dir。'
+            }
+            if (!args.file || !args.symbol || !args.to) {
+              return 'safe_rename 需要 file（定义文件）、symbol（旧名）、to（新名）。'
+            }
+            const kernel = await loadKernel(config.kernelDir)
+            const dryRun = args.dry_run !== false // 默认安全预览
+            const wantLiteral = args.report_literals !== false
+            console.log(`[dsb-rename] call project=${projectDir} file=${args.file} symbol=${args.symbol} to=${args.to} dry=${dryRun}`)
+
+            const res = await kernel.renameSymbols({
+              project_dir: projectDir,
+              renames: [{ file: args.file, symbol: args.symbol, to: args.to, rename_file_if_matching: args.rename_file_if_matching === true }],
+              dry_run: dryRun,
+              report_literals: wantLiteral,
+              apply_literals: !dryRun && args.apply_literals === true,
+            })
+
+            if (!res.ok) {
+              return `重命名未执行（${(res.blocked ?? []).join('; ') || '未知原因'}），本次未落盘。`
+            }
+
+            const lines: string[] = []
+            // 符号层
+            if (dryRun || res.dryRun) {
+              const def = res.previews?.[0]?.result?.definition
+              const imps = res.previews?.[0]?.result?.importers ?? []
+              lines.push(`● 符号层预览: 定义文件${def ? ` ${def.file}（${def.edits} 处）` : ''}，import/usage 影响 ${imps.length} 个文件`)
+              for (const i of imps.slice(0, 10)) lines.push(`   - ${i.file}: ${i.edits} 处${i.note ? ` · ${i.note}` : ''}`)
+            } else {
+              lines.push(`● 符号层: 已重命名 ${args.symbol} → ${args.to}，写入 ${res.filesWritten ?? 0} 个文件`)
+            }
+            // 文本层（字面量）
+            if (wantLiteral && res.literals && res.literals.length > 0) {
+              const byDecision = new Map<string, number>()
+              for (const l of res.literals) for (const m of l.matches ?? []) {
+                const d = m.decision ?? '未知'
+                byDecision.set(d, (byDecision.get(d) ?? 0) + 1)
+              }
+              const parts = Array.from(byDecision.entries()).map(([d, n]) => `${d}=${n} 处`).join('，')
+              lines.push(`● 文本层字面量: ${parts}${!dryRun ? `（已写盘 ${res.literalFilesWritten ?? 0} 个文件）` : ''}`)
+              for (const l of res.literals) {
+                const show = (l.matches ?? []).slice(0, 8)
+                if (show.length === 0) continue
+                lines.push(`   "${l.needle}" → "${l.toSnake}":`)
+                for (const m of show) lines.push(`     [${m.decision ?? '?'}] ${m.file}:${m.line} ${(m.snippet ?? '').slice(0, 60)}`)
+              }
+            } else if (wantLiteral) {
+              lines.push('● 文本层字面量: 未发现字符串/文档引用')
+            }
+
+            console.log(`[dsb-rename] done dry=${dryRun} files=${res.filesWritten ?? 0} literals=${res.literalFilesWritten ?? 0}`)
+            if (dryRun) lines.push('（以上为预览，未写盘；确认后请以 dry_run:false 重放执行）')
+            const joined = lines.join('\n')
+            return joined.length > 4096 ? `${joined.slice(0, 4096)}\n...（尾部截断）` : joined
+          } catch (e) {
+            return `重命名未执行：${shortErr(e)}（本次未落盘；请核对 file/symbol/to 后重试，to 须为合法标识符）`
+          }
+        },
+      }))
+      console.log(`[design-canvas-bridge] safe_rename 已注册（深度注入，kernelDir=${config.kernelDir}）`)
     } else {
       console.log(`[design-canvas-bridge] 深度注入跳过：内核入口缺失 ${editEntry}`)
     }
