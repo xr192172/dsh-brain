@@ -242,15 +242,18 @@ export function apply(ctx: Context, config: Config): void {
           '或按唯一文本 replace_text（edit 工具的安全版）。先算影响面（find_references 引用摘要，仅索引内符号），' +
           '再精准落盘（edit_code 自带 re-parse 语法门 + 同名消歧，replace 要求新代码解析出同名符号防粘贴错函数），' +
           '最后精简回报。不信行号/old_string（replace_text 除外，它要求 old_text 在文件内恰好唯一）。' +
-          '注意：dry_run 对所有 op 生效（只预览 diff + 语法门，不写盘）；replace 的 code 必须自包含（只含目标符号本身定义，' +
-          '不要重复定义文件内已有的类型/函数，否则报重复定义——复杂修改请用 range 或 replace_text）。',
+          'Op 选择指引：日常单行/小段修改用 replace_text（给文本就改，带唯一性门 + 语法门）；' +
+          '改函数/方法体用 replace+sub="body"（免自包含、自动缩进）；新增用 insert、删除用 delete；' +
+          '大改/多行用 range（start/end + code，精确行区间）。不要裸用 range 去改函数体（手写缩进易错）。' +
+          '注意：dry_run 对所有 op 生效（只预览 diff + 语法门，不写盘）；replace（整符号）的 code 必须自包含（只含目标符号本身定义，' +
+          '不要重复定义文件内已有的类型/函数，否则报重复定义——复杂修改请用 sub="body" 或 range 或 replace_text）。',
         parameters: {
           project_dir: { type: 'string', description: '项目根目录（缺省取最近已预热工作区）' },
           file: { type: 'string', description: '目标文件（相对 project_dir 或绝对路径）' },
           op: {
             type: 'string',
             enum: ['replace', 'insert', 'delete', 'range', 'replace_text'],
-            description: 'replace=替换符号(symbol+code 必填，code 须自包含)；insert=插入新符号(code 必填, symbol 可选锚点=其后插入, 缺省文件末尾)；delete=删除符号(symbol 必填)；range=显式行区间(start/end+code)；replace_text=按唯一文本替换(old_text 必填且须唯一, new_text 新文本)',
+            description: '小改用 replace_text(old_text/new_text)；改函数体用 replace+sub=body(code 给新 body)；replace=替换整符号(symbol+code, code 须自包含)；insert=插入新符号(code 必填, symbol 可选锚点)；delete=删除符号(symbol 必填)；range=显式行区间(start/end+code)',
           },
           symbol: { type: 'string', description: '目标符号：replace/delete 必填（qualified_name 优先，短名兜底）；insert 可选锚点；range/replace_text 不需要' },
           parent: { type: 'string', description: '符号父级（类名 / Go receiver 类型名），同名消歧' },
