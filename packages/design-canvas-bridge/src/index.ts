@@ -159,6 +159,24 @@ function shortErr(e: unknown): string {
   return m.length > 200 ? `${m.slice(0, 200)}…` : m
 }
 
+/** 读项目 cache.db 的索引规模（文件/符号/边/导入数）；未预热返回 null。 */
+function indexCounts(projectDir: string): { files: number; nodes: number; edges: number; imports: number } | null {
+  try {
+    const p = path.join(projectDir, '.design-canvas', 'cache.db')
+    if (!fs.existsSync(p)) return null
+    const db = new DatabaseSync(p, { readOnly: true })
+    const count = (t: string): number => {
+      const row = db.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get() as { c?: number | null } | undefined
+      return Number(row?.c ?? 0)
+    }
+    const r = { files: count('files'), nodes: count('nodes'), edges: count('edges'), imports: count('imports') }
+    try { db.close() } catch { /* ignore */ }
+    return r
+  } catch {
+    return null
+  }
+}
+
 /** 目标文件是否已进入目标项目的符号/import 索引（cache.db files 表）。未索引时跑
  *  find_references 会 fallback 对全依赖闭包即时解析——未预热大仓极慢，这里据此降级。 */
 function isFileIndexed(projectDir: string, file?: string): boolean {
@@ -468,6 +486,61 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  // ── 显式预热工具：design_canvas_prewarm ──
+  // DSH 不经 workspaceRegistry.create 建工作区（全仓无该调用），原 create 拦截的自动预热
+  // 从未触发。这里把预热主动权交给工具层：模型对某仓库跑 find/rename 前，先对其 project_dir
+  // 显式预热一次（import_project 全量建 AST/符号/import 索引），之后 find_references/safe_rename
+  // 走索引、明显变快（未预热大仓会即时全闭包扫描、极慢）。
+  ctx.tools.register(defineTool({
+    name: 'design_canvas_prewarm',
+    description:
+      '对指定项目根目录执行 design-canvas import_project 全量建立符号/import 索引（AST 前置）。' +
+      '之后 find_references / safe_rename / symbol_edit 影响面会走索引、明显变快。' +
+      '未预热的大仓跑 find/rename 会即时全闭包扫描、极慢——先在动作前对该 project_dir 预热一次。',
+    parameters: {
+      project_dir: { type: 'string', required: true, description: '项目根目录（绝对路径）' },
+      max_files: { type: 'integer', description: '最多解析文件数（缺省取插件 maxFiles，默认 500）' },
+    },
+    output: {
+      schema: { type: 'string', description: '预热结果：索引的文件/符号/边/导入统计或失败原因' },
+      render: (_args, value) => [{ type: 'text' as const, text: value }],
+    },
+    async execute(args) {
+      try {
+        const p = args.project_dir ? path.resolve(String(args.project_dir)) : ''
+        if (!p) return '需要 project_dir（项目根目录绝对路径）'
+        if (!ctx.tools.get(importToolName)) {
+          return 'import_project 工具未就绪（design-canvas MCP 连接中/未启动），请稍后重试；depth-inject 内核不承担建索引，需经 MCP 子进程。'
+        }
+        const feature = featureNameFrom(p)
+        console.log(`[dsb-prewarm] start ${p} feature=${feature}`)
+        await ctx.tools.execute({
+          name: importToolName,
+          callId: CallId(`prewarm-${++callSeq}-${Date.now()}`),
+          arguments: {
+            project_dir: p,
+            feature,
+            max_files: args.max_files ?? config.maxFiles,
+            include_tests: config.includeTests,
+            include_archive: config.includeArchive,
+            ...(config.designMode ? { design_mode: true } : {}),
+          },
+          signal: new AbortController().signal,
+        })
+        indexedFeatures.set(feature, { projectDir: p, feature, importedAt: Date.now() })
+        imported.add(p)
+        const counts = indexCounts(p)
+        const stat = counts
+          ? `索引 ${counts.files} 文件 / ${counts.nodes} 符号 / ${counts.edges} 边 / ${counts.imports} 导入`
+          : '索引统计不可读'
+        console.log(`[dsb-prewarm] done ${p} → ${stat}`)
+        return `已预热 ${p}（feature=${feature}）：${stat}。`
+      } catch (e) {
+        return `预热失败：${shortErr(e)}（未建索引；若项目过大请调 max_files 或用更小目录）`
+      }
+    },
+  }))
+  console.log(`[design-canvas-bridge] design_canvas_prewarm 已注册`)
   console.log(`[design-canvas-bridge] apply running; 预热工具=${importToolName} enabled=${config.enabled}`)
 }
 
