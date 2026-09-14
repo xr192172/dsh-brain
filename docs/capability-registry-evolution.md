@@ -277,6 +277,58 @@ else ctx.logger.info(`subagent provider "${config.provider}" not registered yet;
 | `dsh-tool-subagent-report` | **`report`** | 子代理回报父代理：「Actionable content for your parent; summarize conclusions and reference relevant shared paths」——**"只收精选结果"的落地形式** |
 | `dsh-client-ui-subagent` | 谱系树 UI | 树形展开 / 状态 / 模式 / **耗时** / **token 用量含缓存细分** / **诊断位** |
 
+### 3.6 ★★ 补漏：能力库必须覆盖「工具层」，不只是「委派层」
+
+> 本节 2026-09-14 由用户提醒后补 —— **原设计漏掉了整个工具层**。
+
+**漏了什么**：前文把「能力」几乎等同于「`SubagentProvider`」。但模型手里**大部分工具并不来自 provider**：
+
+| 层 | 载体 | 实例 | 原设计的覆盖 |
+|---|---|---|---|
+| **委派层能力** | `SubagentProvider` | `spawn` / `fork` / `council-architect` | ✅ 已覆盖 |
+| **工具层能力** | MCP server / 工具插件 | **design-canvas 一家 60 个工具**、`tool-evolution` 3 个 | ❌ **完全没覆盖** |
+
+⇒ 只登记 provider 的「能力库」，给模型的是**半个答案**。
+§3 的失败模式⑤（子脑自进化后顶层认知过期）**不只发生在子脑上，同样发生在工具源上**。
+
+**而 design-canvas 其实已经在做工具层的能力管理** —— 它自带 `capability_map`：
+
+- **6 条能力线**：`design` / `refactor` / `observe` / `harvest` / `cross` / `meta`
+- 每条线有 `label` / `desc` / `tools[{name, when}]` / **`direct`（可绕过导航直调的高频工具）**
+- 它自己的设计说明写得很准：
+  > 「MCP 工具集扁平广播…40+ 工具一次性铺给 agent，选择噪音大、易幻觉选错。
+  > 与其把全部工具塞进一个 mega 入口（schema 膨胀反噬），不如给一个**纯只读的能力线地图**：
+  > agent 不确定用哪个工具前，先调它分层定位，再进入具体工具。」
+
+**⇒ 正确处理是「对接」，不是「重复造」**：
+
+```
+我们的 list_capabilities          →  跨源总览（委派能力 + 工具能力源清单）
+      └─ 点名：「design-canvas：60 工具 / 6 条能力线，细节调 capability_map」
+design-canvas 的 capability_map   →  它自己内部的线级导航
+```
+
+**顺带：能力库第一次抓到真问题**
+
+`capability_map` 的线目录是一份**手工同步**的静态表（它自己的注释承认
+「能力线目录（静态事实，改动工具名/新增工具时同步此处）」）—— 手工同步必然漂移。实测：
+
+```
+注册表工具数 : 60
+能力线收录数 : 55
+★ 已注册但没进任何能力线（4 个；导航工具 capability_map 自身已豁免）:
+    go_originals · memory_observe · memory_targets · move_symbol
+```
+
+**这 4 个工具对「靠 `capability_map` 导航的 agent」是不可见的** —— 其中包括记忆系统的两个入口。
+而「**从未被选用 ≠ 没用，可能是发现失败**」正是 §5.5.3 已经写过的偏差①。
+
+⇒ 所以能力库对工具层要做的**第一件事不是"登记"，而是"把漂移变成可检出的"**。
+已内置：
+- `scripts/diff-dc-capability-map.mjs` —— 单独跑，出漂移报告
+- `capability-registry.mjs check` —— 每次校验都会重扫工具面并报漂移
+- `list_capabilities` 的输出里也带 `[!] N 个工具未进能力线`
+
 ---
 
 ## 4. 你的三条注册规则 × 现成机制

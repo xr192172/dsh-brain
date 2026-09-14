@@ -59,15 +59,26 @@ function loadRegistry(file: string): { ok: true; db: TDb } | { ok: false; text: 
 interface TCaps {
   id: string
   kind?: string
+  label?: string
   version?: string
   status?: string
-  source?: { package?: string; path?: string; provider?: string; tool?: string; seat?: string }
+  source?: { package?: string; path?: string; provider?: string; tool?: string; seat?: string; transport?: string; entry?: string }
   acceptance?: { kind?: string; ref?: string; status?: string; ranAt?: string }
   holdoutHash?: string | null
   supersededBy?: string | null
   retiredReason?: string | null
   signals?: { invoked?: number; reused?: number; succeeded?: number; failed?: number; lastUsedAt?: string | null }
+  /** 仅工具层能力源（MCP server 等）有：工具面快照 */
+  tooling?: {
+    toolCount?: number
+    laneCount?: number
+    lanes?: string[]
+    laneToolCount?: number
+    directCount?: number
+    drift?: { registeredNotInLanes?: string[]; inLanesNotRegistered?: string[]; exempt?: string[] }
+  }
 }
+
 interface TDb {
   schema?: string
   updatedAt?: string
@@ -81,18 +92,31 @@ function renderRow(c: TCaps): string {
   const s = c.signals ?? {}
   const acc = c.acceptance?.status === 'passed'
     ? 'pass'
-    : c.acceptance?.kind === 'none' || !c.acceptance?.ref
-      ? 'MISSING'
-      : String(c.acceptance.status ?? '?')
+    : (!c.acceptance?.ref || c.acceptance?.kind === 'none') ? 'MISSING' : String(c.acceptance.status ?? '?')
   const warn = (s.invoked ?? 0) >= 3 && (s.reused ?? 0) === 0
-    ? '   ⚠ 高选用低复用（疑似描述过度承诺）'
+    ? '   [!] 高选用低复用（疑似描述过度承诺）'
     : ''
-  return [
-    `- ${c.id}  [${c.status ?? '?'}]  v${c.version ?? '?'}${warn}`,
-    `    tool=${c.source?.tool ?? '-'}  provider=${c.source?.provider ?? '-'}  pkg=${c.source?.package ?? '-'}`,
-    `    信号: 选用${s.invoked ?? 0} 复用${s.reused ?? 0} 成功${s.succeeded ?? 0} 失败${s.failed ?? 0}  复用率=${reuseRatio(s)}`,
-    `    判据: ${acc}${c.acceptance?.ref ? '  ← ' + c.acceptance.ref : ''}`,
-  ].join('\n')
+  const lines = [
+    `- ${c.id}  [${c.kind ?? '?'} / ${c.status ?? '?'}]  v${c.version ?? '?'}${warn}`,
+  ]
+
+  if (c.kind === 'mcp-server') {
+    const t = c.tooling
+    lines.push(`    能力源: ${c.label ?? c.source?.path ?? '-'}`)
+    lines.push(`    工具面: ${t
+      ? `${t.toolCount ?? '?'} 个工具 / ${t.laneCount ?? '?'} 条能力线（${(t.lanes ?? []).join(', ')}）`
+      : '(未扫描)'}    导航工具=${c.source?.tool ?? '-'}`)
+    const missed = (t?.drift?.registeredNotInLanes ?? []).filter((x) => x !== c.source?.tool)
+    if (missed.length) {
+      lines.push(`    [!] ${missed.length} 个工具未进能力线（靠导航看不见它们）: ${missed.join(', ')}`)
+    }
+  } else {
+    lines.push(`    tool=${c.source?.tool ?? '-'}  provider=${c.source?.provider ?? '-'}  pkg=${c.source?.package ?? '-'}`)
+  }
+
+  lines.push(`    信号: 选用${s.invoked ?? 0} 复用${s.reused ?? 0} 成功${s.succeeded ?? 0} 失败${s.failed ?? 0}  复用率=${reuseRatio(s)}`)
+  lines.push(`    判据: ${acc}${c.acceptance?.ref ? '  <- ' + c.acceptance.ref : ''}`)
+  return lines.join('\n')
 }
 
 export function apply(ctx: Context, config: Config): void {
