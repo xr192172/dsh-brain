@@ -37,9 +37,16 @@
 - **出处**：Serena（"Smart Errors"：对参数名/枚举值做 Levenshtein，给候选）。
 - **他们**：错参数不是干巴巴报错，而是"did you mean `project_dir`?"。
 - **我们**：工具报错基本是中文长句、无候选建议；agent 只能重试猜。
-- **落地**：在工具入口做一层统一的参数校验（`action`/枚举/常见键），错键 → 用编辑距离给 Top3 建议。
-- **落点**：新增 `src/tools/arg_suggest.ts` + 在 `server_registry` 注册时的 wrapper 里接（**不改各业务工具的 schema**）。
-- **状态**：待做（性价比最高的一条）
+- **落地**：新增 `src/tools/arg_suggest.ts`（自带 Levenshtein、归一化后 `projectDir ≈ project_dir`、
+  阈值自适应 + "够像才提示"的静默纪律）+ 在 `registerAllTools` 统一注入到响应尾部。
+- **★ 关键实现细节（踩过）**：**只加提示代码是没用的** —— SDK 会把 raw shape 包成**严格 object**，
+  zod 解析时**静默丢弃未知键**，纠错代码永远看不到错键（实测：提示不出现）。
+  ⇒ 必须把 inputSchema 改成 **loose object**（zod4 `z.looseObject` / zod3 `.passthrough()`），
+  未知键才会活到 handler。
+- **验证**：`tests/tools/arg_suggest.test.ts` 12 项；真 MCP 探针 `scripts/probe-dc-arg-suggest-mcp.mjs`
+  **4 项断言 PASS** —— 传 `lanes`（应为 `lane`）时输出：
+  `⚠ 未知参数 \`lanes\` —— 是否想传 \`lane\`？（本工具参数：lane）`；参数正确时不误报；不像的键静默。
+- **状态**：✅ **已完成**
 
 ### 2. 渐进式工具描述：短描述进 prompt，全文按需取
 - **出处**：Serena（progressive descriptions：列表给短描述，`get_tool_help` 取全文）。
