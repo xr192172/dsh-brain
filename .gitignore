@@ -25,6 +25,12 @@ logs/
 *.zip
 *.rar
 
+# ===== 堆快照（V8 heap，单个 50~70MB，绝不是资产） =====
+heap-*.heapsnapshot
+
+# ===== camera 埋点运行时事件流（18MB+，可持续增长） =====
+.agent/camera/
+
 # ===== design-canvas 开发 fork（从 Downloads 克隆 fork 进来，不入库） =====
 /design-canvas-dev/
 

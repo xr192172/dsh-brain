@@ -9,13 +9,17 @@
   },
   "scripts": {
     "web": "dsh web",
-    "plugin": "dsh plugin"
+    "plugin": "dsh plugin",
+    "postinstall": "patch-package && node scripts/patch-web-app-public-url.mjs && node scripts/patch-app-boot-bom.mjs",
+    "check:bom": "node scripts/check-bom.mjs",
+    "check:profile": "node node_modules/@deepseek-ai/dsh/lib/bin.js web --dump-config"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "^0.1.1-rc.2",
     "@dsh-brain/conveyor-context": "file:packages/conveyor-context"
   },
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "typescript": "^7.0.2"
   }
 }

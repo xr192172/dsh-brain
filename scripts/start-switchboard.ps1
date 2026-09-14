@@ -49,6 +49,7 @@ $env:GEN_PORT_BASE = '3081'
 $env:HANDOVER_ADMIN_PORT_BASE = '31810'
 $env:SWITCH_ADMIN_PORT = '31800'
 $env:DSH_HOME     = 'C:\Users\Admin\.dsh'
+$env:VERIFY_ALLOW = 'C:\Users\Admin\AppData\Local\Temp\verifyout'
 
 # 用 bin.cjs 拉起（spawn 最新 out/<buildId>/main.js，满足 isMain 守卫）
 & $nodeExe (Join-Path $root 'packages\switchboard\bin.cjs')
