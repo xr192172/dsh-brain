@@ -1,0 +1,14 @@
+# subagent-council bundle patch —— 议事厅（多模型会议室）的席位 provider。
+#
+# ★ 为什么 provider 行插在【host plane】而不是 preset 里：
+#   `subagents` registry 是进程单例（跨会话查询面、provider 名全局唯一），
+#   所以注册 provider 属于 host plane。preset 只负责挂「工具行」——
+#   即 `tool-subagent` 的 config.provider 指向本包注册的名字（如 council-architect）。
+#   参见 node_modules/@deepseek-ai/dsh-subagent/README.zh.md 与 dsh-web-app/cordis.patch.yml 的分工注释。
+#
+# ⚠️ 不要再在 profile 的 cordis.patch.yml 里写同 id 的覆盖块 —— 会 duplicate loader entry id。
+- insert:
+    - id: subagent-council
+      name: '@dsh-brain/subagent-council'
+      config:
+        seat: architect

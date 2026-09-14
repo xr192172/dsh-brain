@@ -1,0 +1,33 @@
+{
+  "name": "@dsh-brain/subagent-council",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "description": "议事厅（多模型会议室）—— 第一个自定义 SubagentProvider。一个 provider = 一个预配置的子代理工厂：start() 里注入 persona / toolFilter / agentOptions(模型)。首期只有「架构师」一席 (council-architect)。设计依据见 docs/single-front-brain-delegation.md 与 memory topics §6。",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-subagent": "*",
+    "@deepseek-ai/dsh-subagent-in-process-driver": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

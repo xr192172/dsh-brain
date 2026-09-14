@@ -1,0 +1,12 @@
+# capability-bridge bundle patch —— 把「能力库」暴露给模型的工具。
+#
+# ★ 为什么插在 host plane 就够、不需要改 preset：
+#   工具注册表的视图是 `agent → preset → global`（近者遮蔽远者）。
+#   本包在 host plane 注册 → 落进 **global 层** → 每个 agent 都能看到，
+#   包括所有 preset 挂载的会话。`packages/tool-evolution`（tool_score/self_evolve）
+#   走的是同一条路，实测工具确实出现在模型手里。
+#
+# ⚠️ 不要再在 profile 的 cordis.patch.yml 里写同 id 的覆盖块 —— duplicate loader entry id。
+- insert:
+    - id: capability-bridge
+      name: '@dsh-brain/capability-bridge'

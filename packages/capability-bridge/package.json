@@ -1,0 +1,32 @@
+{
+  "name": "@dsh-brain/capability-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "description": "把能力库（~/.dsh/capabilities/registry.json）暴露给模型，两个只读工具：list_capabilities（能力清单）+ capability_report（单能力档案）。设计依据 docs/capability-registry-evolution.md §6 方案C —— 长尾能力走固定的 list_capabilities，能力清单不进 tools 段，从而「注册/淘汰一个能力」不击穿 prompt 前缀；同时修掉失败模式⑤「子脑自进化后顶层认知过期」。刻意不做 capability_signal：§5.5.2 论证行为信号之所以最强正因不可伪造，让模型自报会把它降级成 cheap talk —— 信号应由会话日志自动提取。",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
