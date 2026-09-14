@@ -45,6 +45,10 @@
 
 ## 3. 文档索引（`docs/`）
 
+> ⚠️ **design-canvas 仓的 `docs/*` 是 gitignore 的**（`.gitignore:101`），只有**精选文档被 force-add**：
+> 目前入库的只有 `docs/go-ts-translate.md`、`docs/tool-convergence.md`、`docs/observe-line-triage.md`。
+> ⇒ 在该仓写"要长期留存的文档"必须 `git add -f`，否则**本地看得见、远端没有**（2026-09-14 踩到）。
+
 | 文档 | 内容 |
 |---|---|
 | **`ideas-spec.md`** | **入口级旗舰规格（实现无关）**：把 agent-shell 值得保留的**工程理念/不变量**抽成规格，作为在 DSH 上重新实现的唯一依据。每节：意图 / 不变量 / 边界 / 验收标准。**改动架构前先读它。** |
