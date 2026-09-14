@@ -59,16 +59,20 @@ const copied = copyTree(path.resolve(srcArg), root)
 if (process.argv.includes('--tile')) {
   const { ensureIndexAroundSeed } = await import(`file:///${DC}/dist/src/tools/index_freshness.js`)
   // 注意：copyTree 把 src 的**内容**复制到 root ⇒ 种子路径不带 src/ 前缀
+  const depthArg = process.argv.indexOf('--depth')
+  const tileDepth = depthArg > 0 ? Number(process.argv[depthArg + 1]) : 2
+  const impArg = process.argv.indexOf('--importers')
+  const tileImporters = impArg > 0 ? Number(process.argv[impArg + 1]) : 20
   const seeds = ['tools/edit_code.ts', 'db/symbols.ts', 'observe/instrument.ts', 'tools/import_project.ts']
   const out = []
   out.push(`拼图式局部索引（S1 实测）—— 源：${path.resolve(srcArg)}（复制 ${copied} 文件）`)
-  out.push('  语义：以 1 个文件为种子、双向 2 跳、预算 200 文件；**不触发全量冷启**')
+  out.push(`  语义：以 1 个文件为种子、双向 ${tileDepth} 跳、预算 200 文件、入边靠文本反查（并入者为终点）`)
   out.push('')
   out.push('  种子'.padEnd(40) + '新建  失败  缝合  访问  耗时     状态')
   let total = 0
   for (const s of seeds) {
     const t = Date.now()
-    const r = await ensureIndexAroundSeed(root, [s], { depth: 2, maxFiles: 200 })
+    const r = await ensureIndexAroundSeed(root, [s], { depth: tileDepth, maxFiles: 200, maxTextImporters: tileImporters })
     const ms = Date.now() - t
     total += ms
     out.push(
