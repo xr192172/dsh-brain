@@ -173,7 +173,7 @@ ensureFreshIndex(db, projectRoot, opts?: { bootstrap?: boolean; maxFiles?: numbe
 2. **不静默撒谎**：`state` + `truncated` 是一等字段；`semantic_search` 的 `message` 会带上
    「冷启动建索引 N 文件」或「已达冷启文件上限，仅覆盖部分文件（如需全量请跑 import_project）」。
 3. **可退可取证**：`{ bootstrap: false }` 恢复"只保鲜不冷启"的老语义（测试里保留该用例）；
-   真 MCP stdio 端到端探针 `scripts/probe-dc-zero-setup.mjs` 断言 4 件事 ——
+   真 MCP stdio 端到端探针 `scripts/probe-dc-zero-setup-mcp.mjs` 断言 4 件事 ——
    陌生项目**调用前无 cache.db** → **不跑 import_project 直接查** → 命中符号 → **调用后 cache.db 已生成**。
 
 **仍待做（P0-b，见 `agent-code-io-adoption.md` §0）**：仓内还有 8 处"请先运行 import_project"

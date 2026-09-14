@@ -32,12 +32,17 @@ await client.connect(transport)
 
 const tl = await client.listTools()
 const names = tl.tools.map((t) => t.name).sort()
-if (names.length !== 60) problems.push(`工具数 ${names.length} ≠ 60`)
 
 const r = await client.callTool({ name: 'capability_map', arguments: {} })
 const text = (r.content ?? []).map((c) => c.text ?? '').join('\n')
 
-if (!text.includes('60 工具 / 6 线')) problems.push('输出未含「60 工具 / 6 线」')
+// ★ 不写死工具数：地图头部的数字必须与真实 tools/list 一致（同一课：别手抄注册表）
+const headerCount = Number((text.match(/（(\d+) 工具 \/ (\d+) 线）/) ?? [])[1] ?? NaN)
+const headerLanes = Number((text.match(/（(\d+) 工具 \/ (\d+) 线）/) ?? [])[2] ?? NaN)
+if (!Number.isFinite(headerCount)) problems.push('输出未含「（N 工具 / M 线）」头部')
+else if (headerCount !== names.length) problems.push(`头部工具数 ${headerCount} ≠ tools/list ${names.length}`)
+if (headerLanes !== 6) problems.push(`头部线数 ${headerLanes} ≠ 6`)
+if (names.length < 60) problems.push(`工具数异常偏少：${names.length}`)
 if (!text.includes('目录由工具注册表自动派生')) problems.push('输出未含派生说明（拿到的是旧地图？）')
 const must = ['memory_observe', 'memory_targets', 'go_originals', 'move_symbol', 'capability_map']
 for (const n of must) if (!text.includes(n)) problems.push(`曾漏网的工具仍不可见：${n}`)

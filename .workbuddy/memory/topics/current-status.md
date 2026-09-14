@@ -84,7 +84,7 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   **P0-b**：新增 `ensureProjectIndex(root)` 单一入口；已接线 `semantic_search` / `explore_code(diff_impact)` /
   `diagnose` / `extract_contracts` / `harvest_closure` / **`find_references`（缺索引自建重试）**；
   改 7 处前置文案。**旁证**：`find_references.test.ts` **7 红 → 3 红**（剩 3 项为既有跨语言闭包缺口）。
-  探针 `scripts/probe-dc-zero-setup.mjs` **6 项断言 PASS**。
+  探针 `scripts/probe-dc-zero-setup-mcp.mjs` **6 项断言 PASS**。
   **残余**（已记档）：`analyze_monolith`/`language_concepts`/`query_feature`（同步内核或非 agent 路径）、
   `function_outline`（feature 级缓存）；`diff_views` 等属**领域前置不该动**。
 - **P0-1 智能报错（Did you mean）已完成**：`src/tools/arg_suggest.ts` + `registerAllTools` 注入；

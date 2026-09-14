@@ -10,7 +10,7 @@
 
 | 项 | 说明 | 状态 |
 |---|---|---|
-| **P0 冷启 bootstrap（N1 零前置）** | 空库不再甩"请先 import_project"，而是**就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`） | ✅ **已实现并端到端验证**（`index_freshness.ts` / `semantic_search.ts`；探针 `scripts/probe-dc-zero-setup.mjs` 6 项断言 PASS） |
+| **P0 冷启 bootstrap（N1 零前置）** | 空库不再甩"请先 import_project"，而是**就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`） | ✅ **已实现并端到端验证**（`index_freshness.ts` / `semantic_search.ts`；探针 `scripts/probe-dc-zero-setup-mcp.mjs` 6 项断言 PASS） |
 | **P0-b 零前置化（统一入口 + 已接线路径）** | 新增 **`ensureProjectIndex(root)`** 作为全仓"我要一个已就绪索引"的单一入口；已接线：`semantic_search`、`explore_code(action=diff_impact)`、`diagnose`（`runDiagnosis` 内）、`extract_contracts`、`harvest_closure`、**`find_references`（缺索引→自建→重试一次，不再直接拒绝）**；并改写 7 处"请先 import_project"文案 | ✅ **已完成（本轮）** |
 
 **P0-b 顺带收益（可测）**：`tests/tools/find_references.test.ts` 由 **7 红 → 3 红** ——
@@ -72,8 +72,19 @@
 ### 5. git 快照 + 一键回滚
 - **出处**：aider（每轮自动 commit，`/undo` 回退）。
 - **我们**：有 dry_run + 原子落盘 + 失败回滚，但**没有"可回退的历史"**（跨调用无法撤销）。
-- **落地**：`edit_code`/`rename_*` 落盘前自动建快照（git stash/临时 branch 或 `.design-canvas/snapshots/` 影子副本，按项目是否 git 仓自适应）；加 `rollback <snapshot>`。
-- **状态**：待做（与"不可撤回 > 能力"的设计原则 6 一致，值得早做）
+- **落地**：新增 `src/tools/file_snapshot.ts`（**影子副本**，不用 git —— 项目未必是 git 仓，
+  且替用户 commit/stash 会污染他的工作区；只存被改动的那几个文件，KB 级、与 git 解耦）；
+  存储 `.design-canvas/code-snapshots/<id>/{meta.json,files/<rel>}`，默认保留 20 份。
+  新工具 **`list_snapshots` / `rollback_snapshot`**（省略 = 最近一份；`file` 可只回滚一个文件）；
+  回滚语义含"**快照时不存在 → 删除**"（即撤销"这次新建的文件"）。
+  **接线（落盘前自动快照）**：`edit_code`、`rename_files`（清单取自 dry_run 的 references）、
+  `move_symbol`（用它自己算好的 `affectedFiles` 源+目标+各 importer）。
+  ⚠️ **命名避让**：仓内**已有** `src/tools/snapshot.ts`，那是 **DSL feature 快照**（设计状态），
+  与本模块**同名不同职** → 本模块叫 `file_snapshot.ts`、目录也用 `code-snapshots/` 分开。
+- **验证**：`tests/tools/file_snapshot.test.ts` 8 项（含"edit_code 落盘前自动快照 → 回滚复原"端到端）；
+  真 MCP 探针 `scripts/probe-dc-snapshot-mcp.mjs` **5 项断言 PASS**
+  （落盘后快照在 / 文件已改 / 回滚复原 / 回滚后仍可查）。
+- **状态**：✅ **已完成**（`rename_symbols` 暂未接线：其影响文件集在内部 dry-run 才算出来，留作后续）
 
 ---
 
