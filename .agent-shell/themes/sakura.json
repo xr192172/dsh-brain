@@ -1,0 +1,39 @@
+{
+  "id": "sakura",
+  "name": "樱花飞舞",
+  "mode": "light",
+  "colors": {
+    "primary": "#FFB7C5",
+    "primary_hover": "#FFC7D5",
+    "primary_active": "#FFA7B5",
+    "accent": "#FF69B4",
+    "background": "#FFF5F7",
+    "surface": "#FFFFFF",
+    "surface_hover": "#FFF0F5",
+    "text_primary": "#4A2B3A",
+    "text_secondary": "#8B6F7B",
+    "text_muted": "#BFA0AB",
+    "border": "#FFD4E1",
+    "divider": "#FFE4F0",
+    "success": "#7BC97B",
+    "warning": "#FFB347",
+    "danger": "#FF6B6B",
+    "info": "#FFB7C5"
+  },
+  "typography": {
+    "display": "ZCOOL XiaoWei",
+    "body": "LXGW WenKai",
+    "mono": "Fira Code"
+  },
+  "effects": {
+    "glow": true,
+    "glow_color": "#FFB7C5",
+    "noise_texture": false,
+    "glass_morphism": true,
+    "sakura_falling": true,
+    "sakura_density": 20
+  },
+  "built_in": true,
+  "created_at": "0001-01-01T00:00:00Z",
+  "updated_at": "0001-01-01T00:00:00Z"
+}

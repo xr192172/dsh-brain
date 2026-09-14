@@ -1,0 +1,37 @@
+{
+  "id": "neon",
+  "name": "浅色霓虹",
+  "mode": "light",
+  "colors": {
+    "primary": "#0F172A",
+    "primary_hover": "#1E293B",
+    "primary_active": "#0B1220",
+    "accent": "#0891B2",
+    "background": "#FFFFFF",
+    "surface": "#FFFFFF",
+    "surface_hover": "#F8FAFC",
+    "text_primary": "#0F172A",
+    "text_secondary": "#64748B",
+    "text_muted": "#94A3B8",
+    "border": "#E5E5E5",
+    "divider": "#EEF2F7",
+    "success": "#16A34A",
+    "warning": "#D97706",
+    "danger": "#DC2626",
+    "info": "#2563EB"
+  },
+  "typography": {
+    "display": "Inter",
+    "body": "Noto Sans SC",
+    "mono": "JetBrains Mono"
+  },
+  "effects": {
+    "glow": true,
+    "glow_color": "#0891B2",
+    "noise_texture": false,
+    "glass_morphism": false
+  },
+  "built_in": true,
+  "created_at": "0001-01-01T00:00:00Z",
+  "updated_at": "0001-01-01T00:00:00Z"
+}

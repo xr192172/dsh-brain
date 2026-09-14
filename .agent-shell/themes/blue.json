@@ -1,0 +1,37 @@
+{
+  "id": "blue",
+  "name": "深蓝科技",
+  "mode": "dark",
+  "colors": {
+    "primary": "#4A90E2",
+    "primary_hover": "#5BA0F2",
+    "primary_active": "#3A80D2",
+    "accent": "#00D4FF",
+    "background": "#0F1419",
+    "surface": "#1A1F26",
+    "surface_hover": "#242930",
+    "text_primary": "#E4E7EB",
+    "text_secondary": "#9CA3AF",
+    "text_muted": "#6B7280",
+    "border": "#2D3239",
+    "divider": "#1F242C",
+    "success": "#10B981",
+    "warning": "#F59E0B",
+    "danger": "#EF4444",
+    "info": "#3B82F6"
+  },
+  "typography": {
+    "display": "Noto Serif SC",
+    "body": "LXGW WenKai",
+    "mono": "JetBrains Mono"
+  },
+  "effects": {
+    "glow": true,
+    "glow_color": "#4A90E2",
+    "noise_texture": true,
+    "glass_morphism": true
+  },
+  "built_in": true,
+  "created_at": "0001-01-01T00:00:00Z",
+  "updated_at": "0001-01-01T00:00:00Z"
+}
