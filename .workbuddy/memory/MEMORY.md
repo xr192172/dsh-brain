@@ -133,4 +133,34 @@
   （`scripts/test-capability-bridge.mjs`，mock ctx 直接调 execute）。
   ⚠️ `defineTool()` 返回裸对象 `{name,description,parameters,output,execute,presentCall}`，可脱离 DSH 单测。
   ⚠️ 重启后**首轮 cache 命中率 0% 是预期的**（tools 段变了一次）。
-- **下一步 P3**：注册门（L0~L4 判据阶梯）+ 给存量 `spawn`/`fork` 补 acceptance。
+- **★ 能力库必须覆盖两层（2026-09-14 用户提醒后补）**：原设计只登记**委派层**
+  （`subagent-provider`），漏掉**工具层** —— 而模型手里大部分工具来自 MCP（design-canvas 一家 60 个）。
+  已补：`capability-registry.mjs` 的 `MCP_SOURCES` + `scanMcpSource()`；design-canvas 登记为
+  `kind: mcp-server`（60 工具 / 6 能力线 / 导航工具 `capability_map`）；`list_capabilities` 分层输出。
+  **对接而非重复造**：跨源总览归我们的 `list_capabilities`，线级导航归它的 `capability_map`。
+  ★ 首次抓到真问题：`capability_map` 是**手工同步**的静态表，**4 个工具没进任何能力线**
+  （`go_originals` / `memory_observe` / `memory_targets` / `move_symbol`）→ 靠它导航的 agent 看不见，
+  含记忆系统两个入口。设计文档见 `docs/capability-registry-evolution.md` **§3.6**。
+- **下一步 P3**：注册门（L0~L4 判据阶梯）+ 给存量 `spawn`/`fork`/`design-canvas` 补 acceptance；
+  **验收对象必须含 `kind: mcp-server`**（工具层）。
+
+## ⏭ 交接（2026-09-14 15:42，用户因上下文过长换新窗口）
+
+**两边工作区都干净**：dsh-brain 6 个提交；design-canvas 1 个提交（`b1b2bc6`）。
+
+**用户最后提的三件事（均未展开，新窗口优先接）**：
+
+1. **`capability_map` 的能力线目录要「自动生成」，不要手工同步** —— 他早前提过但未被实现。
+   ⇒ `design-canvas/src/tools/capability_map.ts` 的 `LANES` 应由**单一真相源**生成
+   （工具注册信息 + lane 标注，或直接由 `capability-registry` 生成）。
+2. **给 design-canvas 改名** —— 他问我「你应该知道吧」，但我**没查到那次提案**
+   （`conversation_search` 两次 0 命中）。**需向他确认名字**，或去
+   `design-canvas/docs/`、`.trae/documents/`、git log 找线索。改名动机见下条。
+3. ★ **愿景**：design-canvas 成为 agent 的**读写编辑统一入口**，且**模型无感** ——
+   原话「以后所有的读写编辑都用这个…agent 要自己遇到一个项目就自发地去解析，让模型无感」。
+   ⚠️ **张力**：**「模型无感」与 prompt 前缀稳定性冲突** —— 若把默认路径写进 system prompt，
+   每次调整都击穿缓存。应靠**工具层的默认实现（同名工具换底层）**，而非 prompt 指令。
+
+**未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜上述 1 / 2 / 3。
+
+> 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
