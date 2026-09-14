@@ -43,6 +43,11 @@
 7. **判据与信号不可混**：裸满意度评分应被**丢弃**；采纳只认可执行 `acceptance` + 隐藏 holdout。
 8. **压缩后端契约**：任何产出 summary 对象的路径必须携带 `measurement` +
    `start/end/shadowedSeqs/selectedNodes` → 跑 `scripts/check-compaction-fallback-shape.mjs`。
+9. **★ 插件 Config 是 `z.object` ⇒ 其 `cordis.patch.yml` 的 insert 必须显式写 `config:`**
+   （哪怕全用默认值）。漏写 → loader 传 `undefined` → zod `expected object, received undefined`
+   → **gen 启动即 EXIT code=1**；**而换代接口仍报 `success`（静默失败！）**。
+   ⇒ 换代后别只看 `?cmd=result`，必须看 `~/.dsh/switchboard/gen-*/boot.log` 与 `crash-investigation/`。
+   （2026-09-14 实测：`capability-bridge` 漏 config，gen-3083 崩溃；7 个 `@dsh-brain/*` 包现已全部显式写。）
 
 ## 主题索引（**按需读**）
 
@@ -68,10 +73,12 @@
 
 1. ✅ **已完成（15:55–16:05）**：`capability_map` 的能力线目录**改为由注册表 `TOOL_DEFS` 派生**
    （`LANE_OF` 只写归属，`when` 取描述首句；漏标 → 输出显式「未归线」段 + 测试红）。
-   **60/60 归线**，design-canvas 提交 `91a57ea`。⚠️ 需**换代**后运行时才生效。
+   **60/60 归线**，design-canvas 提交 `91a57ea`。
+   **已换代（gen-3084）并用真 MCP stdio 探针端到端验证通过**（工具 60 / 6 线 / 5 个曾漏网工具全可见）。
    细节见 `topics/current-status.md` 与 `docs/capability-registry-evolution.md` §3.6.1。
-2. **给 design-canvas 改名** —— **推荐已给待拍板**：主推 `silva`（中文「林」），备选 `graft`/`arbor`。
-   影响面实测 **179 文件** + DSH profile/插件/能力库 ⇒ 分「品牌层 / 机器契约层」两次原子走。
+2. **改名：推荐 `agentio`（主推）/ `agentbase`（备选）** —— 详见 `docs/rename-design-canvas.md`。
+   命名结论：**机器名走基建系直白词，意象词留作中文外号**（事实 A/B 见文档 §2）。
+   影响面 **179 文件** + DSH profile/bridge/能力库 ⇒ 分「品牌层 / 机器契约层」两次原子走。
 3. ★ **愿景：读写编辑统一入口（AST 内核）** —— **设计稿已出：`docs/ast-io-entry.md`**。
    要点：**内核已有，缺口只有「冷启 bootstrap」**（`ensureFreshIndex` 只保鲜不冷启）；
    三入口 `code_read`/`code_filter`/`code_edit`；**N3 模型无感靠工具层默认实现，绝不写 system prompt**

@@ -72,7 +72,10 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 - `scripts/diff-dc-capability-map.mjs` **重写**：不再正则解析源码 → import 编译产物 + `validateLanes`
   + 真调 handler + 与 `registry.json` 的 `tooling` 块对账，`--fix` 回填（已刷成 60/0 漂移）。
   另留 `scripts/dump-dc-tool-catalog.mjs`（导出真目录含描述，定 `when` 文案时用）。
-- ⚠️ **运行时未生效**：MCP server 是 stdio 拉起的进程，需 **rebuild（已做）+ 换代**后模型才看到新地图。
+- ✅ **运行时已生效（2026-09-14 16:29）**：fast 换代成功 → **gen-3084 / 3084 / pid 31004**。
+  对 design-canvas MCP stdio server 做真实握手 `tools/list` 实测 **60 个工具、含 `capability_map`**
+  （dist mtime `08:00:31Z`）；新 gen `[capability-bridge] apply running` + `[design-canvas v0.1.3] MCP server started`。
+  ⚠️ 首次换代（→ gen-3083）**换崩了**：见下节 P0。
 
 ## 其他未闭合
 
@@ -81,7 +84,31 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   见 `tests/tools/index_freshness.test.ts` 的「空库 → 不 bootstrap」用例）⇒ P0 极小。
   三入口 `code_read`/`code_filter`/`code_edit`；N3 模型无感**绝不写 prompt**（靠工具层默认实现）。
   待拍板 5 项（名字/兼容/扫描边界/dry_run 默认/索引归属）。
-- **design-canvas 改名：推荐已给，待用户拍板**（主推 `silva`/「林」；备选 `graft`/`arbor`）。
-  影响面：仓内 **179 文件** + DSH profile/插件/能力库；分「品牌层 / 机器契约层」两次走。
-- P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜
-  "读写编辑统一入口 + 模型无感"愿景（详见日更 2026-09-14 尾部）。
+- **design-canvas 改名：推荐 `agentio`**（主推，5/5 闸）／`agentbase`（备选，最对位）／`astbase`（机制向）。
+  命名策略：**机器名走基建系直白词（`*base`/`*io` npm 多空闲），意象词降级为中文外号**
+  （事实依据：canopy/lexis/scalpel/silva 全被同语义真项目占）。
+  影响面 179 文件 + DSH profile/bridge/能力库；文档 `docs/rename-design-canvas.md` §6–§7（两段式迁移）。
+- **换代闭环**：`capability_map` 改造**已生效**（gen-3084）—— 真 MCP stdio 探针
+  `scripts/probe-dc-capability-map-mcp.mjs` 4 项断言 PASS（60 工具 / 6 线 / 5 个曾漏网工具可见）。
+- P2-b 重启验证（`list_capabilities` 是否进模型工具清单）：**已具备证据但未做会话级复核**
+  —— gen-3084 启动日志 `[capability-bridge] apply running; registry=~/.dsh/capabilities/registry.json`，
+  说明插件已成功装载（`list_capabilities`/`capability_report` 走 host plane 全局层）；
+  若要拿"模型真看到的清单"，仍应跑 `scripts/dump-request-tools.mjs <会话相对路径>` 看 `request/header`。
+- "读写编辑统一入口 + 模型无感"愿景（详见日更 2026-09-14 尾部）。
+
+## ★ P0（2026-09-14 16:25 发现并已修）：capability-bridge 缺 config → 换代即换崩
+
+- **症状**：`?cmd=restart` 返回 `result:success`、流水 `verify-boot-health ok: 本次启动无装载失败`、
+  `retire gen-3082` —— 但新 gen `EXIT code=1`（`lifecycle.log` `runtimeStopped=false`），
+  端口 3083 无监听 → **前端门 3080 返回 `502 upstream ECONNREFUSED`，整套服务全下线**
+  （旧代已 retire，`rollbackFlip` 因假阳性健康检查未触发）。
+- **根因**：`packages/capability-bridge/cordis.patch.yml` 的 `insert` **没写 `config:`**，
+  而插件 `Config = z.object({...})` 不接受 `undefined` →
+  `failed to apply loader entry capability-bridge: invalid config: expected object, received undefined`。
+  其余四个 `@dsh-brain` 插件都显式写了 `config`，**本包是唯一漏的**。
+- **修法**：patch 补 `config: { registryPath: '', maxRows: 50 }`；`check:profile` 由 **579 → 582 行**
+  （+3 行），exit 0 / stderr 空。**注：改 patch 不需要 rebuild**（YAML 在装载时读）。
+- **★ 两个更值得修的上游问题**（尚未动）：
+  ① `verify-boot-health` **漏判启动失败**（gen 崩了仍报 ok）—— 这是保险本身失效，比这次事故更危险；
+  ② 插件 schema 应对"无配置"健壮（doc 明写"留空 = 默认路径"），否则任何新插入都可能崩整个 harness。
+

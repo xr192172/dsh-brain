@@ -81,6 +81,38 @@ DSH_HOME='C:\Users\Admin\.dsh' node node_modules/@deepseek-ai/dsh/lib/bin.js web
 - 另有一处形态差异 `6449|94~96` vs `1783|70`（system 差 4666 字符、少 25 个工具）——
   由插件树部分加载失败解释，见上。
 
+## ★ 插件 Config 缺失 = gen 启动即崩，而换代仍报 success（2026-09-14 实测）
+
+**症状**：换代返回 `{"result":"success","note":"已快速切换 → gen-XXXX"}`，**但新代其实当场崩了**。
+会话表现为"换了代但没反应"，只有翻日志才看得见。
+
+**证据链**（保留在 `~/.dsh/switchboard/`）：
+- `crash-investigation/gen-3083-31332-*.txt`：`gen EXIT gen=gen-3083 pid=31332 code=1`
+- `gen-3083/boot.log` 尾部：
+  `failed to apply loader entry capability-bridge (@dsh-brain/capability-bridge): invalid config:
+   - Invalid input: expected object, received undefined`
+  ⇒ `resolveConfig` 在 cordis 里拦下，`Promise.allSettled` 后进程退出。
+
+**根因**：包的 `Config = z.object({...})`，而 `packages/<pkg>/cordis.patch.yml` 的 `insert` 里
+**没写 `config:`** → loader 传 `undefined` → zod 校验失败。
+（其余包都写了，`capability-bridge` 此前漏了 —— 单点遗漏，不是系统性问题。）
+
+**修法**：insert 里**显式写 config，哪怕全是默认值**：
+```yaml
+- insert:
+    - id: capability-bridge
+      name: '@dsh-brain/capability-bridge'
+      config:            # ← 必须写；字段与包内 Config 保持一致
+        registryPath: ''
+        maxRows: 50
+```
+现状：7 个 `@dsh-brain/*` 包（capability-bridge / conveyor-context / design-canvas-bridge /
+key-pool-proxy / subagent-council / switchboard / tool-evolution）**已全部显式写 config**。
+
+**★ 教训（比这个 bug 更重要）**：**换代报 `success` ≠ 新代可用。**
+`verify-boot-health` 这次报了 `ok: 本次启动无装载失败`，但新代仍崩 —— 说明该检查有盲区。
+⇒ **换代后必查两处**：`~/.dsh/switchboard/gen-<新代>/boot.log` 与 `crash-investigation/` 有无新文件。
+
 ## 两个平面：host plane vs preset plane（**改错平面 = 改了没反应**）
 
 | 平面 | 内容 | 改动位置 |
