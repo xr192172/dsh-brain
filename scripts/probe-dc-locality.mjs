@@ -54,6 +54,40 @@ function copyTree(from, to) {
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'locality-'))
 const copied = copyTree(path.resolve(srcArg), root)
+
+// ── 模式 B（--tile）：**真跑**拼图式局部索引，测"选中一个文件"的首调延迟 ──
+if (process.argv.includes('--tile')) {
+  const { ensureIndexAroundSeed } = await import(`file:///${DC}/dist/src/tools/index_freshness.js`)
+  // 注意：copyTree 把 src 的**内容**复制到 root ⇒ 种子路径不带 src/ 前缀
+  const seeds = ['tools/edit_code.ts', 'db/symbols.ts', 'observe/instrument.ts', 'tools/import_project.ts']
+  const out = []
+  out.push(`拼图式局部索引（S1 实测）—— 源：${path.resolve(srcArg)}（复制 ${copied} 文件）`)
+  out.push('  语义：以 1 个文件为种子、双向 2 跳、预算 200 文件；**不触发全量冷启**')
+  out.push('')
+  out.push('  种子'.padEnd(40) + '新建  失败  缝合  访问  耗时     状态')
+  let total = 0
+  for (const s of seeds) {
+    const t = Date.now()
+    const r = await ensureIndexAroundSeed(root, [s], { depth: 2, maxFiles: 200 })
+    const ms = Date.now() - t
+    total += ms
+    out.push(
+      '  ' + s.padEnd(36) + String(r.newFiles).padStart(4) + String(r.failed).padStart(6) +
+        String(r.stitched).padStart(6) + String(r.visited).padStart(6) +
+        `${String(ms).padStart(7)}ms   ${r.partial ? `partial(${r.stopReason})` : 'ready'}`,
+    )
+  }
+  out.push('')
+  out.push(`  参考：同项目**全量冷启 12151ms**（296 文件）⇒ 拼图首调省 ${(100 - (total / seeds.length / 12151) * 100).toFixed(0)}%`)
+  fs.mkdirSync('D:/project_develop/dsh-brain/out', { recursive: true })
+  fs.writeFileSync('D:/project_develop/dsh-brain/out/locality-tile.txt', out.join('\n'), 'utf8')
+  console.log(out.join('\n'))
+  try {
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch {}
+  process.exit(0)
+}
+
 const t0 = Date.now()
 const { db } = await ensureProjectIndex(root)
 const bootMs = Date.now() - t0
