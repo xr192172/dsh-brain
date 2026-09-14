@@ -1,6 +1,9 @@
 # design-canvas 改名：发散、证据与推荐
 
-> 状态：**★ 待定**（用户 2026-09-14 决定：**先挂 working name `agentio`**，不急于定名）
+> 状态：**★ 已定案（2026-09-14）**：正名 **`agentio`**（用户拍板："话说现在还没定名字吧，就叫 agent IO 算了"）。
+> 中文可用「Agent IO / IO 层」；意象外号（天工 / 林 / 解析世界）不占契约、可继续当外号用。
+> **待办**：机器契约层改名（MCP `serverName` → 工具前缀 `mcp__agentio__*`、`DESIGN_CANVAS_HOME`、
+> `.design-canvas/` 数据根与 `.design-canvas.json`）是**独立一次性任务**，按 §7 两段式走（影响 179 文件）。
 > 起于 2026-09-14 ｜ 背景：`ast-io-entry.md` 把它的身份从「可视化协议层」
 > 推向「**agent 的读写编辑统一入口（AST 内核）**」—— 现名只覆盖旧身份的一小半。
 > 同类项目怎么命名/怎么做的：见 `agent-code-io-landscape.md`。
