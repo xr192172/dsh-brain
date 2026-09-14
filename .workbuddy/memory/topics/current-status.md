@@ -79,13 +79,18 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 
 ## 其他未闭合
 
-- **读写编辑统一入口（AST 内核）：设计稿已出，★ P0 已实现** → `docs/ast-io-entry.md`。
-  **P0 冷启 bootstrap 已落地并端到端验证**（design-canvas `index_freshness.ts` / `semantic_search.ts`）：
-  空库不再甩"请先 import_project"，而是**就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`）。
-  探针 `scripts/probe-dc-zero-setup.mjs`（真 MCP stdio）**5 项断言 PASS**。
-  **P0-b 残余**：仓内还有 8 处"请先运行 import_project"（`diagnosis/*`、`diff_impact`、
-  `extract_contracts`、`function_outline`、`diagnose` 前置说明）——零前置要做成系统属性。
-  可抄台账见 `docs/agent-code-io-adoption.md`（13 条 + 采纳顺序）；同类调研 `docs/agent-code-io-landscape.md`。
+- **读写编辑统一入口（AST 内核）：P0 + P0-b 已完成** → `docs/ast-io-entry.md` / `docs/agent-code-io-adoption.md`。
+  **P0**：空库就地静默建索引（有界 2000 文件 + 诚实 `state/truncated`）。
+  **P0-b**：新增 `ensureProjectIndex(root)` 单一入口；已接线 `semantic_search` / `explore_code(diff_impact)` /
+  `diagnose` / `extract_contracts` / `harvest_closure` / **`find_references`（缺索引自建重试）**；
+  改 7 处前置文案。**旁证**：`find_references.test.ts` **7 红 → 3 红**（剩 3 项为既有跨语言闭包缺口）。
+  探针 `scripts/probe-dc-zero-setup.mjs` **6 项断言 PASS**。
+  **残余**（已记档）：`analyze_monolith`/`language_concepts`/`query_feature`（同步内核或非 agent 路径）、
+  `function_outline`（feature 级缓存）；`diff_views` 等属**领域前置不该动**。
+  **下一步**：P0 智能报错（Did you mean）+ git 快照回滚 + 模糊编辑级联 → P1「修复→规则沉淀」。
+- **★ 换代分工（用户 2026-09-14 拍板）**：**换代由用户自己发**（不受换代影响的旁观者视角），
+  我不再自动换代。理由：换代重启的是我所在宿主（fast 跳过 defer ⇒ 我的轮次可能被掐、
+  子进程被杀）；真实判据缺陷是**换代报 success ≠ 新代可用**（铁律 9）。
 - **design-canvas 改名：推荐 `agentio`**（主推，5/5 闸）／`agentbase`（备选，最对位）／`astbase`（机制向）。
   命名策略：**机器名走基建系直白词（`*base`/`*io` npm 多空闲），意象词降级为中文外号**
   （事实依据：canopy/lexis/scalpel/silva 全被同语义真项目占）。

@@ -10,13 +10,24 @@
 
 | 项 | 说明 | 状态 |
 |---|---|---|
-| **P0 冷启 bootstrap（N1 零前置）** | 空库不再甩"请先 import_project"，而是**就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`） | ✅ **已实现并端到端验证**（`index_freshness.ts` / `semantic_search.ts`；探针 `scripts/probe-dc-zero-setup.mjs` 5 项断言 PASS） |
+| **P0 冷启 bootstrap（N1 零前置）** | 空库不再甩"请先 import_project"，而是**就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`） | ✅ **已实现并端到端验证**（`index_freshness.ts` / `semantic_search.ts`；探针 `scripts/probe-dc-zero-setup.mjs` 6 项断言 PASS） |
+| **P0-b 零前置化（统一入口 + 已接线路径）** | 新增 **`ensureProjectIndex(root)`** 作为全仓"我要一个已就绪索引"的单一入口；已接线：`semantic_search`、`explore_code(action=diff_impact)`、`diagnose`（`runDiagnosis` 内）、`extract_contracts`、`harvest_closure`、**`find_references`（缺索引→自建→重试一次，不再直接拒绝）**；并改写 7 处"请先 import_project"文案 | ✅ **已完成（本轮）** |
 
-**顺带发现的同类差距（P0-b，同一件事的残余）**：仓内还有 **8 处**在报"请先运行 import_project"——
-`diagnosis/candidate_locator.ts`、`diagnosis/chain_tracer.ts`、`diagnosis/root_cause_aggregator.ts`、
-`tools/diff_impact.ts`（2 处）、`tools/extract_contracts.ts`、`tools/function_outline.ts`、
-`server_registry.ts` 里 `diagnose` 的前置说明。
-⇒ 零前置要做成**系统属性**，不能只修查询入口；这些点应逐个改成"自己建/自己退回解析 + 诚实标注"。
+**P0-b 顺带收益（可测）**：`tests/tools/find_references.test.ts` 由 **7 红 → 3 红** ——
+修好的 4 项正是"没建索引就 ok:false"那几类；剩下 3 项是**既有的跨语言闭包缺口**
+（Go/Java/Python 的 cross-call 未覆盖，仓内 `tool-convergence.md` §5.6 已记录在案），与本轮无关。
+
+**P0-b 残余（同步内核，需在其异步边界接 bootstrap / 或本就非 agent 路径）**：
+
+| 位置 | 情况 |
+|---|---|
+| `tools/analyze_monolith.ts:571,593` | 同步内核；调用方 `import_project` / `derive_feature_tree` 均自带 db，非 agent 主路径 |
+| `tools/language_concepts.ts:267,293` | 同步内核；调用方是 `serve.ts` HTTP 端点（非 agent 路径） |
+| `tools/query_feature.ts:662` | 走 `cache_db` 参数（DSH 侧显式传库），语义特殊 |
+| `tools/function_outline.ts:207` | 走 **feature 级**缓存（`import_cache_*.db`），不是项目索引 → 需"用项目索引替代 feature 缓存"的更大改动 |
+| `tools/diff_views.ts:625,628` | 属"设计视图/代码快照不存在"，是**领域前置**（要先有设计），不是索引前置 ⇒ **不该动** |
+| `derive_mind_map` / `detect_drift` / `sync_contracts` 的 "feature 不存在，请先 import_project" | 同上，属领域前置（先有 feature/DSL），不该动 |
+
 
 ---
 

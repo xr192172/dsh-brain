@@ -48,6 +48,14 @@ const r = await client.callTool({
   arguments: { action: 'search', args: { project_dir: root, query: 'zeroSetupProbe' } },
 })
 const text = (r.content ?? []).map((c) => c.text ?? '').join('\n')
+
+// ★ 第二条：find_references 曾因"未建索引"直接拒绝（ok:false）；
+// 零前置后应自己冷启并给出闭包结果。
+const fr = await client.callTool({
+  name: 'find_references',
+  arguments: { project_dir: root, file: 'src/deep/mod.ts', symbol: 'zeroSetupProbe' },
+})
+const frText = (fr.content ?? []).map((c) => c.text ?? '').join('\n')
 await client.close()
 
 const after = fs.existsSync(dbFile)
@@ -56,6 +64,9 @@ if (!after) problems.push('调用后仍没有 cache.db —— 冷启没建索引
 if (!/zeroSetupProbe/.test(text)) problems.push('没命中目标符号')
 if (!/冷启动建索引/.test(text)) problems.push('输出里没有「冷启动建索引」注记（拿到的是旧语义？）')
 if (/请先运行 import_project|请先对该项目运行/.test(text)) problems.push('仍要求先 import_project（零前置未生效）')
+if (/"ok"\s*:\s*false/.test(frText) || /未建索引/.test(frText)) {
+  problems.push('find_references 仍以"未建索引"拒绝（零前置未覆盖该工具）')
+}
 
 const lines = [
   '端到端（真 MCP stdio）：零前置冷启动 —— 陌生项目不跑 import_project 直接查',
@@ -64,10 +75,14 @@ const lines = [
   `  调用后 cache.db : ${after ? '已生成 ✓' : '未生成'}`,
   `  命中符号        : ${/zeroSetupProbe/.test(text) ? '是 ✓' : '否'}`,
   `  冷启动注记      : ${/冷启动建索引/.test(text) ? '有 ✓' : '无'}`,
-  `  断言            : ${problems.length ? 'FAIL\n    - ' + problems.join('\n    - ') : 'PASS（5 项全过）'}`,
+  `  find_references : ${problems.some((p) => p.includes('find_references')) ? '仍拒绝' : '自建索引后可用 ✓'}`,
+  `  断言            : ${problems.length ? 'FAIL\n    - ' + problems.join('\n    - ') : 'PASS（6 项全过）'}`,
   '',
-  '──── 模型侧实际拿到的输出 ────',
-  text.split('\n').slice(0, 14).join('\n'),
+  '──── explore_code(search) 实际输出 ────',
+  text.split('\n').slice(0, 8).join('\n'),
+  '',
+  '──── find_references 实际输出（前 6 行）────',
+  frText.split('\n').slice(0, 6).join('\n'),
 ]
 fs.mkdirSync(path.dirname(OUT), { recursive: true })
 fs.writeFileSync(OUT, lines.join('\n'), 'utf8')
