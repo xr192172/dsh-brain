@@ -631,14 +631,50 @@ export function apply(ctx: Context, config: Config): void {
           verify: { type: 'string', description: '可选验证脚本绝对路径（须在 VERIFY_ALLOW 白名单内）' },
           out: { type: 'string', description: '可选实验内核产物目录（缺省自动临时目录）' },
           admin: { type: 'string', description: '可选 switchboard admin 端口（默认 31800）' },
+          example: { type: 'string', description: '可选：只返回预设示例模板（modify-tool / add-tool / adjust-config），不做实验。用于照抄 patch 结构后自己填具体改动。' },
         },
         output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text' as const, text: v }] },
         async execute(args) {
+          // 内置示例模板：给 LLM 直接照抄的 patch 结构，降低使用门槛（P1-3）
+          const EXAMPLES: Record<string, string> = {
+            'modify-tool': `# 示例1：修改某个工具的行为/评分逻辑
+patch = [
+  { "file": "src/tools/xxx.ts", "content": "<目标函数所在的整文件新内容，改成想要的逻辑>" }
+]
+# 调用：
+# self_evolve(patch=patch, verify=None)  # 仅探活，缺省不跑测试闸
+# 若控制面配了 VERIFY_CMD，可传 verify=<白名单内脚本> 做测试闸`,
+            'add-tool': `# 示例2：新增一个工具
+# 1) 在 src/tools/ 建新文件 new_tool.ts，内容 = 完整工具定义（defineTool({ name, ... }) + 导出）
+# 2) 在 src/tools/index.ts（或对应聚合文件）里把 new_tool 注册进 tools 列表
+patch = [
+  { "file": "src/tools/new_tool.ts", "content": "<完整新工具文件>" },
+  { "file": "src/tools/index.ts", "content": "<聚合文件含注册 new_tool 的整文件>" }
+]`,
+            'adjust-config': `# 示例3：调整某个默认配置参数（不改逻辑，只改常量/阈值/开关）
+patch = [
+  { "file": "src/config.ts", "content": "<含新默认值的整文件，例如把某个 maxFiles/阈值 改小>" }
+]
+# 常见场景：把桥接层的 maxFiles / includeTests / 判定阈值 等调优`,
+          }
+          const ex = typeof args.example === 'string' ? args.example.trim() : ''
+          if (ex) {
+            const t = EXAMPLES[ex]
+            return t
+              ? `self_evolve 示例「${ex}」：\n${t}\n\n把 content 换成你的真实改动后，用 self_evolve(patch=patch) 触发实验核验证。`
+              : `未知示例「${ex}」。可用：${Object.keys(EXAMPLES).join(' / ')}`
+          }
           try {
             const evolve = process.env.DSH_BRAIN_SCRIPTS
               ? path.join(process.env.DSH_BRAIN_SCRIPTS, 'evolve.mjs')
               : path.join(process.cwd(), 'scripts', 'evolve.mjs')
-            if (!fs.existsSync(evolve)) return `self_evolve 找不到 evolve.mjs（试了 ${evolve}）。可设 env DSH_BRAIN_SCRIPTS 指向 dsh-brain/scripts。`
+            if (!fs.existsSync(evolve)) {
+              return 'self_evolve 找不到 evolve.mjs（当前试了: ' + evolve + '）。\n' +
+                '修复步骤:\n' +
+                '1. 设 env DSH_BRAIN_SCRIPTS 指向 dsh-brain/scripts（含 evolve.mjs + build-experiment-kernel.mjs）\n' +
+                '2. 或确认 D:\\project_develop\\dsh-brain\\scripts\\evolve.mjs 存在\n' +
+                '3. 设好后重试 self_evolve。若 scripts 里缺失，先重建 evolve.mjs/build-experiment-kernel.mjs'
+            }
             const patches = Array.isArray(args.patch) ? (args.patch as Array<{ file: string; content?: string }>) : []
             if (patches.length === 0) return 'self_evolve 需要 patch（[{file,content}]）——这是要实验的改动。'
             const src = typeof args.src === 'string' && args.src ? args.src : config.kernelDir
@@ -823,8 +859,34 @@ export function apply(ctx: Context, config: Config): void {
       },
     },
     output: {
-      schema: { type: 'string', description: '内存统计 / 基线 / 增量 / 泄漏判定文本' },
-      render: (_args, value) => [{ type: 'text' as const, text: value }],
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string' },
+          summary: { type: 'string', description: '人类可读的判定/结果一句话' },
+          metric: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              rssMB: { type: 'number' },
+              heapTotalMB: { type: 'number' },
+              heapUsedMB: { type: 'number' },
+              externalMB: { type: 'number' },
+              arrayBuffersMB: { type: 'number' },
+              heapSizeLimitMB: { type: 'number' },
+              usedHeapMB: { type: 'number' },
+              gcAvailable: { type: 'boolean' },
+              deltas: { type: 'object', additionalProperties: false, description: 'track/gc 相对基线的增量（MB/s）' },
+              verdict: { type: 'string', description: '泄漏/平稳判定：leak-suspect | native-external | stable | mild | none' },
+            },
+          },
+        },
+      },
+      render: (_args, v) => [{
+        type: 'text' as const,
+        text: `${(v as { action?: string }).action ?? ''}: ${(v as { summary?: string }).summary ?? ''}`,
+      }],
     },
     async execute(args) {
       const a = ((args.action ?? 'status') as string).toLowerCase()
@@ -840,63 +902,85 @@ export function apply(ctx: Context, config: Config): void {
           arrayBuffers: mu.arrayBuffers ?? 0,
         }
       }
-      const fmt = (s: MemorySample): string =>
-        `t+${Math.round((s.t - t0) / 1000)}s RSS=${mb(s.rss)}MB heapTotal=${mb(s.heapTotal)}MB heapUsed=${mb(s.heapUsed)}MB external=${mb(s.external)}MB arrayBuffers=${mb(s.arrayBuffers)}MB`
       const t0 = Date.now()
       const key = 'default'
       const hs = v8.getHeapStatistics ? v8.getHeapStatistics() : undefined
+      // 结构化返回：机器可解析 + summary 人话
+      const out = (summary: string, deltas?: Record<string, number>, verdict?: string): object => ({
+        action: a,
+        summary,
+        metric: Object.assign(
+          { rssMB: mb(sample().rss), heapTotalMB: mb(sample().heapTotal), heapUsedMB: mb(sample().heapUsed), externalMB: mb(sample().external), arrayBuffersMB: mb(sample().arrayBuffers) },
+          hs
+            ? { heapSizeLimitMB: mb(hs.heap_size_limit), usedHeapMB: mb(hs.used_heap_size), gcAvailable: canForceGc() }
+            : {},
+          deltas ? { deltas } : {},
+          verdict ? { verdict } : {},
+        ),
+      })
       const lines: string[] = []
+      let deltas: Record<string, number> | undefined
+      let verdict: string | undefined
 
       if (a === 'baseline') {
         const s = sample()
         memoryBase.set(key, s)
-        lines.push(`[基线已记录] ${fmt(s)}`)
+        lines.push(`[基线已记录] t+${Math.round((s.t - t0) / 1000)}s RSS=${mb(s.rss)}MB heapTotal=${mb(s.heapTotal)}MB heapUsed=${mb(s.heapUsed)}MB external=${mb(s.external)}MB arrayBuffers=${mb(s.arrayBuffers)}MB`)
         lines.push(`V8 heapSizeLimit=${mb(hs?.heap_size_limit)}MB usedHeap=${mb(hs?.used_heap_size)}MB 强制GC=${canForceGc() ? '可用' : '不可用(--expose-gc)'}`)
+        return out(lines.join('\n'))
       } else if (a === 'track') {
         const base = memoryBase.get(key)
         if (!base) {
-          lines.push('无基线，先调 action=baseline 记录起点。当前: ' + fmt(sample()))
+          return out('无基线，先调 action=baseline 记录起点。', undefined, 'none')
+        }
+        const s = sample()
+        const dRss = mb(s.rss - base.rss)
+        const dHeap = mb(s.heapUsed - base.heapUsed)
+        const dExt = mb(s.external - base.external)
+        const dtSec = Math.max(1, Math.round((s.t - base.t) / 1000))
+        const rate = mb((s.rss - base.rss) / dtSec)
+        lines.push(`t+${Math.round((s.t - t0) / 1000)}s RSS=${mb(s.rss)}MB heapTotal=${mb(s.heapTotal)}MB heapUsed=${mb(s.heapUsed)}MB external=${mb(s.external)}MB arrayBuffers=${mb(s.arrayBuffers)}MB`)
+        lines.push(`相对基线: RSS ${dRss >= 0 ? '+' : ''}${dRss}MB  heapUsed ${dHeap >= 0 ? '+' : ''}${dHeap}MB  external ${dExt >= 0 ? '+' : ''}${dExt}MB（约 ${dtSec}s → ~${rate}MB/s）`)
+        deltas = { rssMB: dRss, heapUsedMB: dHeap, externalMB: dExt, rateMBs: rate }
+        if (dHeap > 16) {
+          lines.push(`判定: heapUsed 增 ${dHeap}MB → 疑似 JS 对象堆增长`)
+          verdict = 'leak-suspect'
+        } else if (dRss > 32 && dHeap <= 16) {
+          lines.push(`判定: RSS 增 ${dRss}MB 但 heapUsed 平稳(${dHeap}MB) → 更可能 native/external(${dExt}MB)/arrayBuffers 侧`)
+          verdict = 'native-external'
+        } else if (dRss <= 16 && dHeap <= 16) {
+          lines.push(`判定: 相对基线基本平稳（RSS ${dRss}MB）→ 无明显增长`)
+          verdict = 'stable'
         } else {
-          const s = sample()
-          const dRss = mb(s.rss - base.rss)
-          const dHeap = mb(s.heapUsed - base.heapUsed)
-          const dExt = mb(s.external - base.external)
-          const dtSec = Math.max(1, Math.round((s.t - base.t) / 1000))
-          const rate = mb((s.rss - base.rss) / dtSec)
-          lines.push(fmt(s))
-          lines.push(`相对基线: RSS ${dRss >= 0 ? '+' : ''}${dRss}MB  heapUsed ${dHeap >= 0 ? '+' : ''}${dHeap}MB  external ${dExt >= 0 ? '+' : ''}${dExt}MB（约 ${dtSec}s → ~${rate}MB/s）`)
-          if (dHeap > 16) {
-            lines.push(`判定: heapUsed 增 ${dHeap}MB → 疑似 JS 对象堆增长；可 action=gc 确认是否可回收，或 snapshot 落盘分析。`)
-          } else if (dRss > 32 && dHeap <= 16) {
-            lines.push(`判定: RSS 增 ${dRss}MB 但 heapUsed 平稳(${dHeap}MB) → 更可能 native/external(${dExt}MB)/arrayBuffers 侧，V8 heap snapshot 看不到，需看 external。`)
-          } else if (dRss <= 16 && dHeap <= 16) {
-            lines.push(`判定: 相对基线基本平稳（RSS ${dRss}MB）→ 无明显增长。`)
-          } else {
-            lines.push(`判定: 温和变化（RSS ${dRss}MB / heapUsed ${dHeap}MB），建议多次 track 累计观察曲线。`)
-          }
+          lines.push(`判定: 温和变化（RSS ${dRss}MB / heapUsed ${dHeap}MB），建议多次 track 累计观察`)
+          verdict = 'mild'
         }
       } else if (a === 'gc') {
         const gc = (globalThis as { gc?: () => void }).gc
         if (!gc) {
-          lines.push('当前进程未带 --expose-gc，无法强制 GC；请给 gen 启动参数加 --expose-gc 后重试。')
+          return out('当前进程未带 --expose-gc，无法强制 GC；请给 gen 启动参数加 --expose-gc 后重试。', undefined, 'none')
         } else {
           const before = sample()
           gc()
           const after = sample()
           const base = memoryBase.get(key)
-          lines.push(`[强制GC] 前: ${fmt(before)}`)
-          lines.push(`[强制GC] 后: ${fmt(after)}（回收 heapUsed ${mb(before.heapUsed - after.heapUsed)}MB / RSS ${mb(before.rss - after.rss)}MB）`)
+          lines.push(`[强制GC] 前: t+${Math.round((before.t - t0) / 1000)}s RSS=${mb(before.rss)}MB heapTotal=${mb(before.heapTotal)}MB heapUsed=${mb(before.heapUsed)}MB external=${mb(before.external)}MB arrayBuffers=${mb(before.arrayBuffers)}MB`)
+          lines.push(`[强制GC] 后: t+${Math.round((after.t - t0) / 1000)}s RSS=${mb(after.rss)}MB heapTotal=${mb(after.heapTotal)}MB heapUsed=${mb(after.heapUsed)}MB external=${mb(after.external)}MB arrayBuffers=${mb(after.arrayBuffers)}MB（回收 heapUsed ${mb(before.heapUsed - after.heapUsed)}MB / RSS ${mb(before.rss - after.rss)}MB）`)
+          deltas = { freedHeapUsedMB: mb(before.heapUsed - after.heapUsed), freedRssMB: mb(before.rss - after.rss), postHeapUsedMB: mb(after.heapUsed) }
           if (base && after.heapUsed > base.heapUsed + 16) {
-            lines.push(`判定: GC 后 heapUsed 仍高于基线 ${mb(after.heapUsed - base.heapUsed)}MB → 疑似泄漏（被长期持有，非瞬时）。建议 snapshot 落盘用 heap diff 定位持有者。`)
+            lines.push(`判定: GC 后 heapUsed 仍高于基线 ${mb(after.heapUsed - base.heapUsed)}MB → 疑似泄漏`)
+            verdict = 'leak-suspect'
           } else if (base) {
-            lines.push(`判定: GC 后回落至基线附近 ${mb(after.heapUsed - base.heapUsed)}MB → 更可能是瞬时工作负载，非泄漏。`)
+            lines.push(`判定: GC 后回落至基线附近 ${mb(after.heapUsed - base.heapUsed)}MB → 瞬时工作负载，非泄漏`)
+            verdict = 'stable'
           } else {
             lines.push('无基线对比；请先 action=baseline。')
+            verdict = 'none'
           }
         }
       } else if (a === 'snapshot') {
         const now = sample()
-        lines.push(fmt(now))
+        lines.push(`t+${Math.round((now.t - t0) / 1000)}s RSS=${mb(now.rss)}MB heapUsed=${mb(now.heapUsed)}MB`)
         if (memoryBase.get(key)) lines.push('已有基线；此快照可与基线期场景对照，或两次快照之间做 heap diff 定位持有者。')
         try {
           const dir = args.project_dir ? path.join(path.resolve(String(args.project_dir)), '.design-canvas') : process.cwd()
@@ -907,13 +991,16 @@ export function apply(ctx: Context, config: Config): void {
         } catch (e) {
           lines.push(`heap snapshot 失败: ${shortErr(e)}`)
         }
+        return out(lines.join('\n'))
       } else {
         // status（缺省）
-        lines.push(fmt(sample()))
+        const s = sample()
+        lines.push(`t+${Math.round((s.t - t0) / 1000)}s RSS=${mb(s.rss)}MB heapTotal=${mb(s.heapTotal)}MB heapUsed=${mb(s.heapUsed)}MB external=${mb(s.external)}MB arrayBuffers=${mb(s.arrayBuffers)}MB`)
         lines.push(`V8 heapSizeLimit=${mb(hs?.heap_size_limit)}MB usedHeap=${mb(hs?.used_heap_size)}MB 强制GC=${canForceGc() ? '可用' : '不可用(--expose-gc)'}`)
         lines.push('用 action=baseline 记基线后 action=track/gc 追踪；或 snapshot 落盘深入。')
+        return out(lines.join('\n'))
       }
-      return lines.join('\n')
+      return out(lines.join('\n'), deltas, verdict)
     },
   }))
   console.log(`[design-canvas-bridge] memory_observe 已注册`)

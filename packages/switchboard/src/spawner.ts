@@ -94,6 +94,18 @@ export function spawnGen(opts: SpawnOptions): SpawnedGen {
   mkdirSync(opts.genDir, { recursive: true }) // bootstrap 代不保证 genDir 已建，这里兜底
   const logPath = join(opts.genDir, 'boot.log')
   let logFd = openSync(logPath, 'a')
+  // 启动分隔标记（2026-09-14）：boot.log 以 'a' 打开，跨多次启动累积。
+  // 没有标记就无法区分"本次启动的失败"与"历史启动的失败"，会让 coordinator 的
+  // verify 阶段健康检查误判（历史错误把健康的新代判死）。
+  // 写在同一 fd 之前的独立 append 上，父子进程共享文件偏移，顺序一致。
+  try {
+    appendFileSync(
+      logPath,
+      `\n===== BOOT gen=${opts.gen} port=${opts.port} mode=${opts.mode} at=${new Date().toISOString()} =====\n`,
+    )
+  } catch {
+    /* genDir 不可写时忽略；coordinator 会退回"取尾部"策略 */
+  }
   let logClosed = false
   const closeLog = (): void => {
     if (logClosed || logFd < 0) return

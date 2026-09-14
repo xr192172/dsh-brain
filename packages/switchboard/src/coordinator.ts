@@ -10,6 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join, resolve, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
 import { LeaseStore } from './lease.js'
 import type { FrontDoor } from './proxy.js'
 import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
@@ -44,6 +45,14 @@ export interface CoordinatorConfig {
   verifyTimeoutMs?: number
   /** verifyCmd 工作目录（缺省 cfg.workDir）。 */
   verifyCwd?: string
+  /**
+   * 交接后自动续接：>0 时，flip+verify 稳定后，coordin 向新代 gen 端口**串行（await）**补发一次
+   * `session.prompt`，让被交接的 web 会话自动续跑（不再等用户手动再发一条）。为 0 或未设则关闭。
+   * 缺省文案由 cfg.resumePromptText 提供。
+   */
+  reissueMs?: number
+  /** 补发续接 prompts 的文本（多句以 \n 分隔）。缺省用内部默认「交接完成，请继续」。 */
+  resumePromptText?: string
 }
 
 interface Cage {
@@ -146,7 +155,23 @@ export class Coordinator {
     return h?.caughtUpSeq ?? -1
   }
 
-  async handover(fail?: string, profileOverride?: string, experimentKernelDir?: string): Promise<HandoverStage> {
+  /**
+   * 执行一次代际交接。
+   *
+   * `fast=true` 走「快速换代」路径（`?cmd=restart`）：跳过三样**耗时**的东西 ——
+   *   ① defer（默认等当前轮收尾，`SWITCH_DEFER_MS` 默认 20s，长轮次可能更久）
+   *   ② verify 闸（实验脑/自进化用的白名单验证脚本）
+   *   ③ flip 后的稳定观察窗（`SWITCH_VERIFY_STABLE_MS` 默认 2s）
+   * 但**保留三样几乎不花时间、却决定成败的**：
+   *   · probe（端口通、进程活）
+   *   · 启动健康检查（本次启动无插件树装载失败 —— 拦截"环境漂移"）
+   *   · rollbackFlip（旧代尚在，回滚是免费的）
+   *
+   * 定位：日常插件业务代码改动走 fast；内核机制 / 插件树组合 / profile 配置 / 判据自身的改动
+   * 走完整路径（见 docs/handover-vs-restart.md 的三级替换策略）。
+   * 注意 fast **不等于**"重启"：它是"快速换代"，仍带回滚，因此比真重启更安全、代价≈0。
+   */
+  async handover(fail?: string, profileOverride?: string, experimentKernelDir?: string, verifyOverride?: string, fast?: boolean): Promise<HandoverStage> {
     // 交接窗口遮罩（后端口令锁）：整个交接期间前门拦截写操作/新建连接，避免不稳定态并发写入触发 kind 竞态。
     // 用 try/finally 确保任何出口（成功/abort/回滚/异常）都释放锁，杜绝交接异常导致永久锁死。
     this.front.setLocked(true)
@@ -154,17 +179,45 @@ export class Coordinator {
     const cfg = this.cfg
     // 覆盖 profile：允许 apply 指定 staging 代运行某个脑 profile（接入 three-brain/sandbox 代际）
     const profile = profileOverride && profileOverride.trim() ? profileOverride.trim() : cfg.profile
+    if (fast) {
+      this.record('fast 模式：跳过 defer / verify-gate / 稳定观察窗（仍保留 probe + 启动健康检查 + 失败回滚）')
+    }
+
+    // 换代后是否向被交接会话注入"续跑"提示。**默认否**，只有确认"确有活、且已干净收尾"才置真。
+    // 判据（2026-09-14 定）：`waitedForTurnEnd === true`。
+    // 其余情形一律不注入，各自的理由：
+    //   · 会话空闲  → 注入会无端唤醒一轮（污染会话、白烧 token）
+    //   · grace 超时 → 有活但没收尾，**常见于卡在等人类输入（ask_user_question）**；
+    //                  此时注入会把跨代 resume 踢成不一致态（实测会话会变成未 attach）
+    //   · fast 模式 → 未做探针，无法确认有无未收尾回合 ⇒ 保守视为"不注入"
+    let resumeInject = false
+    let resumeSkipReason = fast
+      ? 'fast 模式跳过 defer，未探针，无法确认有无未收尾回合'
+      : '未做 defer（deferMs=0 或角色非 active），无法确认状态'
 
     // 延迟切换：先请当前活跃代收尾本轮（注入挂起提示 + 等 turn/end 或 grace 兜底），
     // 让正在生成的这一轮先把话说完，再真正 spawn 新代——避免"成功那一刻就停/中断"。
-    if ((cfg.deferMs ?? 0) > 0 && this.active.inst.role === 'active') {
+    // fast 模式刻意跳过：这一步是换代里最贵的一环（默认等 20s，长轮次更久），
+    // 而它换来的只是"不打断当前轮"——日常代码改动不值得为它付这个时间。
+    if (!fast && (cfg.deferMs ?? 0) > 0 && this.active.inst.role === 'active') {
       this.stage = 'ready' // 仅用于阶段日志；真正的状态机仍从 spawn 起步
       this.record('defer: 请活跃代 ' + this.active.inst.gen + ' 先收尾本轮 (grace=' + cfg.deferMs + 'ms)')
       try {
         const prep = await this.active.client.prepareSwitch(cfg.deferMs)
-        this.record('defer done: ok=' + prep.ok + ' agent=' + prep.foundAgent + ' waitedTurnEnd=' + prep.waitedForTurnEnd + (prep.reason ? ' reason=' + prep.reason : ''))
+        this.record(
+          'defer done: ok=' + prep.ok + ' agent=' + prep.foundAgent +
+          ' turnInFlight=' + prep.turnInFlight + ' waitedTurnEnd=' + prep.waitedForTurnEnd +
+          (prep.reason ? ' reason=' + prep.reason : ''),
+        )
+        resumeInject = prep.waitedForTurnEnd === true
+        resumeSkipReason = resumeInject
+          ? ''
+          : prep.turnInFlight === true
+            ? '有回合未在 grace 内收尾（可能在等人类输入）→ 跳过续跑'
+            : '会话空闲（reason=' + (prep.reason ?? '?') + '）→ 跳过续跑'
       } catch {
         this.record('defer skipped (活跃代 admin 不可达，按原立即切)')
+        resumeSkipReason = '活跃代 admin 不可达，无法确认状态 → 跳过续跑'
       }
       this.stage = 'spawn'
     }
@@ -259,7 +312,16 @@ export class Coordinator {
     }
 
     this.stage = 'promote'
-    await b.client.promote(token, b.inst.gen, resumeId) // B 绑定 key-pool + 确认写权 token + 携带 resume 会话
+    // 自愈：health 通过后 gen 仍可能在两次 poll 之间崩溃（ACCESS_VIOLATION 等 native crash），
+    // 在 promote 前最后探活一次，避免对已死进程发请求导致未捕获异常。
+    if (!pidAliveFrom(b.inst.pid)) return this.abort(b, 'b-promote-precheck-dead')
+    try {
+      await b.client.promote(token, b.inst.gen, resumeId) // B 绑定 key-pool + 确认写权 token + 携带 resume 会话
+    } catch (e) {
+      // promote 期间 gen 崩了（native crash 导致连接中断）→ 判失败，不挂死
+      this.record('promote failed: ' + (e instanceof Error ? e.message : String(e)))
+      return this.abort(b, 'b-promote-crash')
+    }
 
     this.stage = 'flip'
     this.lease.grant(b.inst.gen, b.inst.port, spawned.pid, cfg.ttlMs, (fr?.lastSeq ?? 0), 'replay', token)
@@ -274,24 +336,65 @@ export class Coordinator {
       return this.rollbackFlip(old, b, cfg, '(probe 失败) 已回滚旧代 ' + old.inst.gen)
     }
 
+    // 启动健康检查（2026-09-14）：probe 只证明「端口通、进程活」，**不证明插件树装配完整**。
+    // 插件树部分失败时 gen 仍会就绪，但能力残缺：工具集少 N 个、Code Mode 因 codeRuntime
+    // 服务缺失而静默回落 native、system+tools 同时变化使 prompt 前缀全失效
+    // （会话迁过去后首轮命中率 0%，且模型只能靠试探发现"现在能用什么"）。
+    // 这类 gen 一旦 promote 就是"环境漂移"——必须在此拦下，让它永远接不到会话。
+    const bootFatal = findFatalBootErrors(lastBootSegment(join(cfg.coordDir, b.inst.gen, 'boot.log')))
+    if (bootFatal.length > 0) {
+      return this.rollbackFlip(
+        old,
+        b,
+        cfg,
+        `(启动健康检查失败) 已回滚旧代 ${old.inst.gen}：本次启动出现 ${bootFatal.join('、')}`,
+      )
+    }
+    this.record('verify-boot-health ok: 本次启动无装载失败')
+
     // 可选验证闸（自进化·实验脑）：verifyCmd 非空时，staging 还须跑白名单内命令且返回 ok 才 flip。
-    if (cfg.verifyCmd) {
-      const gate = await this.runVerifyGate(cfg, b, old)
+    // verifyOverride = 本次 apply 由脑(LLM)随 tool_apply 提交的验证脚本。它让交接变成"进化脑管控"：
+    // 脑提交改动意图，控制面(coordinator)据此跑验证闸 —— 通过才 flip、拒绝/失败回滚，而非无脑换代。
+    const gateCmd = fast ? undefined : (verifyOverride && verifyOverride.trim()) || cfg.verifyCmd
+    if (gateCmd) {
+      const gateCfg = { ...cfg, verifyCmd: gateCmd }
+      const gate = await this.runVerifyGate(gateCfg, b, old)
       if (!gate.ok) {
         return this.rollbackFlip(old, b, cfg, `(verify-gate 失败) 已回滚旧代 ${old.inst.gen}：${gate.summary}`)
       }
-      this.record('verify-gate ok: ' + gate.summary)
+      this.record('verify-gate ok: ' + gate.summary + (verifyOverride ? '（本次 apply 指定）' : ''))
       this.stage = 'verify'
     }
 
     // verify 竞态修复：probe ok 后仍留稳定观察窗——sleep verifyStableMs 再探一次，
     // 两次连续 ok 才算成功。拦截 gen-3089 型"health 假 ok、隔几毫秒进程才崩"的假成功；
     // 窗口内晚崩会被第二次 probe 拦下并非破坏回滚。
-    if ((cfg.verifyStableMs ?? 0) > 0) {
+    if (!fast && (cfg.verifyStableMs ?? 0) > 0) {
       await new Promise((r) => setTimeout(r, cfg.verifyStableMs))
       const probe2 = await b.client.probe(5000)
       if (!probe2.ok) {
         return this.rollbackFlip(old, b, cfg, '(verify 稳定期探测失败) 已回滚旧代 ' + old.inst.gen)
+      }
+    }
+
+    // 交接后自动续接：核实新代端口已可服务，**串行 await** 向它补发一次 session.prompt，
+    // 让被交接的 web 会话在本代继续跑（不再等用户手动再发一条）。这是状态机内的一步，
+    // 不是异步 fire-and-forget——先 etc 稳定、再排队执行，避免"交接未稳就并发注入"的 kind 竞态。
+    if ((cfg.reissueMs ?? 0) > 0 && resumeId) {
+      if (!resumeInject) {
+        // 会话保持 attach（promote 已 resume），但不注入任何内容 —— 由用户/下游机制决定下一步。
+        this.record('resume-reissue 跳过：' + resumeSkipReason)
+      } else {
+        try {
+          // 小等待新代 web 端点就绪（probe 已过，但 web app 路由可能再晚几百 ms 挂上）
+          await new Promise((r) => setTimeout(r, cfg.reissueMs ?? 0))
+          const text = cfg.resumePromptText ?? '交接完成（代际切换已成功）。请直接继续你刚才正在进行的任务，无需重新说明背景。'
+          const st = await this.reissuePrompt(b.inst.port, resumeId, text)
+          this.record('resume-reissue: ' + st)
+        } catch (e) {
+          // 补发失败不阻断换代：最坏是仍需用户手动再发一条，不影响本次 flip 成功
+          this.record('resume-reissue skipped: ' + (e instanceof Error ? e.message : String(e)))
+        }
       }
     }
 
@@ -302,7 +405,7 @@ export class Coordinator {
     this.recordResult({
       t: Date.now(),
       result: 'success',
-      note: '已切换 → ' + b.inst.gen,
+      note: (fast ? '已快速切换 → ' : '已切换 → ') + b.inst.gen,
       gen: b.inst.gen,
       resumeSession: resumeId,
     })
@@ -392,6 +495,43 @@ export class Coordinator {
     })
   }
 
+  /** 交接后向新代 gen 端口**串行**补发一次 session.prompt，驱动 web 会话自动续跑。 */
+  private reissuePrompt(port: number, sessionId: string, text: string): Promise<string> {
+    return new Promise((resolve) => {
+      const body = JSON.stringify({
+        type: 'client-request',
+        rpcId: randomUUID(),
+        method: 'session.prompt',
+        payload: {
+          sessionId,
+          mode: 'steer',
+          content: [{ type: 'text', text }],
+        },
+      })
+      const done = (msg: string): void => resolve(msg)
+      const req = httpRequest(
+        { host: '127.0.0.1', port, method: 'POST', path: '/api/session.prompt', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+        (res) => {
+          let data = ''
+          res.on('data', (c: Buffer) => (data += c.toString()))
+          res.on('end', () => {
+            // 不再截到 120 字符：之前 reissue 的失败被砍成 `"code":"internal"` 就没了，
+            // 排查时完全看不到内部错误原因（2026-09-14 踩过）。
+            if (res.statusCode !== 200) console.error('[switchboard] reissue non-200:', data.slice(0, 2000))
+            done(`HTTP ${res.statusCode} ${data.slice(0, 800)}`)
+          })
+        },
+      )
+      req.on('error', (e) => done(`error ${e.message}`))
+      req.setTimeout(8000, () => {
+        req.destroy()
+        done('timeout')
+      })
+      req.write(body)
+      req.end()
+    })
+  }
+
   /** 非破坏回滚：指回旧 active + 写租约回授给它（flip 已 grant 给 b，需覆盖回旧代）+ 退役 staging + 记录。 */
   private rollbackFlip(old: Cage, b: Cage, cfg: CoordinatorConfig, note: string): HandoverStage {
     this.swapActive(old)
@@ -448,6 +588,53 @@ function tailFile(path: string, n: number): string {
     return lines.slice(-n).join('\n')
   } catch {
     return '(boot.log unreadable)'
+  }
+}
+
+/**
+ * boot.log 中代表「本次启动装配失败」的致命模式（2026-09-14 新增）。
+ *
+ * 背景：probe 只反映「端口通不通、进程活不活」，**不反映插件树是否装配完整**。
+ * 实测 gen-3086 / 3087 / 3088 因 `duplicate loader entry id: design-canvas-bridge`
+ * 导致 `plugin tree failed to load`，但 gen 仍以「能力残缺」状态就绪：
+ *   - 工具集少 25 个（design-canvas 全套）
+ *   - Code Mode 因 codeRuntime 服务缺失而静默回落 native
+ *     （dsh-agent-tool-presentation 的 ctx.inject(["codeRuntime"], ...) 回调不执行）
+ *   - system + tools 同时变化 → prompt 前缀全失效（会话迁移后首轮命中率 0%）
+ * 这类 gen 一旦 promote，会话迁过去就是「环境漂移」，模型只能靠试探发现。
+ */
+const FATAL_BOOT_PATTERNS: Array<[RegExp, string]> = [
+  [/plugin tree failed to load/i, '插件树加载失败'],
+  [/duplicate loader entry id/i, 'loader entry id 重复'],
+  [/failed to apply loader entry include/i, 'loader entry include 应用失败'],
+  [/declares no dsh\.bundle/i, '无效 bundle 声明（缺 dsh.bundle）'],
+  [/cannot resolve profile bundle/i, 'profile bundle 无法解析'],
+  [/SyntaxError: Unexpected token/i, '配置 JSON/YAML 语法错误（常见：UTF-8 BOM）'],
+]
+
+/** 在给定 boot.log 片段里找致命装载错误，返回可读原因列表（空数组 = 健康）。 */
+function findFatalBootErrors(boot: string): string[] {
+  const hits: string[] = []
+  for (const [re, label] of FATAL_BOOT_PATTERNS) {
+    if (re.test(boot) && !hits.includes(label)) hits.push(label)
+  }
+  return hits
+}
+
+/**
+ * 取 boot.log 中「最后一次启动」的片段。
+ * spawner 每次启动会写 `===== BOOT ... =====` 分隔标记；旧日志无标记时退回尾部 300 行
+ * （宁可少判，也不把历史启动的错误误判成本次失败）。
+ */
+function lastBootSegment(logPath: string, tailFallback = 300): string {
+  if (!existsSync(logPath)) return ''
+  try {
+    const all = readFileSync(logPath, 'utf8').replace(/^\uFEFF/, '')
+    const idx = all.lastIndexOf('===== BOOT ')
+    if (idx >= 0) return all.slice(idx)
+    return all.split(/\r?\n/).slice(-tailFallback).join('\n')
+  } catch {
+    return ''
   }
 }
 

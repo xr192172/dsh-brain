@@ -1,4 +1,4 @@
-﻿/**
+/**
  * key-pool-proxy — 多 key 轮换反代插件（@dsh-brain/key-pool-proxy）。
  *
  * 思路 #5「LLM Router + 多 key 轮换池」在 DSH 上的落地：DSH 的 credentials/apiKeyEnv
@@ -75,7 +75,7 @@ function loadPool(config: Config): string[] {
   return out
 }
 
-/** 上游请求头上的 Authorization 一定是 Bearer；替换成所选 key。 */
+/** 构建代理请求头。 */
 function buildHeaders(orig: http.IncomingHttpHeaders, host: string, key: string, bodyLength: number): http.OutgoingHttpHeaders {
   const h: http.OutgoingHttpHeaders = {}
   for (const [k, v] of Object.entries(orig)) {
@@ -88,6 +88,10 @@ function buildHeaders(orig: http.IncomingHttpHeaders, host: string, key: string,
   if (!h['accept-encoding']) h['accept-encoding'] = 'gzip, deflate'
   return h
 }
+
+/** 构建代理请求头。 */
+
+/** 上游请求头上的 Authorization 一定是 Bearer；替换成所选 key。 */
 
 export function apply(ctx: Context, config: Config): void | (() => void) {
   const pool = loadPool(config)

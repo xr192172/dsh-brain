@@ -170,17 +170,25 @@ export function apply(ctx: Context, patch: Config): void {
     lastActiveSessionId: '',
   } as { mode: HandoverConfig['mode']; caughtUpSeq: number; drain: ReturnType<typeof newDrain>; lastActiveSessionId: string }
 
-  // ── 延迟切换：挂一个"回合结束"信号，供 prepareSwitch 等待当前回合收尾 ──
+  // ── 延迟切换：挂"回合开始/结束"信号，供 prepareSwitch 判断当前是否有活在跑、并等待收尾 ──
+  // turnInFlight（2026-09-14）：区分"有活在跑"与"会话空闲"。
+  // 之前只监听 turn/end，于是 prepareSwitch 无法知道会话是否空闲 →
+  // 对空闲会话也会注入"请收尾"提示，然后白等满 grace（默认 20s，因为空闲会话永不产生 turn/end）。
+  let turnInFlight = false
   let lastTurnEndAt = 0
   let pendingPrepare: { resolve: (r: PrepareReply) => void; timer: ReturnType<typeof setTimeout> | undefined; base: number; foundAgent: boolean } | null = null
+  ;(ctx as unknown as { on?: (ev: string, fn: (p: unknown) => void) => void }).on?.('turn/start', () => {
+    turnInFlight = true
+  })
   ;(ctx as unknown as { on?: (ev: string, fn: (p: unknown) => void) => void }).on?.('turn/end', () => {
     const now = Date.now()
     lastTurnEndAt = now
+    turnInFlight = false
     if (pendingPrepare && now > pendingPrepare.base) {
       const p = pendingPrepare
       pendingPrepare = null
       clearTimeout(p.timer)
-      p.resolve({ ok: true, foundAgent: p.foundAgent, waitedForTurnEnd: true })
+      p.resolve({ ok: true, foundAgent: p.foundAgent, waitedForTurnEnd: true, turnInFlight: true })
     }
   })
 
@@ -256,6 +264,20 @@ export function apply(ctx: Context, patch: Config): void {
     freeze: async (): Promise<FreezeReply> => {
       state.drain.armed = true
       ;(ctx as unknown as { emit?: (n: string) => void }).emit?.('handover/freeze')
+      // 强制 flush：旧代退役前把所有 live 会话事件真正落盘（不等 agent-loop 回合结束才 flush）。
+      // 否则频繁换代时事件只留在内存，session.jsonl 只有 header 空壳，新代入 resume 读不到真实
+      // 上下文 → 续接断裂（需手动重发）+ 空壳重建后 run_code 固定 seed 前缀重复。
+      // 走 DSH 官方钩子：emit session/flush 逐会话触发 persistence.flush(session)。
+      try {
+        const sessList = (ctx as unknown as { sessions?: { list?: () => unknown[] } })?.sessions?.list?.() ?? []
+        for (const s of sessList) {
+          ;(ctx as unknown as { emit?: (n: string, p?: unknown) => void }).emit?.('session/flush', s)
+        }
+        // 给 write-behind（默认 200ms 批）一点落盘时间，确保后续代可读到
+        await new Promise((res) => setTimeout(res, 400))
+      } catch {
+        /* flush 失败不阻断 freeze：仍按强切推进 */
+      }
       const r = await evaluateStatic(ctx, state.drain)
       // 上报本代"主活跃会话"：优先用事件流跟踪到的 lastActiveSessionId（agent 会话事件，最可靠）。
       // 兜底再从 workspace 会话注册表取每个工作区最近 attach 的会话。
@@ -288,7 +310,17 @@ export function apply(ctx: Context, patch: Config): void {
       state.mode = 'active'
       ;(ctx as unknown as { emit?: (n: string) => void }).emit?.('handover/promote')
       console.log(`[switchboard:agent] promote resumeSessionId=${req.resumeSessionId ?? 'none'}`)
-      // 方案B 接续：携带上一代主活跃会话 → resume + 注入"环境已更新，请继续"
+      // 方案B 接续：携带上一代主活跃会话 → **只 attach（resume），不注入任何提示**。
+      //
+      // （2026-09-14 改）原先此处注入一条「【自动续跑】…」的提示，两个问题：
+      //   ① 与 control plane 的 reissue 重复 —— 一次换代给会话注入两条 prompt；
+      //   ② 那条提示声明"本次续跑**预先批准**"等于**替用户放权**，
+      //      与「人批不得降级为事后知情」直接冲突。
+      // 现在职责重新划分：
+      //   · 本处**只负责把会话 resume 起来（attach）** —— 否则控制面的 reissue 会 session-not-found；
+      //   · 续跑文本的注入**统一由 control plane 在 flip+verify 之后决定**（语义更准：确认新代健康才续接）；
+      //   · 且**仅当活跃代当时确有未收尾的回合**才注入（依据 `PrepareReply.waitedForTurnEnd`），
+      //     空闲/卡在等人类输入的会话一律**不注入**。
       // patch 运行时不带 schema default，故默认开：仅当显式 false 才关闭
       if ((patch.resumeOnPromote !== false) && req.resumeSessionId) {
         // 同步落 trace：无论 resume 异步成败，这里都先确证"调度已发生 + ctx.agents 是否就绪"。
@@ -296,18 +328,10 @@ export function apply(ctx: Context, patch: Config): void {
           phase: 'resume',
           sessionId: req.resumeSessionId,
           ok: true,
-          note: 'scheduled',
+          note: 'scheduled (attach-only; no steer text)',
           agents: !!agentsRef.current,
         })
-        scheduleResume(
-          agentsRef,
-          req.resumeSessionId,
-          [
-            '【自动续跑】上一轮正在处理的任务因环境热切换被中断，已完成步骤与进行中的工作都在本会话里。请在**无需用户再次确认**的前提下，把该任务自主续跑并执行到完成为止：已跑完的部分不要重做，直接推进剩余步骤；需要的地方照常调用工具；全部完成后一次性汇报结果。本次续跑视为用户已预先批准，不要再停下来征询用户或等待确认。',
-          ],
-          4,
-          cfg.genDir,
-        )
+        scheduleResume(agentsRef, req.resumeSessionId, [], 4, cfg.genDir)
       }
       return { ok: true }
     },
@@ -327,6 +351,17 @@ export function apply(ctx: Context, patch: Config): void {
           | { steer?: (m: unknown) => void }
           | undefined
         const foundAgent = !!agent
+        // 调用时刻的"有没有活"快照。注意区分两个字段：
+        //   turnInFlight      = 调用时是否有未收尾的回合（"有没有活"）
+        //   waitedForTurnEnd  = 是否等到了它收尾（"活干完了没"）
+        // 控制面只认第二个为真的情形才注入续跑 —— 即"确有活、且已干净收尾"。
+        const inFlightAtEntry = turnInFlight
+        // ★ 空闲即返回（2026-09-14）：没有未收尾的回合 → 无事可"收尾"。
+        // 两条收益：① 不再对空闲会话注入"请收尾"提示（那是污染会话的噪声）；
+        //          ② 省下原先必然白等的 grace（默认 20s —— 空闲会话永不产生 turn/end）。
+        if (!turnInFlight) {
+          return { ok: true, foundAgent, waitedForTurnEnd: false, reason: 'idle', turnInFlight: false }
+        }
         // 注入挂起提示：让大脑把当前任务收尾、把话说完，交接由控制面在后台完成。
         try {
           agent?.steer?.({
@@ -348,7 +383,9 @@ export function apply(ctx: Context, patch: Config): void {
           p.timer = setTimeout(() => {
             if (pendingPrepare === p) {
               pendingPrepare = null
-              resolve({ ok: true, foundAgent, waitedForTurnEnd: false, reason: 'grace' })
+              // grace 超时：没等到新的 turn/end。inFlightAtEntry 仍为 true ⇒ 有活但没收尾，
+              // 常见于"卡在等人类输入"（如 ask_user_question）→ 控制面据此**不注入续跑**。
+              resolve({ ok: true, foundAgent, waitedForTurnEnd: false, reason: 'grace', turnInFlight: inFlightAtEntry })
             }
           }, graceMs > 0 ? graceMs : 20_000)
           pendingPrepare = p

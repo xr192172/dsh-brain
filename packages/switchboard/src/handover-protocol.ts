@@ -112,12 +112,20 @@ export interface ProbeReply {
  * 延迟切换的"准备就绪"应答：控制面请活跃代先收尾本轮，等其 turn/end（或 grace 兜底）
  * 后才真正 spawn 新代。`foundAgent` = 是否找到了可 steer 的 live 会话代理；
  * `waitedForTurnEnd` = 是否真的等到了一个"回合结束"（而非 grace 超时兜底）。
+ *
+ * `turnInFlight`（2026-09-14 加）：**调用时刻活跃代是否有未收尾的回合**。
+ * 控制面据此决定换代后要不要注入"续跑"提示：
+ * - `true`  → 当时真有活在跑 → 换代后注入续跑（这是该机制存在的唯一理由）
+ * - `false` → 会话是**空闲**的（或卡在等人类输入）→ **不注入**，
+ *   否则会无端唤醒一轮（污染会话、白烧 token），甚至把"等人类确认"的回合踢成不一致态。
  */
 export interface PrepareReply {
   ok: boolean
   foundAgent: boolean
   waitedForTurnEnd: boolean
   reason?: string
+  /** 调用时刻是否有未收尾的回合。`false` ⇒ idle（或 blocked）⇒ 控制面不应注入续跑。 */
+  turnInFlight?: boolean
 }
 
 export interface HandoverCommand {

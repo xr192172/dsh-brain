@@ -13,6 +13,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -21,6 +22,18 @@ export type { ToolStat, ToolEvolState, ToolEvolView } from './spec.js'
 
 export const name = 'tool-evolution'
 export const inject: string[] = []
+
+// 本插件往会话里写自定义事件 `tool/review`（tool_score 打分落盘）。DSH 的会话
+// 读取路径只接受 KNOWN_SESSION_EVENT_TYPES ∪ 带 `ignorable` 标记的事件；而
+// session.append 不暴露 ignorable 槽位。该 Set 是共享可变引用（persistence 也 import
+// 同一实例），在 boot 注册即可让旧/新会话都正常读取，不再抛 SessionFormatUnsupportedError。
+// 幂等：Set.add 重复无害。
+if (!KNOWN_SESSION_EVENT_TYPES.has('tool/review')) {
+  // 运行时是可变 Set（persistence 与 dsh-session 共享同一实例）；类型声明为
+  // ReadonlySet，此处按运行时真实形态加成员。
+  ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add('tool/review')
+  console.log('[tool-evolution] registered custom session event type: tool/review')
+}
 
 export interface Config {
   /** 每个工具保留的 LLM 评语条数上限。 */

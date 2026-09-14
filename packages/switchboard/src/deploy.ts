@@ -20,9 +20,12 @@ export function registerApplyTool(ctx: Context): void {
       defineTool({
         name: 'tool_apply',
         description:
+          '你把改动提交给控制面(进化脑)做"验证闸"管控的通道：' +
           '在你改完 P0 内容（settings/模型/provider、插件数据、技能、记忆、工具行为，准备激活）后调用本工具：' +
           '它经控制面触发蓝绿交付（spawn 新代→追平→冻结旧→翻转→验证，失败自动回滚），把你的改动安全上线。' +
-          '这是安全自进化的正式通道——不要就地改 switchboard 源码、不要强杀宿主进程。',
+          '可选传 verify=<验证脚本绝对路径>：控制面(进化脑)会先跑该验证闸，通过才正式 flip、拒绝/失败则回滚——' +
+          '这就是"让进化脑管控你的切换"：你提交改动意图，决策在控制面而非脑自己无脑换代。' +
+          '不传 verify 则退化为普通 apply（仅探活后 flip）。这是安全自进化的正式通道——不要就地改 switchboard 源码、不要强杀宿主进程。',
         parameters: {
           note: {
             type: 'string',
@@ -31,6 +34,10 @@ export function registerApplyTool(ctx: Context): void {
           profile: {
             type: 'string',
             description: '可选：staging 代运行的脑 profile（默认 web）。接入 three-brain/sandbox 时传目标脑 profile，验证通过后即一键置换为当前脑。',
+          },
+          verify: {
+            type: 'string',
+            description: '可选：验证脚本绝对路径（输出 JSON {ok:true} 才放行 flip）。控制面会校验它须在 VERIFY_ALLOW 白名单内；不在白名单则安全拒绝并回滚。传入后本次交接=进化脑管控（通过才切、失败回滚）。',
           },
         },
         output: {
@@ -57,6 +64,8 @@ export function registerApplyTool(ctx: Context): void {
             if (args.note) q.set('note', args.note)
             // profile 指向 staging 代运行的脑 profile（接入 three-brain/sandbox 代际，验证通过即一键置换为当前脑）
             if (args.profile) q.set('profile', args.profile)
+            // verify = 本次交接的验证闸（进化脑管控）：控制面通过才 flip、失败/拒绝回滚
+            if (args.verify) q.set('verify', args.verify)
             const res = await fetch(CONTROL_URL + '/?' + q.toString(), { signal: AbortSignal.timeout(15000) })
             const j = (await res.json().catch(() => ({}))) as { stage?: string }
             return { ok: res.ok, stage: (j && j.stage) || String(res.status) }

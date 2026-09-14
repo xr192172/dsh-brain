@@ -1,11 +1,26 @@
 # design-canvas-bridge bundle patch — insert the plugin row into the profile cordis.yml.
+#
+# ⚠️ 单一来源原则（2026-09-14）：本插件的配置**只在这里定义**。
+# 不要在 profile 的 cordis.patch.yml 里再写 `- id: design-canvas-bridge` 覆盖块 ——
+# 「包内 insert」与「profile 的 id 覆盖」同时存在时会触发：
+#   TypeError: duplicate loader entry id: design-canvas-bridge
+#   → dsh: plugin tree failed to load → 整棵插件树装配失败
+# 实测后果（gen-3086 / 3087 / 3088 的 boot.log 各 6 条此类错误）：
+#   ① 工具集少 25 个（design-canvas 全套），header 形态由 6449|95 变成 1783|70
+#   ② Code Mode 因 codeRuntime 服务缺失而静默回落到 native
+#      （dsh-agent-tool-presentation 的 ctx.inject(["codeRuntime"], ...) 回调不执行）
+#   ③ system + tools 同时变化 → prompt 前缀全失效，会话迁移后首轮命中率 0%
+#   ④ 模型需靠试探发现"现在能用什么"
+# 需要临时覆盖时，请用 CLI 的 --patch overlay（见 profiles/web/cordis.yml 注释中的第三种组合来源），
+# 不要写进 profile 的 cordis.patch.yml。
 - insert:
     - id: design-canvas-bridge
       name: '@dsh-brain/design-canvas-bridge'
       config:
         enabled: true
         serverName: design-canvas
-        maxFiles: 300
+        maxFiles: 500
         includeTests: false
         includeArchive: false
         designMode: false
+        kernelDir: D:\project_develop\design-canvas
