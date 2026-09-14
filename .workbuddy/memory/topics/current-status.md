@@ -114,16 +114,18 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   —— gen-3084 启动日志 `[capability-bridge] apply running; registry=~/.dsh/capabilities/registry.json`，
   说明插件已成功装载（`list_capabilities`/`capability_report` 走 host plane 全局层）；
   若要拿"模型真看到的清单"，仍应跑 `scripts/dump-request-tools.mjs <会话相对路径>` 看 `request/header`。
-- **observe（原 camera）线：体检完成，处置待拍板（方案已从 C 修正为 D）** ——
-  数据：本机唯一 dogfood 账本 **944 次调用里 observe_\*/reconcile_\*/narrate_\*/feature_line = 0 次**；
-  体量 **3159(TS) + 1895(tool) + ~7000(Go) 行 / 20+ 测试**，且 **9-08 起冻结**。
-  ★ 用户澄清**原始动机**（观测压缩折叠细节 + 缓存命中率影响因素）⇒ **C（验收执行器）只覆盖"验证"、
-  覆盖不了"因果解释"**；新方案 **D = 语义观测点声明 + 采集前判定 + 预算 + 结构化记录 + A/B**
-  （C 只是 D 的特例；全量插桩降级为"探索模式"）。
-  ★ 关键同构：**环形缓冲＝"事后裁剪"注定失控** —— 与 `cordis.patch.yml` 里 pruner 被 spill-policy 取代
-  （**写入历史之前替换**）是**同一个错误**；正解是把判定**前移到采集点**。
-  **生死判据**：用 D 观测"压缩折叠 + 命中率影响因素"跑两轮 A/B，**跑赢现有手写 `measurement` 才留**，
-  否则按 B（冻结）处理。文档 `design-canvas/docs/observe-line-triage.md` §5.5–5.6。
+- **observe（原 camera）线：体检完成 + ★ 推荐器 v1 已实现** ——
+  数据：944 次调用里 observe_* 采纳 **0 次**；体量 3159(TS)+1895(tool)+~7000(Go) 行 / 20+ 测试 / 9-08 起冻结。
+  ★ 结论修正：C（验收）覆盖不了"因果解释"⇒ 走 **D（语义观测点 + 采集前判定 + 预算）**，
+  而 D 唯一缺的"推荐器"**已落地**：`src/tools/observe_points.ts` + 工具 `recommend_observe_points`
+  （key 取自插桩器 dry-run 站点 ⇒ 零漂移；`focus` 任务定向；多样性配额）。
+  **实测**：不传 focus 时缓存/压缩相关推荐 = 0 条；传 `focus=conveyor|spill|cache|...` 后
+  **前 8 条全落 `packages/conveyor-context/src/index.ts`** ⇒ 命中用户当初动机。
+  ★ 顺带修掉 `instrument.ts` 一个**真源码注入 bug**（`IO_CALLS[callee]` 原型链误判 →
+  `x.toString()`/`new Foo()` 被当 IO 调用，注入垃圾探针）。
+  文档：`design-canvas/docs/observe-line-triage.md` §5.5–5.6、`docs/observe-point-recommender.md`。
+  **待用户**：手写 ≈10 个"真正想看的点"作 holdout → 命中率 ≥80% 才算推荐器成立；
+  再跑两轮 A/B 与 `cache-ab-experiment-log.md` 比，决定这条线生死。
 - "读写编辑统一入口 + 模型无感"愿景（详见日更 2026-09-14 尾部）。
 
 ## ★ P0（2026-09-14 16:25 发现并已修）：capability-bridge 缺 config → 换代即换崩
