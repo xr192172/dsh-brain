@@ -87,7 +87,12 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   探针 `scripts/probe-dc-zero-setup.mjs` **6 项断言 PASS**。
   **残余**（已记档）：`analyze_monolith`/`language_concepts`/`query_feature`（同步内核或非 agent 路径）、
   `function_outline`（feature 级缓存）；`diff_views` 等属**领域前置不该动**。
-  **下一步**：P0 智能报错（Did you mean）+ git 快照回滚 + 模糊编辑级联 → P1「修复→规则沉淀」。
+- **P0-1 智能报错（Did you mean）已完成**：`src/tools/arg_suggest.ts` + `registerAllTools` 注入；
+  ★ 关键：**inputSchema 必须换 loose object**（否则 SDK 严格 object 静默丢未知键，提示不出现）。
+  探针 `scripts/probe-dc-arg-suggest-mcp.mjs` 4 项 PASS；全量 vitest **1967 passed / 11 failed
+  （失败集合是基线真子集 ⇒ 无新增回归）**。
+  **下一步**：P0-5 git 快照+一键回滚 → P0-4 模糊编辑级联（先核查 edit_code 现状）→
+  P1「修复→规则沉淀」（最差异化）。
 - **★ 换代分工（2026-09-14，用户纠正后定案）**：**我的宿主是 WorkBuddy，被换代的是 DSH**
   （`dsh web` 那套 gen/switchboard）——两者是不同系统 ⇒ **我天然是外部观察者**，
   不会再"吐槽自己不能被重启"（此前那条理由是错的）。
