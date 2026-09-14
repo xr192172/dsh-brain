@@ -325,9 +325,28 @@ design-canvas 的 capability_map   →  它自己内部的线级导航
 
 ⇒ 所以能力库对工具层要做的**第一件事不是"登记"，而是"把漂移变成可检出的"**。
 已内置：
-- `scripts/diff-dc-capability-map.mjs` —— 单独跑，出漂移报告
+- `scripts/diff-dc-capability-map.mjs` —— 单独跑，**对真实编译产物**三方对账（见下 §3.6.1 收口）
 - `capability-registry.mjs check` —— 每次校验都会重扫工具面并报漂移
 - `list_capabilities` 的输出里也带 `[!] N 个工具未进能力线`
+
+#### 3.6.1 ★ 收口（2026-09-14 下午）：目录改为**由注册表派生**，漂移在结构上不再可能
+
+用户要求「`capability_map` 的能力线目录要自动生成，不要手工同步」后已实现（design-canvas 仓）：
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| 工具集合 | `capability_map.ts` 里手写的 `LANES`（55 条） | **server_registry 的 `TOOL_DEFS`**（唯一权威），运行时注入 |
+| 人工维护 | 每条工具一条 `{name, when}`（增删工具必改，会漂） | `LANE_OF` 只写「工具 → 线」，`when` 缺省取注册描述首句 |
+| 漏标后果 | 工具**静默消失**（4 个工具就此漏网） | 输出单列「⚠ 未归线工具」+ `validateLanes` 报错 + 测试红 |
+| 测试 | 自带一份手抄的 55 工具清单（**第三份副本**） | 直接对**真实 `TOOL_DEFS`** 断言，副本清零 |
+
+- 装配用 `makeCapabilityMapHandler(() => TOOL_DEFS)` 注入目录，**capability_map 不 import 注册表**
+  ⇒ 避免 `server_registry ⇄ capability_map` 循环 import（这是"派生"最容易踩的坑）。
+- 实测：**60/60 归线**，`已注册但没进任何能力线` 由 5 → **0**；`capability_map` 自身也归入 `meta`。
+- `diff-dc-capability-map.mjs` 随之重写：不再正则解析源码，改为 ①import 编译产物拿真目录
+  ②`validateLanes` 必须为空 ③**真调 handler**（证明注入没断）④与 `registry.json` 的 `tooling` 块
+  对账，`--fix` 回填。**顺手用 `--fix` 把 registry.json 里过期的 `drift` 记录刷成空。**
+- ⚠️ 运行时生效需要 design-canvas **rebuild + 换代**（MCP server 由 DSH 以 stdio 拉起，进程不热更新）。
 
 ---
 

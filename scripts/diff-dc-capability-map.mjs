@@ -1,67 +1,131 @@
+#!/usr/bin/env node
 /**
- * diff-dc-capability-map.mjs —— 检测 design-canvas「能力线目录」与实际工具注册的漂移
+ * diff-dc-capability-map.mjs —— design-canvas 能力线目录：一致性验收 + 回填 dsh 能力库登记
  *
- * 背景：design-canvas/src/tools/capability_map.ts 的注释自己写着
- *   「能力线目录（静态事实，改动工具名/新增工具时同步此处）」
- * —— 这是一份**手工同步**的表，必然漂移。本脚本把漂移变成可检出的。
+ * 演变（2026-09-14）：
+ *   旧版：正则解析 capability_map.ts 的**手工 LANES 表**，检出「已注册但没进任何能力线」的工具
+ *         —— 当时抓到 4 个工具看不见（含记忆系统两个入口）。
+ *   现版：LANES 已改成**由 server_registry 的 TOOL_DEFS 自动派生**（LANE_OF 只写归属，
+ *         when 缺省由注册描述摘要）→ 漂移在结构上不可能发生；本脚本随之改为对**真实产物**
+ *         做三方对账，不再正则会话源码：
+ *           ① 直接 import design-canvas 编译产物（dist）—— 查真注册表，不查包装层/副本；
+ *           ② validateLanes 必须为空（未归线 / 陈旧标注 / direct 越线 全为 0）；
+ *           ③ 真调 capability_map 的 handler（证明 makeCapabilityMapHandler(() => TOOL_DEFS)
+ *              的注入没断），全量地图落 out/ 供人/LLM 复核；
+ *           ④ 与 ~/.dsh/capabilities/registry.json 里 design-canvas 的 tooling 块对账，--fix 回填。
  *
- * 意义：这是「能力库必须覆盖工具层」的第一个具体证据。
- * 我们的 capability-registry 只登记了 subagent provider；而模型手里**大部分工具来自 MCP**
- * （design-canvas 一家就占 58 个）。不覆盖工具层，"我有哪些能力"就是半个答案。
- *
- * 用法： node scripts/diff-dc-capability-map.mjs
+ * 用法：
+ *   node scripts/diff-dc-capability-map.mjs          # 只报不改（校验失败 exit 1）
+ *   node scripts/diff-dc-capability-map.mjs --fix     # 回填 registry.json 的 tooling 块
  */
 import fs from 'node:fs'
+import path from 'node:path'
 
 const DC = 'D:/project_develop/design-canvas'
-const OUT = 'D:/project_develop/dsh-brain/out/dc-capability-drift.txt'
+const OUT = 'D:/project_develop/dsh-brain/out/dc-capability-map.txt'
+const HOME = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'
+const REGISTRY = path.join(HOME, 'capabilities', 'registry.json')
+const fix = process.argv.includes('--fix')
 
-const regPath = `${DC}/src/server_registry.ts`
-const cmPath = `${DC}/src/tools/capability_map.ts`
-const out = []
-
-if (!fs.existsSync(regPath) || !fs.existsSync(cmPath)) {
-  console.log('X 找不到 design-canvas 源文件，检查路径：' + DC)
+const regEntry = `${DC}/dist/src/server_registry.js`
+const cmEntry = `${DC}/dist/src/tools/capability_map.js`
+if (!fs.existsSync(regEntry) || !fs.existsSync(cmEntry)) {
+  console.error(`X 找不到 design-canvas 编译产物（先 npm run build）：\n  ${regEntry}`)
   process.exit(1)
 }
 
-const reg = fs.readFileSync(regPath, 'utf8')
-const cm = fs.readFileSync(cmPath, 'utf8')
+const reg = await import(`file:///${regEntry}`)
+const cm = await import(`file:///${cmEntry}`)
 
-// server_registry 里的工具名：行首缩进后的 name: 'xxx'
-const registered = new Set([...reg.matchAll(/^\s*name:\s*'([a-z][a-z0-9_]*)'/gm)].map((m) => m[1]))
-// capability_map 里收录的工具名：{ name: 'xxx', when: ...
-const inLanes = new Set([...cm.matchAll(/\{\s*name:\s*'([a-z][a-z0-9_]*)'/g)].map((m) => m[1]))
-// 各线的 direct 白名单
-const direct = new Set(
-  [...cm.matchAll(/direct:\s*\[([^\]]*)\]/g)].flatMap((m) =>
-    [...m[1].matchAll(/'([a-z][a-z0-9_]*)'/g)].map((x) => x[1])),
-)
-// 线 id
-const lanes = [...cm.matchAll(/^\s*id:\s*'([a-z]+)',/gm)].map((m) => m[1])
+const catalog = reg.TOOL_DEFS.map((d) => ({ name: d.name, title: d.title, description: d.description }))
+const def = reg.TOOL_DEFS.find((d) => d.name === 'capability_map')
+if (!def) {
+  console.error('X 注册表里没有 capability_map —— 工具被摘了？')
+  process.exit(1)
+}
 
-out.push('design-canvas：能力线目录 vs 实际注册（漂移检测）')
-out.push(`  源文件: ${regPath}`)
-out.push(`  能力线: ${lanes.join(', ')}（${lanes.length} 条）`)
-out.push(`  注册表工具数 : ${registered.size}`)
-out.push(`  能力线收录数 : ${inLanes.size}`)
-out.push(`  direct 白名单 : ${direct.size}`)
+const errors = cm.validateLanes(catalog)
+const { lanes, unassigned, stale } = cm.buildLanes(catalog)
+const report = cm.laneMaintenanceReport(catalog)
+const full = await def.handler({})
+const badLane = await def.handler({ lane: 'no_such_lane' })
+if (!badLane.isError) errors.push('未知 lane 未按错误返回')
+
+const live = {
+  mode: 'derived-from-TOOL_DEFS',
+  toolCount: reg.TOOL_DEFS.length,
+  laneCount: lanes.length,
+  lanes: lanes.map((l) => l.id),
+  laneToolCount: lanes.reduce((n, l) => n + l.tools.length, 0),
+  directCount: new Set(lanes.flatMap((l) => l.direct)).size,
+  curatedWhen: report.curated,
+  derivedWhen: report.derived.length,
+  drift: {
+    registeredNotInLanes: unassigned.map((t) => t.name),
+    inLanesNotRegistered: stale,
+    exempt: [],
+  },
+  scannedAt: new Date().toISOString(),
+}
+
+// ── 报告 ────────────────────────────────────────────────────────────────────
+const out = []
+out.push('design-canvas 能力线目录：与真实注册表三方对账')
+out.push(`  源（编译产物）: ${regEntry}`)
+out.push(`  ★ 目录来源: ${live.mode}（LANE_OF 只写归属；when=${live.curatedWhen} 人工 / ${live.derivedWhen} 自动摘要）`)
+out.push(`  注册工具数 : ${live.toolCount}`)
+out.push(`  目录收录数 : ${live.laneToolCount}（未归线 ${live.drift.registeredNotInLanes.length}）`)
+out.push(`  能力线     : ${live.lanes.join(', ')}（${live.laneCount} 条）`)
+out.push(`  陈旧标注   : ${live.drift.inLanesNotRegistered.join(', ') || '（无）'}`)
+out.push(`  direct 白名单: ${live.directCount}`)
+out.push(`  校验错误   : ${errors.length ? JSON.stringify(errors, null, 2) : '（无）'}`)
 out.push('')
-
-const onlyReg = [...registered].filter((x) => !inLanes.has(x)).sort()
-const onlyLane = [...inLanes].filter((x) => !registered.has(x)).sort()
-
-out.push(`★ 已注册但没进任何能力线（${onlyReg.length} 条）—— agent 靠 capability_map 导航时看不见它们:`)
-for (const x of onlyReg) out.push(`    ${x}`)
-if (!onlyReg.length) out.push('    （无）')
+out.push(`★ 已注册但没进任何能力线（${live.drift.registeredNotInLanes.length} 条）`)
+for (const x of live.drift.registeredNotInLanes) out.push(`    ${x}`)
+if (!live.drift.registeredNotInLanes.length) out.push('    （无）')
 out.push('')
-out.push(`★ 能力线里写了但注册表没有（${onlyLane.length} 条）—— 陈旧条目，agent 会被指向不存在的工具:`)
-for (const x of onlyLane) out.push(`    ${x}`)
-if (!onlyLane.length) out.push('    （无）')
-out.push('')
-const badDirect = [...direct].filter((x) => !inLanes.has(x))
-out.push(`direct 白名单里不在任何线内的（应为 0）: ${badDirect.join(', ') || '无'}`)
+out.push('──── capability_map 实调输出（模型可见的地图）────')
+out.push(full.text)
 
+fs.mkdirSync(path.dirname(OUT), { recursive: true })
 fs.writeFileSync(OUT, out.join('\n'), 'utf8')
-console.log(out.join('\n'))
-console.log('\nok -> ' + OUT)
+
+// ── 对账 dsh 能力库登记 ──────────────────────────────────────────────────────
+const db = fs.existsSync(REGISTRY) ? JSON.parse(fs.readFileSync(REGISTRY, 'utf8')) : null
+const entry = db?.capabilities?.find((c) => c.id === 'design-canvas')
+const diffs = []
+if (!entry) {
+  diffs.push('registry.json 里没有 design-canvas 条目')
+} else {
+  const prev = entry.tooling ?? {}
+  for (const k of ['toolCount', 'laneCount', 'laneToolCount', 'directCount', 'mode']) {
+    if (JSON.stringify(prev[k]) !== JSON.stringify(live[k])) diffs.push(`${k}: ${JSON.stringify(prev[k])} → ${JSON.stringify(live[k])}`)
+  }
+  const prevDrift = prev.drift ?? {}
+  if (JSON.stringify(prevDrift.registeredNotInLanes ?? []) !== JSON.stringify(live.drift.registeredNotInLanes)) {
+    diffs.push(`drift.registeredNotInLanes: ${JSON.stringify(prevDrift.registeredNotInLanes ?? [])} → ${JSON.stringify(live.drift.registeredNotInLanes)}`)
+  }
+  if (JSON.stringify(prevDrift.inLanesNotRegistered ?? []) !== JSON.stringify(live.drift.inLanesNotRegistered)) {
+    diffs.push(`drift.inLanesNotRegistered: ${JSON.stringify(prevDrift.inLanesNotRegistered ?? [])} → ${JSON.stringify(live.drift.inLanesNotRegistered)}`)
+  }
+}
+
+console.log(out.slice(0, 8).join('\n'))
+console.log(`\n对账 dsh 能力库（${REGISTRY}）:`)
+console.log(diffs.length ? diffs.map((d) => '  · ' + d).join('\n') : '  （一致）')
+
+if (fix && entry) {
+  entry.tooling = live
+  entry.signals = entry.signals ?? {}
+  entry.signals.notes = [
+    `工具面：${live.toolCount} 工具 / ${live.laneCount} 条能力线（${live.lanes.join(', ')}）；目录由 TOOL_DEFS 派生，未归线 ${live.drift.registeredNotInLanes.length} 个`,
+  ]
+  db.updatedAt = new Date().toISOString()
+  const tmp = `${REGISTRY}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2) + '\n', 'utf8')
+  fs.renameSync(tmp, REGISTRY)
+  console.log(`  ✅ 已回填 tooling 块（${live.mode}）`)
+}
+
+console.log(`\nok -> ${OUT}`)
+process.exit(errors.length ? 1 : 0)
