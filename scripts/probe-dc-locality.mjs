@@ -92,6 +92,42 @@ if (process.argv.includes('--tile')) {
   process.exit(0)
 }
 
+// ── 模式 C（--flow）：完整复现"首次读 → 后台续建补齐"的用户流程 ──
+if (process.argv.includes('--flow')) {
+  const { ensureIndexAroundSeed } = await import(`file:///${DC}/dist/src/tools/index_freshness.js`)
+  const { scheduleBackfill, backfillState } = await import(`file:///${DC}/dist/src/tools/index_backfill.js`)
+  const seed = 'observe/instrument.ts'
+  const out = []
+  out.push(`首次读 → 后台续建（S2 判定）—— 源：${path.resolve(srcArg)}（复制 ${copied} 文件）`)
+  out.push('')
+  const t0 = Date.now()
+  const tile = await ensureIndexAroundSeed(root, [seed], { depth: 1, maxFiles: 80, maxTextImporters: 6, maxMs: 4000 })
+  const firstMs = Date.now() - t0
+  out.push(`① 首次读建块（seed=${seed}，时长上限 4000ms）`)
+  out.push(`   新建 ${tile.newFiles} ｜ 缝合 ${tile.stitched} ｜ 访问 ${tile.visited} ｜ 状态 ${tile.partial ? `partial(${tile.stopReason})` : 'ready'}`)
+  out.push(`   ★ 实测耗时：**${firstMs}ms**（读得到 = 最重要）`)
+  out.push('')
+  const t1 = Date.now()
+  scheduleBackfill(root, { batch: 20, intervalMs: 50 })
+  for (;;) {
+    const s = backfillState(root)
+    if (!s || !s.running) break
+    if (Date.now() - t1 > 300000) break
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  const bf = backfillState(root)
+  out.push(`② 后台续建（batch=20 / 50ms 间隔，空闲时跑）`)
+  out.push(`   ${bf ? `总数 ${bf.total} ｜ 完成 ${bf.done} ｜ 本轮新建 ${bf.synced} ｜ 失败 ${bf.failed} ｜ 轮次 ${bf.rounds}` : '(未起)'}`)
+  out.push(`   ★ 补齐用时：**${Date.now() - t1}ms**（与前台读并行/空闲时进行，不阻塞读）`)
+  fs.mkdirSync('D:/project_develop/dsh-brain/out', { recursive: true })
+  fs.writeFileSync('D:/project_develop/dsh-brain/out/locality-flow.txt', out.join('\n'), 'utf8')
+  console.log(out.join('\n'))
+  try {
+    fs.rmSync(root, { recursive: true, force: true })
+  } catch {}
+  process.exit(0)
+}
+
 const t0 = Date.now()
 const { db } = await ensureProjectIndex(root)
 const bootMs = Date.now() - t0
