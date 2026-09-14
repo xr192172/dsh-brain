@@ -89,10 +89,15 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   `function_outline`（feature 级缓存）；`diff_views` 等属**领域前置不该动**。
 - **P0-1 智能报错（Did you mean）已完成**：`src/tools/arg_suggest.ts` + `registerAllTools` 注入；
   ★ 关键：**inputSchema 必须换 loose object**（否则 SDK 严格 object 静默丢未知键，提示不出现）。
-  探针 `scripts/probe-dc-arg-suggest-mcp.mjs` 4 项 PASS；全量 vitest **1967 passed / 11 failed
-  （失败集合是基线真子集 ⇒ 无新增回归）**。
-  **下一步**：P0-5 git 快照+一键回滚 → P0-4 模糊编辑级联（先核查 edit_code 现状）→
-  P1「修复→规则沉淀」（最差异化）。
+  探针 `scripts/probe-dc-arg-suggest-mcp.mjs` 4 项 PASS。
+- **P0-5 可撤回已完成**：`src/tools/file_snapshot.ts`（影子副本，不用 git）+ 新工具
+  `list_snapshots`/`rollback_snapshot`；落盘前自动快照已接 `edit_code`/`rename_files`/`move_symbol`
+  （`rename_symbols` 待接）。⚠️ 与既有 `snapshot.ts`（DSL feature 快照）同名不同职 → 目录分开
+  `code-snapshots/`。探针 `scripts/probe-dc-snapshot-mcp.mjs` 5 项 PASS。
+  **四根 MCP 探针（snapshot/arg-suggest/zero-setup/capability-map）一起 exit 0**。
+  全量 vitest **1974 passed / 11 基线失败**（readme 工具数门禁已自愈 60→62）⇒ 无新增回归。
+  **下一步**：P0-4 模糊编辑级联（先核查 edit_code 现状；顺带确认 `op='replace_text'` 是否死代码）
+  → P1「修复→规则沉淀」（最差异化）。
 - **★ 换代分工（2026-09-14，用户纠正后定案）**：**我的宿主是 WorkBuddy，被换代的是 DSH**
   （`dsh web` 那套 gen/switchboard）——两者是不同系统 ⇒ **我天然是外部观察者**，
   不会再"吐槽自己不能被重启"（此前那条理由是错的）。
