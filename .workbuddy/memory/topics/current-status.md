@@ -76,5 +76,12 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 
 ## 其他未闭合
 
-P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜
-design-canvas 改名｜"读写编辑统一入口 + 模型无感"愿景（详见日更 2026-09-14 尾部）。
+- **读写编辑统一入口（AST 内核）：设计稿已出** → `docs/ast-io-entry.md`。
+  ★ 结论：**内核已有，缺口只有「冷启 bootstrap」**（`ensureFreshIndex` 只保鲜不冷启，
+  见 `tests/tools/index_freshness.test.ts` 的「空库 → 不 bootstrap」用例）⇒ P0 极小。
+  三入口 `code_read`/`code_filter`/`code_edit`；N3 模型无感**绝不写 prompt**（靠工具层默认实现）。
+  待拍板 5 项（名字/兼容/扫描边界/dry_run 默认/索引归属）。
+- **design-canvas 改名：推荐已给，待用户拍板**（主推 `silva`/「林」；备选 `graft`/`arbor`）。
+  影响面：仓内 **179 文件** + DSH profile/插件/能力库；分「品牌层 / 机器契约层」两次走。
+- P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜
+  "读写编辑统一入口 + 模型无感"愿景（详见日更 2026-09-14 尾部）。

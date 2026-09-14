@@ -70,13 +70,13 @@
    （`LANE_OF` 只写归属，`when` 取描述首句；漏标 → 输出显式「未归线」段 + 测试红）。
    **60/60 归线**，design-canvas 提交 `91a57ea`。⚠️ 需**换代**后运行时才生效。
    细节见 `topics/current-status.md` 与 `docs/capability-registry-evolution.md` §3.6.1。
-2. **给 design-canvas 改名** —— 需他确认名字（历史检索 0 命中），或去
-   `design-canvas/docs/`、`.trae/documents/`、git log 找线索。改名动机见下条。
-3. ★ **愿景**：design-canvas 成为 agent 的**读写编辑统一入口**，且**模型无感** ——
-   原话「以后所有的读写编辑都用这个…agent 要自己遇到一个项目就自发地去解析，让模型无感」。
-   ⚠️ **张力**：**「模型无感」与 prompt 前缀稳定性冲突** —— 若把默认路径写进 system prompt，
-   每次调整都击穿缓存。应靠**工具层的默认实现（同名工具换底层）**，而非 prompt 指令。
+2. **给 design-canvas 改名** —— **推荐已给待拍板**：主推 `silva`（中文「林」），备选 `graft`/`arbor`。
+   影响面实测 **179 文件** + DSH profile/插件/能力库 ⇒ 分「品牌层 / 机器契约层」两次原子走。
+3. ★ **愿景：读写编辑统一入口（AST 内核）** —— **设计稿已出：`docs/ast-io-entry.md`**。
+   要点：**内核已有，缺口只有「冷启 bootstrap」**（`ensureFreshIndex` 只保鲜不冷启）；
+   三入口 `code_read`/`code_filter`/`code_edit`；**N3 模型无感靠工具层默认实现，绝不写 system prompt**
+   （否则击穿前缀，违反铁律 5）。待拍板 5 项见文档 §11。
 
-**未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜上述 2 / 3。
+**未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜上述 2 待定名 / 3 待拍板。
 
 > 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
