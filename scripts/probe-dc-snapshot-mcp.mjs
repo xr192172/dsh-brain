@@ -39,12 +39,14 @@ const call = async (name, args) => {
   return (r.content ?? []).map((c) => c.text ?? '').join('\n')
 }
 
+// 顺带验证 op='replace_text'（曾"实现支持但 schema 不暴露"⇒ 从 MCP 面不可达的死代码）已可达：
+// 它不需要符号索引、不需要行号，是零前置场景下最好用的安全小改。
 const edit = await call('edit_code', {
   project_dir: root,
   file: 'src/a.ts',
-  op: 'replace',
-  symbol: 'probe',
-  code: 'export function probe(): number {\n  return 42;\n}',
+  op: 'replace_text',
+  old_text: 'return 1;',
+  new_text: 'return 42;',
 })
 const afterEdit = fs.readFileSync(file, 'utf8')
 const list1 = await call('list_snapshots', { project_dir: root })

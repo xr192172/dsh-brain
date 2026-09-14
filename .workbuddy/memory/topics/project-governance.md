@@ -68,6 +68,7 @@
 | `review-external-six-layer-plan.md` | 外部六层方案评估（最危险的是它的 `auto_evolve`） |
 | `BUILD.md` | 构建说明（含 profile manifest 必须无 BOM） |
 | `verification-contract.spec.md` / `self_evolution_verify_gate.review.md` | 验证契约 |
+| `design-canvas/docs/observe-line-triage.md` | **observe（原 camera）线体检**：插桩/事件/判定/对账｜★ 944 次调用里 observe_* 采纳 **0 次** ★ 3159+1895+7000 行 / 20+ 测试 / 已冻结｜三选项待拍板（推荐"收敛为验收执行器"） |
 | `.trae/documents/HANDOFF-2026-09-13.md` | 交接文档（**注意其"15813 = elv/dsh-hub"是错的**） |
 
 ## 4. 设计原则汇总（跨主题）
