@@ -65,40 +65,49 @@
 
 **入口级**：`docs/ideas-spec.md`（实现无关的思路规格，**改架构前先读**）。
 
-## ⏭ 交接（2026-09-14 17:20 更新）
+## ⏭ 交接（2026-09-14 00:40 更新）
 
-**用户最后问的三件事，当前进度**：
+**索引层的目标已定成一句不变量**（见 `design-canvas/docs/index-freshness-extreme.md`）：
+> **任何时刻，LLM 通过工具读到的索引内容，要么与磁盘一致，要么明确标注它可能旧/不全。**（= 绝不撒谎）
 
-1. ✅ **「补齐 42s vs 12s，是算法问题吗？」→ 不是算法，是「写了却没包事务」**（已修完实测）：
-   后台补齐 **42.4s → 13.4s**（跨文件解析 27.3s → 1.9s，14.6×；syncFile 9.5s 没变 = AST 解析本身，33ms/文件不可约）。
-   **42.6s 是后台补齐、不阻塞读**；前台首读 **1012ms**，二次调用 24ms，冷启 11.8s/294 文件。
-   修法：`resolveCrossFileCalls` 加 `ownTx` 事务包裹（外层有事务时自动降级 no-op）。
-   剖面探针 `scripts/probe-dc-backfill-profile.mjs`（看 `syncMs/resolveMs` 拆账）。
-2. ✅ **「拼图能不能触发看门狗 / 引用部分怎么重算 / AST 怎么算」→ 已接上**：
-   三层分工 = ① watch 保鲜已建拼图（高频）② `index_backfill` 补齐未索引区 ③ `reconcileProject` 低频兜底。
-   `flushBatch` 收尾改**增量口径**（`scopeFiles` = 本批动过的文件 ∪ **被重开的引用方文件**）+
-   把 `reopenRefsTo` 接进 watch（原先只在 `ensureFreshIndex`）+ 修 `ensureFreshIndex` 的
-   "先 resolve 再 reopen" **顺序 bug**。
-   ★★ **实测对拍（`scripts/probe-dc-watch-refresh.mjs`，双副本）**：旧口径留下 **100 条陈旧断言**
-   （说自己 resolved 但名字已不在索引）＝ 静默漏 100 条引用；新口径 0 条。**旧口径"更快"是因为它漏**，
-   ⇒ **别讲成速度对比，要讲成「范围 + 一致性」对比**（294 文件 → 51 文件）。
-   新增 `indexedRelativeSet` / `isIndexedRelative`（拼图边界，O(1)）+ watch 的 `scopeToIndex`（**默认 false**）。
-   详见 `docs/index-locality-design.md` §8.3/§8.4。
-3. ★ **愿景：读写编辑统一入口（AST 内核）** —— 设计稿 `docs/ast-io-entry.md`，**P0 已落地**：
-   **空库不再甩"先 import_project"，改为就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`）；
-   探针 `scripts/probe-dc-zero-setup-mcp.mjs` 真 MCP 端到端 **5 项断言 PASS**。
-   可抄台账 `docs/agent-code-io-adoption.md`；同类调研 `docs/agent-code-io-landscape.md`。
-   **N3 模型无感绝不写 prompt**（靠工具层默认实现）。
+失败分两种，只值得为第二种花钱：**报错/说不知道**（低危）vs **静默给旧答案**（高危，LLM 无从察觉）。
+⇒ "极致"不是更快更全，而是**把"读到错东西却不知道"的概率压到零**。
 
-**★ 待用户拍板**：
-- watch 的 `scope_to_index` 默认值现为 **false**（不改语义）；是否把 **MCP 工具 `watch_project` 默认设成 true**
-  （= 大仓上 watch 只保鲜已建拼图）？需新加工具入参，我没擅自加。
-- 改名：先挂 working name `agentio`（正式定名待定）；机器契约层改名影响 **179 文件**，分两段原子走。
-- S2 剩余：② **边界扩展**（新文件并入相邻块，现在只靠后台续建/reconcile 兜）③ 后台续建进度做成只读工具。
+**五层保障（全部已落地）**：
+L1a 写穿 `write_gate.writeSourceFiles`（185ms/次，`rename_symbols` 已接）｜
+L1b 自写登记 `recordSelfWrite`（同步签名工具走这条，`remove_dead_imports` 已接）｜
+L2 watch（含拼图边界闸 `scopeToIndex`，默认关）｜
+L3① `ensureFreshIndex`（精确、异步）｜ **L3② `staleIndexWarning` 响应注入（覆盖全部 60 个工具，5s 缓存 + 只在状态转变报一次）**｜
+L4 `reconcileProject`。
 
-**未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜P0-4 模糊编辑级联。
-**实践纪律**：**换代由用户自己发**；跑探针前必须 `tsc` 重建 dist（`tsc --noEmit` ≠ dist 已更新，
-陈旧 dist 会让探针静默跑旧代码）。
+**★ 实测（`scripts/probe-dc-write-through.mjs`，靶子 = 102 条入边的 `storage.ts#getDSL` 改名）**：
+经闸 185ms ⇒ 未保鲜 0 / 旧名入边 0 / 陈旧断言 0；绕过闸 ⇒ 未保鲜 1 / **旧名入边 102**（LLM 会被指向已不存在的旧名）。
+★ 指标口径别混：`not_fresh`＝索引**落后于磁盘**；`stale_resolved`＝索引**自身内部**不一致
+（只在"重同步删了旧节点却没重开引用"时出现，见 `probe-dc-watch-refresh.mjs`）。
+
+**新工具 `index_integrity`**（meta 线）：把**可信度当结果返回**（陈旧断言/覆盖度/未保鲜/自写登记/修复建议）；
+`refresh:true` 顺手**修复**陈旧引用（只有它能修 —— 保鲜路径靠 `symbol_diffs`，而那些文件内容没变）。
+真身自检：390 文件 / 4887 节点 / 9434 边 / **陈旧断言 0**。
+
+**★ 本轮踩到的 3 个真 bug（已修，教训可复用）**：
+1. `scanLiteralOccurrences` 的 SKIP_DIRS 缺 `.design-canvas` ⇒ 扫到 `code-snapshots/` 的**旧文本副本**，
+   既虚增命中数又把**可撤回的快照本身改写掉**。⇒ **我们自己的派生物目录必须排除在"扫源码"之外**。
+2. `index_backfill` 写 `const indexedSet = indexedRelativeSet`（模块级别名）撞上
+   `index_backfill ⇄ index_freshness` 循环 import ⇒ 别名捕获成 `undefined`。⇒ **循环的两个模块间不要建模块级别名**。
+3. 落盘工具不经闸 ⇒ 改完索引不知情。⇒ 新写工具一律接 `writeSourceFiles`（async）或 `recordSelfWrite`（同步）。
+
+**★ 既有测试失败必须对照证明，别自认**：全量 2040 项有 18 失败（9 文件）。
+方法：`git checkout <parent>`（工作区必须干净）跑同一批 → 与 HEAD 对比。已证 `find_references` 3 项与
+`server_registry.stale_build` 1 项在父提交上**完全一致**；其余是 Go/网络/git 环境类。
+
+**未闭合 / 下一步**（详见 extreme 文档 §5）：① L3② 从"标注"升级为"精确"（TTL 保鲜守卫，或先给
+`diff_impact` 单独接保鲜 —— 它给的是**行动建议**，读旧图最危险）② 可信度自动附到 `impact_analysis`/`rename_*`
+③ **边界扩展**（`noExpand` 终点复用 + 新文件并入相邻块）④ 能力自述（按语言标注可解析粒度，P10）
+⑤ 预热 `parseFileFull` 让同步工具直连 L1a ⑥ 写入闸收编 `edit_code`/`rename_files`/`symbol_move`/
+`code_workbench`/`refactor_pipeline`/`scaffold`。
+
+**其他待拍板**：`scopeToIndex` 是否给 MCP 工具 `watch_project` 默认开（现 false）｜改名 working name `agentio`（正式待定）｜
+P2-b 重启验证｜P3 注册门。**实践纪律**：**换代由用户自己发**；跑探针前必须 `tsc` 重建 dist。
 
 > 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
 
