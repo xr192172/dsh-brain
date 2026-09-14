@@ -7,6 +7,14 @@
 #   走的是同一条路，实测工具确实出现在模型手里。
 #
 # ⚠️ 不要再在 profile 的 cordis.patch.yml 里写同 id 的覆盖块 —— duplicate loader entry id。
+# ⚠️ config 块必须显式写：本插件的 Config 是 `z.object({...})`，
+#    缺 config 时 loader 传 undefined → zod 校验失败（expected object, received undefined）
+#    → 整个 gen 启动即 EXIT code=1（2026-09-14 实测，且 swap 仍报 success）。
+#    其余四个 @dsh-brain 插件（tool-evolution / conveyor-context / design-canvas-bridge /
+#    subagent-council）都显式写了 config，本包此前漏了。
 - insert:
     - id: capability-bridge
       name: '@dsh-brain/capability-bridge'
+      config:
+        registryPath: ''
+        maxRows: 50
