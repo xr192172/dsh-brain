@@ -65,29 +65,41 @@
 
 **入口级**：`docs/ideas-spec.md`（实现无关的思路规格，**改架构前先读**）。
 
-## ⏭ 交接（2026-09-14 15:42，用户因上下文过长换新窗口）
+## ⏭ 交接（2026-09-14 17:20 更新）
 
-**两边工作区都干净**：dsh-brain 6 个提交；design-canvas 1 个提交（`b1b2bc6`）。
+**用户最后问的三件事，当前进度**：
 
-**用户最后提的三件事**：
-
-1. ✅ **已完成（15:55–16:05）**：`capability_map` 的能力线目录**改为由注册表 `TOOL_DEFS` 派生**
-   （`LANE_OF` 只写归属，`when` 取描述首句；漏标 → 输出显式「未归线」段 + 测试红）。
-   **60/60 归线**，design-canvas 提交 `91a57ea`。
-   **已换代（gen-3084）并用真 MCP stdio 探针端到端验证通过**（工具 60 / 6 线 / 5 个曾漏网工具全可见）。
-   细节见 `topics/current-status.md` 与 `docs/capability-registry-evolution.md` §3.6.1。
-2. **改名：★ 待定** —— 用户拍板**先挂 working name `agentio`**（"那就 agent 的 IO 吧"），
-   正式定名保持待定；已排除「管家/代理」角色派（好看的全被占 + `proxy` 与网络代理撞义）。
-   详见 `docs/rename-design-canvas.md`；同类怎么命名/怎么做见 `docs/agent-code-io-landscape.md`
-   （★ 校准：Serena ★29.3k 用的就是**零相关**的意象美名 ⇒ **"零相关"不是问题，被占用才是**；
-   硬指标只有 **唯一 + 好念 + 好记**）。影响面 **179 文件** ⇒ 分「品牌层 / 机器契约层」两次原子走。
+1. ✅ **「补齐 42s vs 12s，是算法问题吗？」→ 不是算法，是「写了却没包事务」**（已修完实测）：
+   后台补齐 **42.4s → 13.4s**（跨文件解析 27.3s → 1.9s，14.6×；syncFile 9.5s 没变 = AST 解析本身，33ms/文件不可约）。
+   **42.6s 是后台补齐、不阻塞读**；前台首读 **1012ms**，二次调用 24ms，冷启 11.8s/294 文件。
+   修法：`resolveCrossFileCalls` 加 `ownTx` 事务包裹（外层有事务时自动降级 no-op）。
+   剖面探针 `scripts/probe-dc-backfill-profile.mjs`（看 `syncMs/resolveMs` 拆账）。
+2. ✅ **「拼图能不能触发看门狗 / 引用部分怎么重算 / AST 怎么算」→ 已接上**：
+   三层分工 = ① watch 保鲜已建拼图（高频）② `index_backfill` 补齐未索引区 ③ `reconcileProject` 低频兜底。
+   `flushBatch` 收尾改**增量口径**（`scopeFiles` = 本批动过的文件 ∪ **被重开的引用方文件**）+
+   把 `reopenRefsTo` 接进 watch（原先只在 `ensureFreshIndex`）+ 修 `ensureFreshIndex` 的
+   "先 resolve 再 reopen" **顺序 bug**。
+   ★★ **实测对拍（`scripts/probe-dc-watch-refresh.mjs`，双副本）**：旧口径留下 **100 条陈旧断言**
+   （说自己 resolved 但名字已不在索引）＝ 静默漏 100 条引用；新口径 0 条。**旧口径"更快"是因为它漏**，
+   ⇒ **别讲成速度对比，要讲成「范围 + 一致性」对比**（294 文件 → 51 文件）。
+   新增 `indexedRelativeSet` / `isIndexedRelative`（拼图边界，O(1)）+ watch 的 `scopeToIndex`（**默认 false**）。
+   详见 `docs/index-locality-design.md` §8.3/§8.4。
 3. ★ **愿景：读写编辑统一入口（AST 内核）** —— 设计稿 `docs/ast-io-entry.md`，**P0 已落地**：
    **空库不再甩"先 import_project"，改为就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`）；
    探针 `scripts/probe-dc-zero-setup-mcp.mjs` 真 MCP 端到端 **5 项断言 PASS**。
-   **下一步**：P0-b 残余 8 处前置文案 → P0 智能报错/快照回滚/模糊编辑级联 →
-   P1 修复→规则沉淀（最差异化）。可抄台账 `docs/agent-code-io-adoption.md`；
-   同类调研 `docs/agent-code-io-landscape.md`。**N3 模型无感绝不写 prompt**（靠工具层默认实现）。
+   可抄台账 `docs/agent-code-io-adoption.md`；同类调研 `docs/agent-code-io-landscape.md`。
+   **N3 模型无感绝不写 prompt**（靠工具层默认实现）。
 
-**未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜上述 2 待定名 / 3 待拍板。
+**★ 待用户拍板**：
+- watch 的 `scope_to_index` 默认值现为 **false**（不改语义）；是否把 **MCP 工具 `watch_project` 默认设成 true**
+  （= 大仓上 watch 只保鲜已建拼图）？需新加工具入参，我没擅自加。
+- 改名：先挂 working name `agentio`（正式定名待定）；机器契约层改名影响 **179 文件**，分两段原子走。
+- S2 剩余：② **边界扩展**（新文件并入相邻块，现在只靠后台续建/reconcile 兜）③ 后台续建进度做成只读工具。
+
+**未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜P0-4 模糊编辑级联。
+**实践纪律**：**换代由用户自己发**；跑探针前必须 `tsc` 重建 dist（`tsc --noEmit` ≠ dist 已更新，
+陈旧 dist 会让探针静默跑旧代码）。
+
+> 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
 
 > 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
