@@ -1,7 +1,8 @@
 # AST 读写编辑统一入口（code-io）—— 设计规格
 
-> 状态：**设计稿（未实现）** ｜ 提出：2026-09-14（用户口述愿景）｜ 关联：
+> 状态：**设计稿（P0 已落地）** ｜ 提出：2026-09-14（用户口述愿景）｜ 关联：
 > `design-canvas/docs/tool-convergence.md` §5.6、`.trae/skills/design-canvas-mind/SKILL.md`、`capability-registry-evolution.md` §3.6.1
+> 可抄台账：`agent-code-io-adoption.md` ｜ 同类调研：`agent-code-io-landscape.md`
 >
 > 底座代号：本文暂用 **Silva（林）** 代称（名字待拍板，见 §11）。「一个项目 = 一片林；静默解析 = 让它长出来；读写编辑 = 在林间精确定位、修枝、嫁接」。
 
@@ -154,27 +155,32 @@
 
 ---
 
-## 6. 索引门面：冷启 bootstrap（P0 的核心改造）
+## 6. 索引门面：冷启 bootstrap（P0 —— ✅ 已实现 2026-09-14）
 
-**改造点（小、清晰、可测）**：
+**实现（`src/tools/index_freshness.ts` + `src/tools/semantic_search.ts`）**：
 
 ```
-ensureFreshIndex(projectRoot)
-  ├─ 库存在 → 增量重同步（现状，不动）
-  └─ 库不存在 / 空库 → 【新】bootstrap：
-       ├─ 立即返回 { state: 'indexing', startedAt, files: 0 }   ← 不阻塞调用
-       ├─ 后台跑 syncProject（分片，可按目录/语言限流）
-       ├─ 进度可查：{ state: 'indexing'|'ready'|'partial', files, symbols, coverage, eta }
-       └─ ready 之前：读/筛返回**已索引部分** + `coverage` 明确标注（诚实纪律，不假装完整）
+ensureFreshIndex(db, projectRoot, opts?: { bootstrap?: boolean; maxFiles?: number })
+  ├─ 库非空 → 增量重同步（原语义不动）
+  └─ 库为空 + bootstrap !== false（默认开）→ 【新】冷启：
+       walkFiles → 截到 maxFiles（默认 MAX_BOOTSTRAP_FILES = 2000）→ syncProject
+       返回 { bootstrapped, truncated, state: 'ready'|'partial'|'empty', failed, ms }
 ```
 
-**三条纪律**：
+**三条纪律（都落到代码里了）**：
 
-1. **不阻塞**：第一次调用不许卡在"正在建索引"上；要么给局部结果 + 覆盖度，要么给 `state=indexing` + 可轮询句柄。
-2. **不静默撒谎**：任何结果都带 `index: {state, coverage, indexed_at}`；覆盖度不足时**显式标注**（对齐 `.trae/skills/design-canvas-mind` 的"诚实纪律"）。
-3. **可跳过**：超大仓库/`node_modules`/生成物有 ignore 策略（已有 ignore 依赖）；命中 ignore 不算覆盖缺口。
+1. **不阻塞**：冷启动实测 **26ms / 1 文件**（小项目）；大项目靠 `maxFiles` 上限 + `truncated` 标注，不会把首次查询拖死。
+2. **不静默撒谎**：`state` + `truncated` 是一等字段；`semantic_search` 的 `message` 会带上
+   「冷启动建索引 N 文件」或「已达冷启文件上限，仅覆盖部分文件（如需全量请跑 import_project）」。
+3. **可退可取证**：`{ bootstrap: false }` 恢复"只保鲜不冷启"的老语义（测试里保留该用例）；
+   真 MCP stdio 端到端探针 `scripts/probe-dc-zero-setup.mjs` 断言 4 件事 ——
+   陌生项目**调用前无 cache.db** → **不跑 import_project 直接查** → 命中符号 → **调用后 cache.db 已生成**。
 
-**保鲜（已有）**不变：外部改动（git pull / 手改 / 其他 agent）→ 查询前懒校验增量重同步；
+**仍待做（P0-b，见 `agent-code-io-adoption.md` §0）**：仓内还有 8 处"请先运行 import_project"
+（`diagnosis/*`、`diff_impact`、`extract_contracts`、`function_outline`、`diagnose` 的前置说明）
+—— 零前置要做成系统属性，不能只有查询入口。
+
+**保鲜（原语义）不变**：外部改动（git pull / 手改 / 其他 agent）→ 查询前懒校验增量重同步；
 无变更 → 零重同步、不加注记（不惊扰）。
 
 ---
@@ -240,7 +246,7 @@ ensureFreshIndex(projectRoot)
 
 | 期 | 内容 | 产物 |
 |---|---|---|
-| **P0** | 冷启 bootstrap（§6）+ 覆盖度/新鲜度字段 | `ensureFreshIndex` 改造 + 测试（空库 bootstrap、进度、覆盖率、并发单写） |
+| **P0** | ✅ **已完成**：冷启 bootstrap（§6）+ 诚实状态字段 | `ensureFreshIndex` 改造 + 10 项测试 + MCP 端到端探针；**P0-b 残余 8 处前置文案待补** |
 | **P1** | 三入口（§5）：先 `code_read`/`code_filter`（只读，风险低），再 `code_edit` | 三工具 + 归并映射表 + `capability_map` 的 `io` 线 |
 | **P2** | 语义层：把"语义词 → 结构化动作"的翻译做成默认（如"改这个函数名"→ `code_edit(rename)`） | 意图→动作的路由（**工具层**，非 prompt） |
 | **P3** | 全 agent 默认：DSH 前脑/子脑都默认走这条底座；旧入口退为兼容壳 | 接入验收（§9 L4）+ 能力库登记 |

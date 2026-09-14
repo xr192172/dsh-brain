@@ -81,10 +81,12 @@
    详见 `docs/rename-design-canvas.md`；同类怎么命名/怎么做见 `docs/agent-code-io-landscape.md`
    （★ 校准：Serena ★29.3k 用的就是**零相关**的意象美名 ⇒ **"零相关"不是问题，被占用才是**；
    硬指标只有 **唯一 + 好念 + 好记**）。影响面 **179 文件** ⇒ 分「品牌层 / 机器契约层」两次原子走。
-3. ★ **愿景：读写编辑统一入口（AST 内核）** —— **设计稿已出：`docs/ast-io-entry.md`**。
-   要点：**内核已有，缺口只有「冷启 bootstrap」**（`ensureFreshIndex` 只保鲜不冷启）；
-   三入口 `code_read`/`code_filter`/`code_edit`；**N3 模型无感靠工具层默认实现，绝不写 system prompt**
-   （否则击穿前缀，违反铁律 5）。待拍板 5 项见文档 §11。
+3. ★ **愿景：读写编辑统一入口（AST 内核）** —— 设计稿 `docs/ast-io-entry.md`，**P0 已落地**：
+   **空库不再甩"先 import_project"，改为就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`）；
+   探针 `scripts/probe-dc-zero-setup.mjs` 真 MCP 端到端 **5 项断言 PASS**。
+   **下一步**：P0-b 残余 8 处前置文案 → P0 智能报错/快照回滚/模糊编辑级联 →
+   P1 修复→规则沉淀（最差异化）。可抄台账 `docs/agent-code-io-adoption.md`；
+   同类调研 `docs/agent-code-io-landscape.md`。**N3 模型无感绝不写 prompt**（靠工具层默认实现）。
 
 **未闭合**：P2-b 重启验证（`list_capabilities` 是否进模型工具清单）｜P3 注册门｜上述 2 待定名 / 3 待拍板。
 

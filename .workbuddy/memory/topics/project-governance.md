@@ -51,6 +51,7 @@
 | **`ast-io-entry.md`** | **AST 读写编辑统一入口（设计稿）**：零前置静默建索引 / 三入口 code_read·filter·edit / 模型无感（工具层默认实现，不写 prompt）｜缺口只有"冷启 bootstrap"，内核已有 |
 | **`rename-design-canvas.md`** | **改名方案**：候选名 + npm 实测证据 + 179 文件影响面 + 两段式迁移（品牌层 / 机器契约层）｜**待定，working name `agentio`** |
 | **`agent-code-io-landscape.md`** | **同类项目调研**：四层格局（改写引擎/语义索引/LLM 落地/平台）+ 五共识两裂缝 + 定位与命名启示｜**"他们怎么做的"** |
+| **`agent-code-io-adoption.md`** | **可抄台账**：13 条同类优于我们的做法（出处/怎么落地/落点/优先级）+ 我们已有而他们弱的｜**P0 冷启已做，P0-b 残余 8 处待补** |
 | `self-evolution-master-plan.md` | **自进化总纲**：四条路径、判据阶梯 §5、免疫系统、假设引擎 |
 | `capability-registry-evolution.md` | **能力库式自进化**：provider 机制、架构分层、注册规则、信号/判据分工 |
 | `per-subagent-memory.md` | **每个子脑的记忆**：三档 tier + 发表门、粒度挂能力不挂实例、记忆注入对子代理免费 |

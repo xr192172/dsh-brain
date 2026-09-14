@@ -79,11 +79,13 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 
 ## 其他未闭合
 
-- **读写编辑统一入口（AST 内核）：设计稿已出** → `docs/ast-io-entry.md`。
-  ★ 结论：**内核已有，缺口只有「冷启 bootstrap」**（`ensureFreshIndex` 只保鲜不冷启，
-  见 `tests/tools/index_freshness.test.ts` 的「空库 → 不 bootstrap」用例）⇒ P0 极小。
-  三入口 `code_read`/`code_filter`/`code_edit`；N3 模型无感**绝不写 prompt**（靠工具层默认实现）。
-  待拍板 5 项（名字/兼容/扫描边界/dry_run 默认/索引归属）。
+- **读写编辑统一入口（AST 内核）：设计稿已出，★ P0 已实现** → `docs/ast-io-entry.md`。
+  **P0 冷启 bootstrap 已落地并端到端验证**（design-canvas `index_freshness.ts` / `semantic_search.ts`）：
+  空库不再甩"请先 import_project"，而是**就地静默建索引**（有界 2000 文件 + 诚实 `state/truncated`）。
+  探针 `scripts/probe-dc-zero-setup.mjs`（真 MCP stdio）**5 项断言 PASS**。
+  **P0-b 残余**：仓内还有 8 处"请先运行 import_project"（`diagnosis/*`、`diff_impact`、
+  `extract_contracts`、`function_outline`、`diagnose` 前置说明）——零前置要做成系统属性。
+  可抄台账见 `docs/agent-code-io-adoption.md`（13 条 + 采纳顺序）；同类调研 `docs/agent-code-io-landscape.md`。
 - **design-canvas 改名：推荐 `agentio`**（主推，5/5 闸）／`agentbase`（备选，最对位）／`astbase`（机制向）。
   命名策略：**机器名走基建系直白词（`*base`/`*io` npm 多空闲），意象词降级为中文外号**
   （事实依据：canopy/lexis/scalpel/silva 全被同语义真项目占）。
