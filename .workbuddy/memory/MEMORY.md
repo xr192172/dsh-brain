@@ -76,9 +76,11 @@
    **60/60 归线**，design-canvas 提交 `91a57ea`。
    **已换代（gen-3084）并用真 MCP stdio 探针端到端验证通过**（工具 60 / 6 线 / 5 个曾漏网工具全可见）。
    细节见 `topics/current-status.md` 与 `docs/capability-registry-evolution.md` §3.6.1。
-2. **改名：推荐 `agentio`（主推）/ `agentbase`（备选）** —— 详见 `docs/rename-design-canvas.md`。
-   命名结论：**机器名走基建系直白词，意象词留作中文外号**（事实 A/B 见文档 §2）。
-   影响面 **179 文件** + DSH profile/bridge/能力库 ⇒ 分「品牌层 / 机器契约层」两次原子走。
+2. **改名：★ 待定** —— 用户拍板**先挂 working name `agentio`**（"那就 agent 的 IO 吧"），
+   正式定名保持待定；已排除「管家/代理」角色派（好看的全被占 + `proxy` 与网络代理撞义）。
+   详见 `docs/rename-design-canvas.md`；同类怎么命名/怎么做见 `docs/agent-code-io-landscape.md`
+   （★ 校准：Serena ★29.3k 用的就是**零相关**的意象美名 ⇒ **"零相关"不是问题，被占用才是**；
+   硬指标只有 **唯一 + 好念 + 好记**）。影响面 **179 文件** ⇒ 分「品牌层 / 机器契约层」两次原子走。
 3. ★ **愿景：读写编辑统一入口（AST 内核）** —— **设计稿已出：`docs/ast-io-entry.md`**。
    要点：**内核已有，缺口只有「冷启 bootstrap」**（`ensureFreshIndex` 只保鲜不冷启）；
    三入口 `code_read`/`code_filter`/`code_edit`；**N3 模型无感靠工具层默认实现，绝不写 system prompt**
