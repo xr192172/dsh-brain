@@ -123,9 +123,17 @@ P2-b 重启验证｜P3 注册门。**实践纪律**：**换代由用户自己发
 > （09-15 凌晨落地，extreme 文档 §5.1 ✅，60 工具全覆盖），勿再追。〕
 >
 > **方向拍板（2026-09-15 中午，用户定）**：先做完 design-canvas 方向再挪 DSH 底座——
-> 顺序 = ~~⑤ 预热直连 L1a~~（✅ 0f5731c）→ ~~P0-4 模糊编辑级联~~（✅ `2db7aae`，09-15 下午）→
-> **P1-7「修复→规则沉淀」（下一项）**；
+> 顺序 = ~~⑤ 预热直连 L1a~~（✅ 0f5731c）→ ~~P0-4 模糊编辑级联~~（✅ `2db7aae`）→
+> ~~**P1-7「修复→规则沉淀」**~~（✅ `340e476`，09-15 下午）；
 > 之后才轮到 verify-boot-health 漏判修复 + 插件 schema 无配置健壮性 + P3 注册门。
+> **P1-7 要点**：规则 = 自包含 `.md`（frontmatter + 说明 + ```pattern/```replace +
+> `##` 正/反例夹具段），住 `<project>/.design-canvas/rules/`；工具 3 个
+> （`export_rule`/`apply_rules`/`check_rules`，均 `wrapData`）；
+> ★ **逐级放宽梯子**：泛化的"度"不靠猜 —— 从最多抽象开始，每级用**验收三关**
+> （出生回归 / 反例不命中 / 幂等）裁决，全败则降级为字面量并标 `degraded`；
+> **三关不过时 dry_run=false 也绝不写盘**。新文件 `rule_{tokens,library,match,extract,apply}.ts`；
+> 测试 62 项。★ **与 Grit 的两处差异**：① 反例夹具（Grit stdlib 零反例）
+> ② 萃取动作（Grit 的 pattern 全靠手写）。细节见 `2026-09-15.md` 尾部。
 > **P0-4 要点**：级联只做 replace_text（其余 op 走 AST/显式行号天然不模糊）；新模块
 > `src/tools/fuzzy_match.ts` 四级定位（L1 逐字→L2 空白归一→L3 缩进弹性→L4 省略号占位）+
 > `realignNewTextTo`；纪律=歧义即停+唯一才动；诚实回执（级别进消息、diff "-" 侧用实际文件片段）；
