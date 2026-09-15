@@ -77,6 +77,39 @@ const pkgDirs = fs.existsSync(PACKAGES_DIR)
     })
   : []
 
+/**
+ * 从 `pnpm-lock.yaml` 里取 `importers` 段第一条 importer 的 `dependencies` 键名。
+ *
+ * 为什么要自己解析：`check:profile` 只看装配结果、不看 lock，
+ * 于是 lock 与 manifest 不一致时没人发现（2026-09-15 实测该 lock 两个方向都脏）。
+ * 不引 yaml 依赖，因为只需要这一小段结构 —— 但**解析不出来要如实说**，不许假装通过。
+ *
+ * @returns {{ok: true, deps: string[]} | {ok: false}}
+ */
+function readLockImporterDeps(text) {
+  const lines = text.split('\n')
+  let inDep = false
+  let depIndent = -1
+  let sawDependencies = false
+  const out = []
+  for (const l of lines) {
+    if (!inDep && /^\s*dependencies:\s*$/.test(l)) {
+      inDep = true
+      depIndent = l.match(/^\s*/)[0].length
+      sawDependencies = true
+      continue
+    }
+    if (!inDep) continue
+    // 顶层段边界：importers 之后就是 packages / snapshots
+    if (/^(packages|snapshots):/.test(l)) break
+    const ind = l.match(/^\s*/)[0].length
+    if (l.trim() && ind <= depIndent) { inDep = false; continue }
+    const m = l.match(/^\s*'([^']+)':\s*$/)
+    if (m) out.push(m[1])
+  }
+  return sawDependencies ? { ok: true, deps: [...new Set(out)] } : { ok: false }
+}
+
 // ── ① 正查：每个 bundle 真正可用吗（目录 / 产物 / patch / dsh.bundle 声明）─────────
 for (const b of ourBundles) {
   const dir = dirOf(b)
@@ -141,6 +174,32 @@ for (const d of Object.keys(deps)) {
   if (d.startsWith(SCOPE) && !bundles.includes(d)) {
     info(d, '在 dependencies 里但不是 bundle', '若它本该提供能力，检查是否漏加进 bundles')
   }
+}
+
+// ── ④b lock 与 manifest 的一致性 ─────────────────────────────────────────────
+// 为什么必须查：2026-09-15 实测发现该 lock **两个方向都脏** ——
+//   漏了 4 个我们自己的包（⇒ 一次 pnpm install 会被剪掉），
+//   又留着两个早已删掉的条目（@dsh-brain/handover-agent、@linxin666/dsh-pet，连其依赖树）。
+//   而 `check:profile` 只看装配**结果**、不看 lock ⇒ 这个不一致一直没人发现。
+const lockPath = path.join(PROFILE_DIR, 'pnpm-lock.yaml')
+if (fs.existsSync(lockPath)) {
+  const parsed = readLockImporterDeps(fs.readFileSync(lockPath, 'utf8'))
+  if (!parsed.ok) {
+    warn('pnpm-lock.yaml', '解析不出 importers 依赖段', '跳过一致性核对（**不假装通过**）')
+  } else {
+    for (const k of Object.keys(deps)) {
+      if (!parsed.deps.includes(k)) {
+        err(k, 'lock 里没有该依赖', '`--frozen-lockfile` 会明确失败；普通 `pnpm install` 会补上（改 manifest 后应同步 lock）')
+      }
+    }
+    for (const k of parsed.deps) {
+      if (!(k in deps)) {
+        warn(k, 'lock 里有、但 manifest 已删（陈旧条目）', '`pnpm install` 会把它 prune 掉 —— 属"卸不干净"的残留')
+      }
+    }
+  }
+} else {
+  warn('pnpm-lock.yaml', '没有 lock 文件', '无法核对依赖一致性（**不假装通过**）')
 }
 
 // ── ⑤ 已移除插件的遗留物（"卸不干净"的直接证据）───────────────────────────────

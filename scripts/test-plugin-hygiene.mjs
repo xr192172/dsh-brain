@@ -112,13 +112,41 @@ function buildFixture(tag, o) {
     fs.writeFileSync(path.join(base, 'package.json'), JSON.stringify({ name: SCOPE + name, version: '0.0.0' }), 'utf8')
   }
 
+  // manifest 的 dependencies = 各 bundle 的 link 声明（干净夹具就应当一致）
+  const depsObj = {}
+  for (const n of o.bundles) depsObj[SCOPE + n] = `link:${path.join(packages, n).replace(/\\/g, '/')}`
+
   const manifest = {
     name: 'fixture-profile',
     dsh: { profile: { bundles: o.bundles.map((n) => SCOPE + n) } },
-    dependencies: {},
+    dependencies: depsObj,
   }
   const body = JSON.stringify(manifest, null, 2) + '\n'
   fs.writeFileSync(path.join(profile, 'package.json'), o.bom ? '\uFEFF' + body : body, 'utf8')
+
+  // lock：match（一致）| missing（漏一条）| stale（多一条陈旧）| absent（没有）
+  const lockMode = o.lock ?? 'match'
+  if (lockMode !== 'absent') {
+    const lockDeps = { ...depsObj }
+    if (lockMode === 'missing') delete lockDeps[SCOPE + o.bundles[0]]
+    if (lockMode === 'stale') lockDeps[SCOPE + 'ghost'] = 'link:Z:/nope'
+    const L = [
+      "lockfileVersion: '9.0'",
+      '',
+      'settings:',
+      '  autoInstallPeers: false',
+      '',
+      'importers:',
+      '',
+      '  .:',
+      '    dependencies:',
+    ]
+    for (const [k, v] of Object.entries(lockDeps)) {
+      L.push(`      '${k}':`, `        specifier: ${v}`, `        version: ${v}`)
+    }
+    L.push('', 'packages:', '')
+    fs.writeFileSync(path.join(profile, 'pnpm-lock.yaml'), L.join('\n'), 'utf8')
+  }
 
   if (o.residue) fs.writeFileSync(path.join(home, 'pet.json'), '{}\n', 'utf8')
 
@@ -206,6 +234,35 @@ console.log('== ⑥ 源码比产物新 ⇒ WARN ==')
   const r = run(f)
   truthy('报出源码比产物新', idsOf(r.json, 'WARN').includes('alpha'), JSON.stringify(r.json?.findings))
   eq('仅为 WARN，不失败', r.code, 0)
+}
+
+console.log('== ⑥b lock 与 manifest 一致性（卫生门此前没查的盲区）==')
+{
+  const f = buildFixture('lock-match', { bundles: ['alpha'] })
+  const r = run(f)
+  eq('lock 一致 ⇒ 退出 0', r.code, 0)
+  eq('lock 一致 ⇒ 无 ERROR', idsOf(r.json, 'ERROR'), [])
+}
+{
+  const f = buildFixture('lock-missing', { bundles: ['alpha', 'beta'], lock: 'missing' })
+  const r = run(f)
+  eq('lock 漏依赖 ⇒ 退出 1', r.code, 1)
+  truthy('报出"lock 里没有该依赖"', (r.json?.findings ?? []).some((x) => x.level === 'ERROR' && x.what.includes('lock 里没有')))
+}
+{
+  const f = buildFixture('lock-stale', { bundles: ['alpha'], lock: 'stale' })
+  const r = run(f)
+  eq('陈旧 lock 条目 ⇒ 不失败（WARN）', r.code, 0)
+  truthy('报出陈旧条目', idsOf(r.json, 'WARN').includes(SCOPE + 'ghost'), JSON.stringify(idsOf(r.json, 'WARN')))
+}
+{
+  const f = buildFixture('lock-absent', { bundles: ['alpha'], lock: 'absent' })
+  const r = run(f)
+  eq('没有 lock ⇒ 不失败（WARN）', r.code, 0)
+  truthy(
+    '明确说"无法核对"而非假装通过',
+    (r.json?.findings ?? []).some((x) => `${x.what} ${x.detail ?? ''}`.includes('无法核对')),
+  )
 }
 
 console.log('== ⑦ 安全：未触碰真实 profile / ~/.dsh ==')

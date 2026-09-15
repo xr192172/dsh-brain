@@ -531,3 +531,49 @@ dup 0 / pet 0**（装配没坏）；`check:bom` 0 违规；**卫生门 WARN 6 �
 ### 交付物
 
 `scripts/patch-profile-deps.mjs`（扩展）+ `~/.dsh/.backup/profile-web-package.json.*.bak`（改前备份）。
+
+### ✅ pnpm-lock 已同步（2026-09-15 深夜，用户选 ①）
+
+**关键发现：`pnpm` 其实是有的** —— 在 `C:/Users/Admin/AppData/Roaming/npm/pnpm.cmd`
+（v10.26.0），只是**不在 PATH 上**；`npx pnpm` 不行，但全路径可直接调。
+
+**用最小改动面做**：`pnpm install --lockfile-only` —— **只改 lock，不碰 node_modules**
+（对比 `pnpm install` 会顺带 reconcile node_modules）。先备份 lock 到 `.backup/`。
+
+#### ★ 顺带发现：lock 本来就脏，而且脏在**两个方向**
+
+| 方向 | 内容 |
+|---|---|
+| **漏** | 4 个我们自己的包（tool-evolution / subagent-council / capability-bridge / switchboard） |
+| **多** | `@dsh-brain/handover-agent`（09-14 已从 deps 删的悬空项）+ **`@linxin666/dsh-pet`**（已移除的桌宠，**连它的 integrity 哈希和依赖树 clsx/schemastery/cosmokit 都还在**） |
+
+⇒ 又一次"卸不干净"的残留；而且**没人发现**，因为 `check:profile` 只看装配**结果**、不看 lock。
+
+#### 结果（全部实测）
+
+- lock importers deps **9 条 == manifest dependencies 9 条**（双向零差集）
+- 两个陈旧条目归零（`grep -c` 均为 0）
+- **`check:profile` 仍 582 行 / err 0 / dup 0**（装配没坏）
+- **node_modules 未被动**：`@dsh-brain` 链接仍 7 个
+
+#### ★ 补掉卫生门的盲区（这是本轮更值钱的部分）
+
+给 `check-plugin-hygiene.mjs` 加了 **lock ↔ manifest 一致性检查**：
+- manifest 有、lock 无 ⇒ **ERROR**（`--frozen-lockfile` 会失败；正是我们刚修的那种不一致）
+- lock 有、manifest 无 ⇒ **WARN**（陈旧条目，会被 prune；属"卸不干净"残留）
+- 没有 lock / 解析不出 ⇒ **WARN 且明说"无法核对"**（**不假装通过**）
+
+自证从 26 → **34 项**（含 lock 一致 / 漏依赖 / 陈旧条目 / 无 lock 四种）。
+★ 又踩一次自证的坑：断言只查了 `what`，而"无法核对"在 `detail` 里 ⇒ 假失败；已改成
+`what + detail` 一起查。
+
+#### 剩余 2 个 WARN（未处理）
+
+`~/.dsh/pet.json`（桌宠残留状态）+ `.dsh/.backup/`（3 项备份，含我这轮新建的 2 个）。
+留着无害；要不要清由用户定 —— 注意 `.backup` 里那两项**是有用的回滚点**。
+
+#### 工具层教训（累计第 5 次）
+
+`node -e` 里带正则/引号会被 bash 抢插值 ⇒ **一律写 `.mjs` 文件再跑**。
+本轮又中一次（写 lock 解析正则时）。这条已在 MEMORY 环境约束里，但我仍会顺手用 `node -e`
+—— 需要更强的自律。
