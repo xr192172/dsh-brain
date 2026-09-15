@@ -12,6 +12,8 @@
     "plugin": "dsh plugin",
     "postinstall": "patch-package && node scripts/patch-web-app-public-url.mjs && node scripts/patch-app-boot-bom.mjs && node scripts/patch-goal-round-driver.mjs && node scripts/patch-profile-deps.mjs",
     "check:bom": "node scripts/check-bom.mjs",
+    "check:all": "node scripts/check-all.mjs",
+    "verify:p4": "node scripts/verify-p4-after-swap.mjs",
     "check:profile": "node node_modules/@deepseek-ai/dsh/lib/bin.js web --dump-config"
   },
   "dependencies": {
