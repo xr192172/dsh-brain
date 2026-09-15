@@ -271,3 +271,63 @@ prepareSwitch: async (graceMs) => {
 **换代不是"要不要用"的问题，是"该不该给它上保险"的问题。
 今天做的三件事（端口固定、启动健康检查、单一来源化）不是给换代加复杂度，而是终于把它的保险装上了。
 在那之前，你付的是保险费却拿不到理赔；在那之后，它才开始净为正。**
+
+---
+
+## 7. ★★ 换代的写入竞态：hard-switch 会让**两代并发写同一份会话**（2026-09-15 实测）
+
+### 症状
+
+会话日志出现 **seq 回退 + 区间重叠** ⇒ `corrupt session log: seq gap in committed region`。
+
+**实测证据**（`session-3d8ea18d`，elv，`createdAt` 14:15:56）：
+
+```
+seq=623 tool/call     tool_apply                       ← 这一轮调它触发了蓝绿发布
+seq=624 tool/result
+seq=625..627 step/end, step/start, step/end
+seq=628 turn/end      reason={"kind":"interrupted"}     ← 换代打断该回合
+seq=629 session/end-seed                                ← 旧代"封存结束"
+seq=627 assistant/chunk    ← ★★ seq **回退**：629 之后又回到 627
+seq=628 assistant/chunk
+seq=629 assistant/chunk
+seq=630 assistant/chunk …
+seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户的消息）
+```
+
+⇒ 旧代「封存结束」之后**又回头**写正在流式输出的 chunk，**同时**新代把用户消息写进同一区间。
+
+### 机制（我们自己的协议）
+
+- fencing 机制**存在且完整**：`handover-protocol.ts` 的 `freezeSeq`（旧代冻结时已落盘的全局最大 seq，
+  新代只能从 ≥freezeSeq 之后 append）+ `writerToken`（每次授写唯一 UUID）。
+- **但 `coordinator.ts:298-308` 有一条兜底**：
+
+  > `freeze 活跃代无响应 → 走强切（省去静态冻结，直接 promote）`
+
+  记录里写作 `via … (hard-switch, no-freeze)`。
+
+- ⇒ **硬切时旧代并不知道自己该停写**（它主线程被占 —— 例如正在流式输出），会继续 append；
+  新代同时从 `freezeSeq` 之后写 ⇒ **两代并发追加同一文件** ⇒ 回退/重叠。
+
+### ★ 操作纪律（立刻可用的缓解）
+
+`?cmd=restart` = **fast 模式**，而 fast **跳过的第一步正是 defer**「先请当前活跃代收尾本轮
+（注入挂起提示 + 等 `turn/end` 或 grace 兜底）」。
+
+> **⇒ 在"可能还有回合在跑"时，用 `?cmd=handover`（非 fast）；`restart` 只在确认空闲时用。**
+> ⚠️ 注意：`?cmd=status` 的 `stage==='idle'` 只表示**换代状态机**空闲，
+> **不代表会话没有回合在跑**。
+
+（2026-09-15 晚我连发了几次 `restart` —— 其中若有回合在跑，就是这个竞态的放大器。记于此。）
+
+### 末闭合：hard-switch 应当**先确保旧代停写**再 promote（未实施）
+
+候选修法：
+
+1. 硬切时**先 SIGKILL 旧代**再 promote（最强，但要确认不会误杀共享进程）；
+2. 或 promote 前**短暂等待 / 确认旧代不再 append**；
+3. 或给新代一个 `graceSeq` 窗口，**只追加不重复区间**。
+
+> ⚠️ 这是最安全攸关的一段代码（换代本身），**不在深夜临时改**。
+> 下一步：读 `coordinator.ts` 的 hard-switch 分支 + `drain.ts`，定一个小而安全的修法。
