@@ -395,6 +395,40 @@ L3 隐藏 holdout → 优化器看不见的用例 + 红队对抗用例
 L4 反事实对照 → 与"现役同能力"shadow 对比
 ```
 
+#### 5.4.1 实施状态（2026-09-15）
+
+**已实施：`scripts/capability-gate.mjs`**
+
+| 级 | 状态 | 判什么（能力级） |
+|---|---|---|
+| **L0 机械门** | ✅ 已实施 | provider **真跑** `apply(mockCtx, config)` 并捕获 provider → 接口 5 成员齐（`name`/`capabilities`/`inheritsParentContext`/`start`/`prepareContinuable`）→ `capabilities` **键集合**与 registry 声明一致。`kind: mcp-server` 走另一支：入口存在 / 工具面可扫 / 有工具有线索 / 能力线目录与实际注册一致（复用 `scripts/capability-sources.mjs`，与 `diff-dc-capability-map.mjs` 同一权威路径） |
+| **L1 不变量门** | ✅ 已实施 | `role`·`writeScope`·`credentials`·`budget` **必须显式声明**（缺声明 fail-closed）且取值合法；**设计类角色（scout/designer/reviewer）不得有 `production` 写权** |
+| L2 基线不退化 | ✗ **未实施** | 需固化基线与测量口径 |
+| L3 隐藏 holdout | ✗ **未实施** | 需独立评测集 + `holdoutHash` |
+| L4 反事实对照 | ✗ **未实施** | 需同任务集与 A/B 编排 |
+
+**两条不可动摇的纪律**：
+
+1. **不撒谎**：门只跑到 L1，所以回执写 `proofLevel:'L1'` 且 `unenforced:['L2','L3','L4']`，
+   并把"这些**没有被验证**"打印给读的人。把未实施的级标成通过 = 假绿 = 保险自己失效。
+2. **注册 ≠ 采纳**：`capability-registry.mjs` 的 `register`/`init` 只创建 `status:'pending'`；
+   **只有注册门能把状态改成 `active`**。`acceptance.kind` 只认 `'gate'` ——
+   散文引用（`kind:'ref'`）不再被当作判据（此前 `council-architect` 就有一条
+   `{kind:'ref', status:'passed'}` 而 ref 只是段文档，那是**假回执**，已移除）。
+
+**自证**：`scripts/test-capability-gate.mjs`（29 项）同时证明**两个方向** ——
+① 六种坏法各自被挡在**正确的级与检查项**上（缺 provider 成员 / capabilities 对不上 /
+apply 抛错 / 不调 registerProvider / 设计者声明生产写权 / 缺不变量 / budget 非法）；
+② **完好的能力必须被放行**。
+★ 只证 ① 不够：一个"一律 blocked"的门与"一律放行"的门同样无用。
+
+> **一条来自实跑的教训（假红也有害）**：我最初加的交叉校验
+> 「`inheritsParentContext=false` 且 `credentials=inherit` ⇒ 违反凭据边界」**是错的** ——
+> 两者不是一个维度（前者是**会话上下文**，后者是**凭据**；所有 in-process 子代理都在同一进程，
+> 共用凭据是架构事实）。它当场产生**假红**，而为了过门只能把声明改成 `own`，
+> 那是往注册表里**写假话**。**会误报的门最终会被人绕过去，于是什么也保护不了。**
+> 已删除；L1 对凭据的诚实判法只有"**已显式声明**"，"是否真的只用到了该用的凭据"属运行期，归 L2~L4。
+
 ---
 
 ### 5.5 上层反馈：盲评、行为信号、与"信号 / 判据"的分工
@@ -595,9 +629,9 @@ L4 反事实对照 → 与"现役同能力"shadow 对比
 | ~~**P0'**~~ ✅ | ~~在 preset 层启用委派工具~~ → **2026-09-14 实测：无需改。上游 preset（`code`/`standard`/`cordis`）本来就挂了那四个工具行。**见 §3.3 的订正 | ✅ |
 | ~~**P1**~~ ✅ | 最小 `SubagentProvider` → **已完成**：`packages/subagent-council`（议事厅 · 架构师 `council-architect`）。装配离线验收 + 重启后真实委派全通过。流程见 `docs/subagent-provider-howto.md` | ✅ |
 | **P2** ← 当前 | **`capability-registry.json`**（lineage + acceptance + holdoutHash + 状态） | P1 ✅ |
-| **P3** | **注册门**：把判据阶梯接成"注册前必须过"（L0/L1 先，L2-L4 后） | P2 |
-| **P4** | 按 §6 方案 C 分层：核心角色一工具名，长尾走 `delegate_capability` + `list_capabilities` | P3 |
-| **P5** | **外部 Agent adapter**（第一个：包一个现成的开源 agent），并把"接入版本"纳入注册门 | P3 |
+| **P3** ✅ | **注册门**已落地（L0/L1 先，L2-L4 后）：`scripts/capability-gate.mjs`（L0/L1 硬门，真跑 `apply` 捕获 provider 内省 5 成员）+ **注册≠采纳**（`pending` → 过门才 `active`）+ 自证 `scripts/test-capability-gate.mjs`（29 项，两方向）。存量 4 条（spawn / fork / council-architect / **design-canvas 即 `kind:mcp-server` 工具层**）已全部过门拿到 `proofLevel:'L1'` 回执。**L2~L4 仍未实施**，门显式标 `unenforced` 且不计作通过。见 §5.4.1 | P2 ✅ |
+| **P4** | 按 §6 方案 C 分层：核心角色一工具名，长尾走 `delegate_capability` + `list_capabilities` | P3 ✅ |
+| **P5** | **外部 Agent adapter**（第一个：包一个现成的开源 agent），并把"接入版本"纳入注册门 | P3 ✅ |
 
 **P0' 是关键路径起点**：因为注册表是全局单例、注册名全局唯一，
 **"能力库"这件事不需要我们新建任何存储 —— 它已经是了**。缺的只是"谁在什么时候把哪个 provider 注册进去"。

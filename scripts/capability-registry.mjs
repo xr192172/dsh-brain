@@ -8,23 +8,33 @@
  *   §5.5.2 行为信号（选用 / 复用 / 弃用）是最强信号，且必须分开记
  *   §5.5.3 高选用率 + 低复用率 = 描述过度承诺（一个具体、可检出的失败模式）
  *
- * 本脚本只管【数据层】：记录与校验。判据门（L0~L4）是 P3 的事，这里只留挂载点 acceptance/holdout。
+ * 本脚本只管【数据层】：记录与校验。判据门（L0~L4）在 scripts/capability-gate.mjs（P3）。
+ *   ★ 注册 ≠ 采纳：register/init 只创建 `pending`；只有注册门跑过并把回执写进 acceptance，
+ *     该能力才转 `active`。acceptance.kind 只认 `'gate'`，散文引用不被当作判据。
  *
  * 用法：
  *   node scripts/capability-registry.mjs init
  *   node scripts/capability-registry.mjs list [--json]
  *   node scripts/capability-registry.mjs show <id>
  *   node scripts/capability-registry.mjs register <id> --pkg <包名> [--path <相对路径>] [--version <v>]
- *                                     [--provider <provider名>] [--tool <工具名>] [--acceptance <引用>]
+ *                                     [--provider <provider名>] [--tool <工具名>]
+ *                                     [--role <角色>] [--write-scope <none|sandbox|workspace|production>]
+ *                                     [--credentials <none|inherit|own>] [--budget <tokens>|--budget-source <inherit|none>]
  *                                     [--caps a,b,c] [--note <说明>]
  *   node scripts/capability-registry.mjs supersede <oldId> --by <newId> [--reason <r>]
  *   node scripts/capability-registry.mjs retire <id> [--reason <r>]
  *   node scripts/capability-registry.mjs merge <newId> --from <id1,id2> [--reason <r>]
  *   node scripts/capability-registry.mjs signal <id> --kind invoke|reuse|success|failure [--note <s>]
  *   node scripts/capability-registry.mjs check
+ *
+ * 注册门（P3，独立脚本）：
+ *   node scripts/capability-gate.mjs ladder           # 看阶梯定义与实施状态
+ *   node scripts/capability-gate.mjs run <id>         # 评估单个能力（过门才转 active）
+ *   node scripts/capability-gate.mjs run --all
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { MCP_SOURCES, scanMcpSource } from './capability-sources.mjs'
 
 const HOME = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'
 const DIR = path.join(HOME, 'capabilities')
@@ -79,6 +89,26 @@ function opt(name, def = undefined) {
 }
 const positional = argv.slice(1).filter((a, i, arr) => !a.startsWith('--') && !(i > 0 && arr[i - 1]?.startsWith('--')))
 
+/**
+ * 从 CLI 参数构造 L1 不变量声明（P3）。
+ * 四项全缺 ⇒ 返回 `null` —— 这是**刻意**的：门对缺声明 fail-closed，
+ * 「没声明」不等于「不适用」，只等于「没承认」。
+ */
+function buildInvariantsFromOpts() {
+  const role = opt('role')
+  const writeScope = opt('write-scope')
+  const credentials = opt('credentials')
+  const budgetTok = opt('budget')
+  const budgetSource = opt('budget-source') ?? (budgetTok ? 'declared' : undefined)
+  if (!role && !writeScope && !credentials && !budgetSource) return null
+  const inv = {}
+  if (role) inv.role = role
+  if (writeScope) inv.writeScope = writeScope
+  if (credentials) inv.credentials = credentials
+  if (budgetSource) inv.budget = { source: budgetSource, maxTokens: budgetTok ? Number(budgetTok) : null }
+  return inv
+}
+
 // ── 能力记录工厂 ────────────────────────────────────────────────────────────
 
 function newCapability(o) {
@@ -94,14 +124,27 @@ function newCapability(o) {
       seat: o.seat ?? null,
     },
     capabilities: o.capabilities ?? null,
+    /**
+     * ★ L1 不变量门的**声明位**（P3）。
+     *   { role, writeScope, credentials, budget:{ source, maxTokens } }
+     * 缺声明 ⇒ 门 **fail-closed**（没有明确承认的不变量，就不算成立）。
+     *
+     * ⚠️ 这里存的是**声明**。「它真的限住了写权 / 真的没超预算吗」属**运行期验证**，
+     *    归 L2~L4 —— 那三级**当前未实施**，门会显式标 not-enforced，不得计作通过。
+     */
+    invariants: o.invariants ?? null,
     acceptance: {
       kind: o.acceptance ? 'ref' : 'none',
       ref: o.acceptance ?? null,
       status: 'unknown',
       ranAt: null,
+      proofLevel: null,   // 门跑到哪一级（L0 / L1）；L2~L4 未实施故至今只能是 L0|L1
+      unenforced: null,   // 未实施的级（当前恒为 ['L2','L3','L4']）—— 必须显式带出，防"假绿"
+      checks: null,       // 逐项检查结果，供审计
     },
     holdoutHash: null,
-    status: 'active',
+    // ★ 注册 ≠ 采纳：创建即 pending，只有过了注册门（scripts/capability-gate.mjs）才转 active。
+    status: 'pending',
     registeredAt: new Date().toISOString(),
     supersededBy: null,
     retiredReason: null,
@@ -112,84 +155,71 @@ function newCapability(o) {
 
 // ── 命令 ────────────────────────────────────────────────────────────────────
 
-/**
- * ★ 外部能力源（非 subagent provider）：MCP server / 工具插件。
- *
- * 为什么必须登记它们：**模型手里大部分工具来自 MCP** —— design-canvas 一家就 60 个。
- * 只登记 subagent provider 的能力库，给模型的是**半个答案**。
- *
- * 而且 design-canvas 自带 `capability_map`（6 条能力线 / direct 直调白名单），
- * 它**已经在做工具层的能力导航** —— 我们应当**对接而不是重复造**：
- *   · 我们的 `list_capabilities` 给**跨源总览**（委派能力 + 工具能力源）
- *   · 它的 `capability_map` 给它自己**内部的线级导航**
- *   · 桥接方式：总览里点名"design-canvas：6 条能力线，细节调 capability_map"
- *
- * 附带价值：`capability_map` 的线目录是**手工同步**的静态表（它自己的注释承认），
- * 必然漂移。本脚本把漂移变成**可检出**的（见 scanMcpSource / check）。
- */
-const MCP_SOURCES = [
-  {
-    id: 'design-canvas',
-    kind: 'mcp-server',
-    label: '设计画布（人机共享可视化 MCP：DSL → 自包含 HTML）',
-    repo: 'D:/project_develop/design-canvas',
-    entry: 'D:/project_develop/design-canvas/dist/src/server.js',
-    registryFile: 'src/server_registry.ts',
-    laneFile: 'src/tools/capability_map.ts',
-    navTool: 'capability_map',
-    transport: 'stdio',
-  },
-]
+// 外部能力源描述（MCP_SOURCES）与扫描器已抽到 scripts/capability-sources.mjs
+// —— **单一实现**，注册表（数据层）与注册门（判据层）共用，杜绝第二份脆弱副本。
+//
+// ★ 历史教训：这里原先的正则扫描在 design-canvas 2026-09-14 改造后失效，
+//   报出「67 个工具全部未归线」的**假漂移** —— 比不报更坏（骗人修不存在的问题，
+//   还让人不再信任这个检查）。详见该模块头部注释。
 
-/** 扫一个 MCP 源的"工具面"：实际注册的工具 + 能力线目录 + 漂移。 */
-function scanMcpSource(m) {
-  const out = { toolCount: 0, laneCount: 0, lanes: [], laneToolCount: 0, directCount: 0, drift: null, scannedAt: new Date().toISOString() }
-  try {
-    const reg = fs.readFileSync(path.join(m.repo, m.registryFile), 'utf8')
-    const cm = fs.readFileSync(path.join(m.repo, m.laneFile), 'utf8')
-
-    const registered = new Set([...reg.matchAll(/^\s*name:\s*'([a-z][a-z0-9_]*)'/gm)].map((x) => x[1]))
-    const inLanes = new Set([...cm.matchAll(/\{\s*name:\s*'([a-z][a-z0-9_]*)'/g)].map((x) => x[1]))
-    const direct = new Set([...cm.matchAll(/direct:\s*\[([^\]]*)\]/g)].flatMap((x) =>
-      [...x[1].matchAll(/'([a-z][a-z0-9_]*)'/g)].map((y) => y[1])))
-    const lanes = [...cm.matchAll(/^\s*id:\s*'([a-z]+)',/gm)].map((x) => x[1])
-
-    out.toolCount = registered.size
-    out.laneCount = lanes.length
-    out.lanes = lanes
-    out.laneToolCount = inLanes.size
-    out.directCount = direct.size
-    out.drift = {
-      // 已注册但没进任何线 —— 靠 capability_map 导航的 agent 看不见它们
-      registeredNotInLanes: [...registered].filter((x) => !inLanes.has(x)).sort(),
-      // 线里写了但没注册 —— 陈旧条目，会把 agent 指向不存在的工具
-      inLanesNotRegistered: [...inLanes].filter((x) => !registered.has(x)).sort(),
-      // 导航工具自身不算漏收
-      exempt: [m.navTool],
-    }
-  } catch (e) {
-    out.error = e.message
-  }
-  return out
-}
+// scanMcpSource / MCP_SOURCES 现由 scripts/capability-sources.mjs 提供（见文件头 import）。
 
 const KNOWN = [
-  { id: 'spawn', package: '@deepseek-ai/dsh-subagent-spawn-in-process', provider: 'spawn', tool: 'subagent', seat: 'upstream' },
-  { id: 'fork', package: '@deepseek-ai/dsh-subagent-fork-in-process', provider: 'fork', tool: 'subagent_fork', seat: 'upstream' },
-  { id: 'council-architect', package: '@dsh-brain/subagent-council', path: 'packages/subagent-council', provider: 'council-architect', tool: 'council_architect', seat: 'architect' },
+  {
+    id: 'spawn', package: '@deepseek-ai/dsh-subagent-spawn-in-process', provider: 'spawn',
+    tool: 'subagent', seat: 'upstream',
+    // 通用委派（非特定角色）；in-process driver 不削减工具集 ⇒ 子代理可在工作区内写入。
+    invariants: { role: 'provider', writeScope: 'workspace', credentials: 'inherit', budget: { source: 'inherit', maxTokens: null } },
+  },
+  {
+    id: 'fork', package: '@deepseek-ai/dsh-subagent-fork-in-process', provider: 'fork',
+    tool: 'subagent_fork', seat: 'upstream',
+    // 同上；fork 另继承父上下文（inheritsParentContext = true，运行时实测）。
+    invariants: { role: 'provider', writeScope: 'workspace', credentials: 'inherit', budget: { source: 'inherit', maxTokens: null } },
+  },
+  {
+    id: 'council-architect', package: '@dsh-brain/subagent-council', path: 'packages/subagent-council',
+    provider: 'council-architect', tool: 'council_architect', seat: 'architect',
+    /**
+     * 架构师 = **设计者**席位 ⇒ writeScope 不得为 production（L1 硬检查）。
+     * 诚实的值是 workspace：v1 不削减 in-process driver 工具集（见 SeatProvider 注释），
+     * 子代理确实能在工作区内写。**不写 sandbox** —— 那会是假声明。
+     */
+    invariants: { role: 'designer', writeScope: 'workspace', credentials: 'inherit', budget: { source: 'inherit', maxTokens: null } },
+  },
 ]
 
 if (cmd === 'init') {
   const db = load()
   let added = 0
+  let demoted = 0
   for (const k of KNOWN) {
-    if (find(db, k.id)) continue
+    const existing = find(db, k.id)
+    if (existing) {
+      // ── 幂等同步：invariants 是**代码里的声明**，registry 从代码同步 ──
+      if (k.invariants && !existing.invariants) {
+        existing.invariants = k.invariants
+        record(db, 'sync-invariants', { id: k.id })
+      }
+      // ── P3 迁移：此前是「未经门的 active」⇒ 如实降级为 pending ──
+      if (existing.status === 'active' && existing.acceptance?.kind !== 'gate') {
+        existing.status = 'pending'
+        record(db, 'demote-ungated', { id: k.id })
+        demoted++
+        console.log(`  ⚠️ ${k.id}: 原为 active 但无注册门回执 → 降级 pending（那不是「通过」，只是「没跑过门」）`)
+      }
+      continue
+    }
     const cap = newCapability({
       id: k.id, package: k.package, path: k.path, provider: k.provider, tool: k.tool, seat: k.seat,
+      invariants: k.invariants,
       capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: true },
     })
     if (k.id === 'council-architect') {
-      cap.acceptance = { kind: 'ref', ref: 'docs/subagent-provider-howto.md §5（重启后：工具清单出现 council_architect）', status: 'passed', ranAt: new Date().toISOString() }
+      // ★ 这里曾经写死过 acceptance:{kind:'ref', status:'passed'}，而 ref 只是一段散文文档 ——
+      //   那是**假回执**：判据没跑，状态却是 passed。P3 已移除；
+      //   真回执从此只由注册门（scripts/capability-gate.mjs）写入。
+      //   真实发生过的事留在 signals 里 —— 它是**信号**，不是判据（两者不可混）。
       cap.signals.notes.push('2026-09-14 首次真实委派通过（session-c0f05cde）')
     }
     db.capabilities.push(cap)
@@ -198,10 +228,10 @@ if (cmd === 'init') {
   }
   // ── 外部能力源（MCP server / 工具插件）：工具层能力 ──
   for (const m of MCP_SOURCES) {
-    const scan = scanMcpSource(m)
+    const scan = await scanMcpSource(m)
     let cap = find(db, m.id)
     const isNew = !cap
-    if (isNew) cap = newCapability({ id: m.id, kind: m.kind, version: '0.0.0' })
+    if (isNew) cap = newCapability({ id: m.id, kind: m.kind, version: '0.0.0', invariants: m.invariants })
     cap.kind = m.kind
     cap.label = m.label
     cap.source = {
@@ -209,6 +239,16 @@ if (cmd === 'init') {
       transport: m.transport, entry: m.entry,
     }
     cap.tooling = scan
+    if (m.invariants && !cap.invariants) {
+      cap.invariants = m.invariants
+      record(db, 'sync-invariants', { id: m.id })
+    }
+    if (!isNew && cap.status === 'active' && cap.acceptance?.kind !== 'gate') {
+      cap.status = 'pending'
+      record(db, 'demote-ungated', { id: m.id })
+      demoted++
+      console.log(`  ⚠️ ${m.id}: 原为 active 但无注册门回执 → 降级 pending`)
+    }
     if (isNew) {
       cap.signals.notes.push(
         `工具面：${scan.toolCount} 个工具 / ${scan.laneCount} 条能力线（${scan.lanes.join(', ')}）` +
@@ -225,25 +265,31 @@ if (cmd === 'init') {
   }
 
   save(db)
-  console.log(`init 完成：新增 ${added} 条，当前共 ${db.capabilities.length} 条`)
+  console.log(`init 完成：新增 ${added} 条，降级 ${demoted} 条（未经门的 active），当前共 ${db.capabilities.length} 条`)
   console.log(`文件：${FILE}`)
+  if (demoted) console.log(`下一步：node scripts/capability-gate.mjs run --all`)
 } else if (cmd === 'list') {
   const db = load()
   if (opt('json')) { console.log(JSON.stringify(db, null, 2)); process.exit(0) }
   console.log(`能力库（${db.capabilities.length} 条）  更新于 ${db.updatedAt}\n`)
   const pad = (s, n) => String(s ?? '-').padEnd(n)
-  console.log(`  ${pad('id', 24)} ${pad('kind', 17)} ${pad('status', 11)} ${pad('ver', 8)} ${pad('工具面', 26)} 选用/复用/成/败  判据`)
+  console.log(`  ${pad('id', 24)} ${pad('kind', 17)} ${pad('status', 10)} ${pad('ver', 8)} ${pad('工具面', 24)} 选用/复用/成/败  注册门`)
   for (const c of db.capabilities) {
     const s = c.signals ?? {}
-    const acc = c.acceptance?.status === 'passed' ? 'pass'
-      : (!c.acceptance?.ref || c.acceptance?.kind === 'none') ? 'MISSING' : '?'
+    const a = c.acceptance ?? {}
+    // ★ 判据列只认**注册门回执**。散文引用（kind:'ref'）与缺省都显示为未过门 ——
+    //   曾经把散文引用显示成 'pass'，那是假绿，已废弃。
+    const acc = a.kind === 'gate'
+      ? (a.status === 'passed' ? `门:${a.proofLevel ?? '?'}` : `门:${a.status}`)
+      : 'NO-GATE'
     const face = c.tooling
       ? `${c.tooling.toolCount} 工具 / ${c.tooling.laneCount} 线`
       : String(c.source?.tool ?? '-')
-    console.log(`  ${pad(c.id, 24)} ${pad(c.kind, 17)} ${pad(c.status, 11)} ${pad(c.version, 8)} ${pad(face, 26)} ${s.invoked ?? 0}/${s.reused ?? 0}/${s.succeeded ?? 0}/${s.failed ?? 0}  ${acc}`)
+    console.log(`  ${pad(c.id, 24)} ${pad(c.kind, 17)} ${pad(c.status, 10)} ${pad(c.version, 8)} ${pad(face, 24)} ${s.invoked ?? 0}/${s.reused ?? 0}/${s.succeeded ?? 0}/${s.failed ?? 0}  ${acc}`)
   }
   console.log('\n  （选用/复用/成功/失败 = 行为信号；高选用 + 低复用 = 描述过度承诺）')
   console.log('  （kind=subagent-provider 是委派层能力；kind=mcp-server 是工具层能力源）')
+  console.log('  （status：pending=已注册未过门 · active=已过门；门只跑到 L1，L2~L4 未实施）')
 } else if (cmd === 'show') {
   const db = load()
   const c = find(db, positional[0])
@@ -251,19 +297,27 @@ if (cmd === 'init') {
   console.log(JSON.stringify(c, null, 2))
 } else if (cmd === 'register') {
   const id = positional[0]
-  if (!id) { console.error('用法：register <id> --pkg <包名>'); process.exit(1) }
+  if (!id) { console.error('用法：register <id> --pkg <包名> [--role ... --write-scope ... --credentials ...]'); process.exit(1) }
   const db = load()
   if (find(db, id)) { console.error(`X 已存在：${id}（升级请用 supersede，合并请用 merge）`); process.exit(1) }
   const caps = opt('caps') ? Object.fromEntries(String(opt('caps')).split(',').map((k) => [k, true])) : null
+  const invariants = buildInvariantsFromOpts()
+  if (opt('acceptance')) {
+    console.error('⚠️ --acceptance 只产生 kind:"ref"（散文引用）—— 注册门不认它，跑门后会被真回执覆盖。')
+  }
   const cap = newCapability({
     id, package: opt('pkg'), path: opt('path'), provider: opt('provider') ?? id,
-    tool: opt('tool'), seat: opt('seat'), version: opt('version'), acceptance: opt('acceptance'), capabilities: caps,
+    tool: opt('tool'), seat: opt('seat'), version: opt('version'), acceptance: opt('acceptance'),
+    capabilities: caps, invariants,
   })
   if (opt('note')) cap.signals.notes.push(String(opt('note')))
   db.capabilities.push(cap)
   record(db, 'register', { id })
   save(db)
   console.log(`已注册：${id}  （来源 ${cap.source.package ?? '?'}）`)
+  // ★ 注册 ≠ 采纳
+  console.log(`状态：pending —— 尚未采纳。过注册门后才会 active：`)
+  console.log(`  node scripts/capability-gate.mjs run ${id}`)
 } else if (cmd === 'supersede') {
   const oldId = positional[0]
   const by = opt('by')
@@ -337,7 +391,16 @@ if (cmd === 'init') {
     if (ids.has(c.id)) problems.push(`重复 id：${c.id}`)
     ids.add(c.id)
     if (c.supersededBy && !find(db, c.supersededBy)) problems.push(`${c.id}.supersededBy 指向不存在的能力：${c.supersededBy}`)
-    if (c.status === 'active' && !c.acceptance?.ref) problems.push(`${c.id} 处于 active 但没有任何 acceptance 引用（P3 注册门会拒绝这种）`)
+    if (!c.invariants) {
+      problems.push(`${c.id} 未声明 L1 不变量（role/writeScope/credentials/budget）→ 注册门会 fail-closed`)
+    }
+    // ★ 注册 ≠ 采纳：pending = 已登记、未过门。不是错误状态，但必须显式给出下一步。
+    if (c.status === 'pending') {
+      problems.push(`${c.id} 处于 pending（已注册、**未过注册门**）→ node scripts/capability-gate.mjs run ${c.id}`)
+    }
+    if (c.status === 'active' && c.acceptance?.kind !== 'gate') {
+      problems.push(`${c.id} 处于 active 但 acceptance.kind=${JSON.stringify(c.acceptance?.kind ?? null)} —— 不是注册门回执（active 只能由注册门写入）`)
+    }
     const s = c.signals ?? {}
     if ((s.invoked ?? 0) >= 3 && (s.reused ?? 0) === 0) problems.push(`${c.id} 选用 ${s.invoked} 次、复用 0 次 → 疑似「描述过度承诺」`)
   }
@@ -346,7 +409,7 @@ if (cmd === 'init') {
   for (const m of MCP_SOURCES) {
     const c = find(db, m.id)
     if (!c || c.status !== 'active') continue
-    const scan = scanMcpSource(m)
+    const scan = await scanMcpSource(m)
     if (scan.error) { problems.push(`${m.id} 工具面扫描失败：${scan.error}`); continue }
     const d = scan.drift ?? {}
     const missed = (d.registeredNotInLanes ?? []).filter((x) => x !== m.navTool)

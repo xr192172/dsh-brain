@@ -5,53 +5,50 @@
 
 > 本文件是**索引**，不是全文；细节按主题拆到 `topics/`，**按需读，不要一次全读**。
 > 日更（append-only，尾部即最新）：`2026-09-13.md`、`2026-09-14.md`、`2026-09-15.md`。
-> 2026-09-14 瘦身：资产拓扑 → `topics/asset-topology.md`；进度/下一步 → `topics/current-status.md`。
+> **进度/未闭合/下一步一律看 `topics/current-status.md`**；本文件「交接」只留指针，不再复制细节。
 
 ## 环境约束（本机工具层，每次都要遵守）
 
-1. **Bash 工具 PATH 被破坏**：调用开头先 `export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin"`。
+1. **Bash 工具 PATH 被破坏**：调用开头先
+   `export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin:/c/Program Files/nodejs:/c/Program Files/Git/cmd"`。
 2. **PowerShell stdout 被吞**：结果写文件再用 Read 读。
-3. **不能在工具内起长期后台服务**（进程随调用结束被回收；`schtasks`/`cmd start`/`Win32_Process.Create`
-   全被拦）⇒ **switchboard 只能由用户终端启动**。
+3. **不能在工具内起长期后台服务**（`schtasks`/`cmd start`/`Win32_Process.Create` 全被拦）
+   ⇒ **switchboard 只能由用户终端启动**。
 4. 排查会话内容**别**把 node stdout 重定向到文件（判为二进制）→ 让脚本自己 `fs.writeFileSync`。
-5. `grep -oE` / `find` 在这台 shell 不可靠 → 提取文本用 node 脚本。
+5. `grep -oE` / `find` 在这台 shell 不可靠 ⇒ 提取/统计一律走 node 脚本。
 6. **★ clone/fetch 必须用系统 git**：`& 'C:\Program Files\Git\cmd\git.exe'`。
-   PortableGit 2.55 写嵌套 ref **静默失败**（报 `* [new branch]` 但 `git branch -r` 为空、
-   `update-ref` rc=0 不报错）⇒ **每次 clone/fetch 后验 `git branch -r` 非空**。
-7. **`git -C` 不认 MSYS 路径**（`/d/xxx` → `fatal: cannot change to …`）⇒ 一律 `D:/…` 或 `D:\…`；
-   **该报错极易被误判成"目录不存在"**（据此下过错误结论）。
+   PortableGit 2.55 写嵌套 ref **静默失败** ⇒ **每次 clone/fetch 后验 `git branch -r` 非空**。
+7. **`git -C` 不认 MSYS 路径**（`/d/xxx` → `fatal: cannot change to …`）⇒ 一律 `D:/…`；
+   **该报错极易被误判成「目录不存在」**。
 8. **工作区约定**：`D:\project_develop` 是唯一开发根；`_` 前缀 = 非项目；
-   **远端是唯一真相源，本地只是可丢弃副本**（详见 `D:\project_develop\README.md`；
+   **远端是唯一真相源，本地只是可丢弃副本**（`D:\project_develop\README.md`；
    体检 `scripts/scan-workspace-root.mjs`）。
-9. **Code Mode**：`DSH_TOOLS_MODE=code` 时模型只能直接调 `run_code`，其余工具必须在 `run_code`
-   里用 `tools.<name>(...)` ⇒ persona 用「否定+禁止」式硬规则写死。
+9. **Code Mode**：`DSH_TOOLS_MODE=code` 时模型只能直接调 `run_code`，其余工具须在 `run_code` 里
+   `tools.<name>(...)` ⇒ persona 用「否定+禁止」式硬规则。
    **prompt 通用教训：否定+禁止 ＞ 说明+让它判断。**
+10. **★ 同一文件的两个 Edit 并行发 ⇒ 后者按旧快照覆盖前者，且两边都报成功**
+    （2026-09-15 连踩 2 次、静默丢改动）⇒ **同文件编辑必须串行，改完 grep 验证关键标记**。
+11. **`node -e` 带正则/反引号/花括号会被 bash 抢插值** ⇒ **写 `.mjs` 文件再跑**（已固化多次）。
 
 ## 铁律（违反会立刻坏事）
 
 1. **写 json/yaml/源码一律 node `fs.writeFileSync(p,s,'utf8')`（无 BOM）**；
    PS 5.1 的 `Set-Content -Encoding UTF8` 必加 BOM → DSH `JSON.parse` 崩 → **gen 起不来**。
-   **★ 唯一反向例外：`.ps1` 必须【带】BOM**（否则按 ANSI(GBK) 解码 → 语法错误）。
-   `scripts/check-bom.mjs --fix` 双向修（剥数据文件 BOM + 给 `.ps1` 补 BOM）。
+   **★ 唯一反向例外：`.ps1` 必须【带】BOM**。`scripts/check-bom.mjs --fix` 双向修。
 2. **profile 的 `cordis.patch.yml` 不得写包内已 `insert` 的同一 id** → `duplicate loader entry id`
    → 整棵插件树装配失败。
 3. **改完 profile 跑** `npm run check:profile` + `npm run check:bom`。
-   健康基线：exit 0 / stderr 空 / **579 行** / `pet` 0 条 / `design-canvas-bridge` 1 条。
+   基线：exit 0 / stderr 空 / **582 行** / `pet` 0 / `duplicate loader entry id` 0。
+   ⚠️ 但它**不校验插件 config** ⇒ 配置正确性看 `scripts/check-config-tolerance.mjs` 或真启动。
 4. **改完 `node_modules/@deepseek-ai/*` 立刻重建 patch**（`patch-package` 只能在 PowerShell 工具里跑）。
 5. **外置化 / 缩减必须在「写入时」append-only**，事后 `replace` 必击穿 prompt 前缀。
 6. **`disabled` ≠ 移除**：在 `bundles` 里就仍会被 loader 装配；有 `dsh.client` 的包目录还在就可能被前端加载。
 7. **判据与信号不可混**：裸满意度评分应被**丢弃**；采纳只认可执行 `acceptance` + 隐藏 holdout。
-8. **压缩后端契约**：任何产出 summary 对象的路径必须携带 `measurement` +
-   `start/end/shadowedSeqs/selectedNodes` → 跑 `scripts/check-compaction-fallback-shape.mjs`。
-9. **★ 插件 Config 是 `z.object` ⇒ 其 `cordis.patch.yml` 的 insert 必须显式写 `config:`**
-   （哪怕全用默认值）。漏写 → loader 传 `undefined` → zod `expected object, received undefined`
-   → **gen 启动即 EXIT code=1**；**而换代接口仍报 `success`（静默失败！）**。
-   ⇒ 换代后别只看 `?cmd=result`，必须看 `~/.dsh/switchboard/gen-*/boot.log` 与 `crash-investigation/`。
-   （2026-09-14 实测：`capability-bridge` 漏 config，gen-3083 崩溃；7 个 `@dsh-brain/*` 包现已全部显式写。）
-   **〔2026-09-15 更新〕** 6 个 zod 包已套 `z.preprocess(v => v ?? {}, schema)` ⇒ **漏写也不再致命**；
-   但**显式写仍是推荐**（配置值要摆在明面上）。**且 `npm run check:profile` 不校验插件 config**
-   （`--dump-config` 只组装打印配置文本，不实例化插件）⇒ 别拿它当配置正确性的判据，
-   用 `scripts/check-config-tolerance.mjs` 或真启动。
+   **★ 未实施的判据级不得计作通过；假绿与假红同等有害。**
+8. **压缩后端契约**：产出 summary 的路径必须携带 `measurement` +
+   `start/end/shadowedSeqs/selectedNodes` → `scripts/check-compaction-fallback-shape.mjs`。
+9. **插件 `Config`**：6 个 zod 包已套 `z.preprocess(v => v ?? {}, schema)` ⇒ **漏写 `config:` 不再崩**；
+   显式写仍推荐。**别用 `.default({})`**（返回字面量 `{}`、短路内层解析 = 静默坏，比崩更隐蔽）。
 
 ## 主题索引（**按需读**）
 
@@ -64,149 +61,20 @@
 | 换代 vs 重启 | `topics/generation-swap.md` | 要替换代码时、三级策略、`?cmd=restart`、HMR 现状 |
 | 自进化设计 | `topics/self-evolution-design.md` | 判据阶梯、能力库、单前脑委派、多模型会议室、子脑记忆（tier+发表门）、信号/判据分工 |
 | 项目治理 | `topics/project-governance.md` | 资产边界（**别重造**）、文档可信度、`docs/` 索引、设计原则汇总 |
-| **资产拓扑** | `topics/asset-topology.md` | 分不清资产/副本、design-canvas 真身与副本、归一化、archify |
-| **当前状态 / 下一步** | `topics/current-status.md` | 接手前看进度：P1/P2/P3 到哪了、未闭合项 |
+| 资产拓扑 | `topics/asset-topology.md` | 分不清资产/副本、design-canvas 真身与副本、归一化、archify |
+| **当前状态 / 下一步** | `topics/current-status.md` | 接手前看进度：到哪了、未闭合项、工具层纪律增补 |
 
 **入口级**：`docs/ideas-spec.md`（实现无关的思路规格，**改架构前先读**）。
+**上游缺陷归属清单**：`docs/upstream-defects.md`（我们改过的东西哪些是 DSH 官方 bug —— 官方**不接受外部 PR**，只收 GitHub Discussions）。
 
-## ⏭ 交接（2026-09-14 00:40 更新）
+## ⏭ 交接
 
-**索引层的目标已定成一句不变量**（见 `design-canvas/docs/index-freshness-extreme.md`）：
-> **任何时刻，LLM 通过工具读到的索引内容，要么与磁盘一致，要么明确标注它可能旧/不全。**（= 绝不撒谎）
+**一句话现状（2026-09-15 晚）**：P3 注册门 ✅ 已落地 ——
+`scripts/capability-gate.mjs`（L0/L1 硬门，**真跑 `apply()` 捕获 provider** 内省 5 成员）+
+**注册 ≠ 采纳**（`pending` → 过门才 `active`）+ 自证 `scripts/test-capability-gate.mjs`（29 项，两方向）；
+存量 4 条（spawn / fork / council-architect / design-canvas）全过门，`proofLevel:'L1'`，
+**L2~L4 未实施**（门显式标 `unenforced`，不计作通过）。
 
-失败分两种，只值得为第二种花钱：**报错/说不知道**（低危）vs **静默给旧答案**（高危，LLM 无从察觉）。
-⇒ "极致"不是更快更全，而是**把"读到错东西却不知道"的概率压到零**。
-
-**五层保障（全部已落地）**：
-L1a 写穿 `write_gate.writeSourceFiles`（185ms/次，`rename_symbols` 已接）｜
-L1b 自写登记 `recordSelfWrite`（同步签名工具走这条，`remove_dead_imports` 已接）｜
-L2 watch（含拼图边界闸 `scopeToIndex`，默认关）｜
-L3① `ensureFreshIndex`（精确、异步）｜ **L3② `staleIndexWarning` 响应注入（覆盖全部 60 个工具，5s 缓存 + 只在状态转变报一次）**｜
-L4 `reconcileProject`。
-
-**★ 实测（`scripts/probe-dc-write-through.mjs`，靶子 = 102 条入边的 `storage.ts#getDSL` 改名）**：
-经闸 185ms ⇒ 未保鲜 0 / 旧名入边 0 / 陈旧断言 0；绕过闸 ⇒ 未保鲜 1 / **旧名入边 102**（LLM 会被指向已不存在的旧名）。
-★ 指标口径别混：`not_fresh`＝索引**落后于磁盘**；`stale_resolved`＝索引**自身内部**不一致
-（只在"重同步删了旧节点却没重开引用"时出现，见 `probe-dc-watch-refresh.mjs`）。
-
-**新工具 `index_integrity`**（meta 线）：把**可信度当结果返回**（陈旧断言/覆盖度/未保鲜/自写登记/修复建议）；
-`refresh:true` 顺手**修复**陈旧引用（只有它能修 —— 保鲜路径靠 `symbol_diffs`，而那些文件内容没变）。
-真身自检：390 文件 / 4887 节点 / 9434 边 / **陈旧断言 0**。
-
-**★ 本轮踩到的 3 个真 bug（已修，教训可复用）**：
-1. `scanLiteralOccurrences` 的 SKIP_DIRS 缺 `.design-canvas` ⇒ 扫到 `code-snapshots/` 的**旧文本副本**，
-   既虚增命中数又把**可撤回的快照本身改写掉**。⇒ **我们自己的派生物目录必须排除在"扫源码"之外**。
-2. `index_backfill` 写 `const indexedSet = indexedRelativeSet`（模块级别名）撞上
-   `index_backfill ⇄ index_freshness` 循环 import ⇒ 别名捕获成 `undefined`。⇒ **循环的两个模块间不要建模块级别名**。
-3. 落盘工具不经闸 ⇒ 改完索引不知情。⇒ 新写工具一律接 `writeSourceFiles`（async）或 `recordSelfWrite`（同步）。
-
-**★ 既有测试失败必须对照证明，别自认**：全量 2040 项有 18 失败（9 文件）。
-方法：`git checkout <parent>`（工作区必须干净）跑同一批 → 与 HEAD 对比。已证 `find_references` 3 项与
-`server_registry.stale_build` 1 项在父提交上**完全一致**；其余是 Go/网络/git 环境类。
-
-**未闭合 / 下一步**（详见 extreme 文档 §5）：① L3② 从"标注"升级为"精确"（TTL 保鲜守卫，或先给
-`diff_impact` 单独接保鲜 —— 它给的是**行动建议**，读旧图最危险）② 可信度自动附到 `impact_analysis`/`rename_*`
-③ **边界扩展**（`noExpand` 终点复用 + 新文件并入相邻块）④ 能力自述（按语言标注可解析粒度，P10）
-⑤ 预热 `parseFileFull` 让同步工具直连 L1a ⑥ 写入闸收编 `edit_code`/`rename_files`/`symbol_move`/
-`code_workbench`/`refactor_pipeline`/`scaffold`。
-
-**其他待拍板**：`scopeToIndex` 是否给 MCP 工具 `watch_project` 默认开（现 false）｜改名 working name `agentio`（正式待定）｜
-P2-b 重启验证｜P3 注册门。**实践纪律**：**换代由用户自己发**；跑探针前必须 `tsc` 重建 dist。
-
-> 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
-
-> **2026-09-15 进展**：L0 首次接触建索引 ✅｜TRUST 行动附注 ✅｜P10 语言能力自述 ✅｜
-> 写闸收编**全部** ✅（refactor_pipeline=终态 L1a 写穿、scaffold=L1b+project_dir、code_workbench=无需接闸）｜
-> scopeToIndex 拍板=默认展开｜harvest file:// ✅。提交 `3b70664`。
-> **⑤ 同步工具直连 L1a ✅（09-15 下午，提交 `0f5731c`）**：prewarmKernel（registerAllTools
-> fire-and-forget）+ parseFileFullSync/syncFileSync/syncSelfWritesSync；**预热闸绝不半同步**
-> （任一未预热 ⇒ 整批落回 L1b）；remove_dead_imports/scaffold 已收编；测试 8 项 + 全量
-> 2093 项失败数与基线一致（11 环境类）。细节见 `2026-09-15.md` 尾部。
-> 剩余（"极致"清单）：仅边界扩展（拍板缓）。
-> 〔勘误 09-15：原列的"L3② 精确化（diff_impact 优先）"已由 L3① 结构性自动保鲜覆盖
-> （09-15 凌晨落地，extreme 文档 §5.1 ✅，60 工具全覆盖），勿再追。〕
->
-> **方向拍板（2026-09-15 中午，用户定）**：先做完 design-canvas 方向再挪 DSH 底座——
-> 顺序 = ~~⑤ 预热直连 L1a~~（✅ 0f5731c）→ ~~P0-4 模糊编辑级联~~（✅ `2db7aae`）→
-> ~~**P1-7「修复→规则沉淀」**~~（✅ `340e476`，09-15 下午）；
-> 之后才轮到 ~~verify-boot-health 漏判修复~~（✅ 09-15 下午）+ ~~插件 schema 无配置健壮性~~
-> （✅ 09-15 傍晚）+ **P3 注册门（下一项）**。
-> **插件配置健壮性要点（09-15 傍晚）**：6 个 zod 包 `Config` 套 `tolerantConfig`
-> = `z.preprocess(v => v ?? {}, schema)` ⇒ 缺 `config:` 不再炸插件树；schemastery 的
-> `subagent-council` 原生容忍（未改）。三个反直觉点：裸 `z.object`+undefined ⇒ 抛 `ValidationError`
-> （真机复现）；**`.default({})` 是更坏的假修复**（返回字面量 `{}`、短路内层解析、全字段
-> 变 undefined）；`preprocess` 正解（默认值生效**且类型错仍拒绝**）。
-> ★ **认知修正**：`npm run check:profile`（`--dump-config`）**不校验插件 config** ——
-> 删掉 `config:` 仍 EXIT=0/579 行。⇒ "check:profile 绿 ⇒ 配置没问题"是错误推论；
-> 该类 bug 只由 `scripts/check-config-tolerance.mjs`（56 项，经 **cordis 真实 `resolveConfig`**）
-> 或真启动发现。写门禁两大空过坑：`.default({})` 的 `{}` **没有值为 undefined 的字段**
-> （须**键集合比对**）；`z.preprocess` 编成 **pipe**、内层在 `def.out`（须下钻内省，
-> 否则 zod **忽略未知键** ⇒ 假通过）。
-> **verify-boot-health 修复要点（09-15 下午）**：根因**不是判据错、是读得太早** ——
-> 崩溃文本比 `result:success` 晚 **637ms** 落盘，旧实现「读一次 boot.log + 纯否定式」必然漏判。
-> 抽成 `packages/switchboard/src/boot-health.ts`：① 有界等待重读（6s，实测 3.41s 的 1.75×）；
-> ② **要求正向完成信号** `dsh web: http://127.0.0.1:<port>`（实测 10 个真实启动段 9 个有，
-> 唯一没有的正是崩溃段 ⇒ 零误报判别器）；③ 三态 `healthy/fatal/unknown`，**`unknown` 同等回滚**；
-> ④ 新增 `invalid config`/`ValidationError`/`Node.js v<x>` 三条裸根因 +
-> `proc.exitCode !== null`（内核回填，无竞态）优先于 `kill(pid,0)`。
-> **★ 关键澄清**：`fast` 跳过的 `verifyStableMs` 稳定窗只重探 `probe`（"进程还活吗"）——
-> 崩溃前进程**确实还活着**，探得通；它**不覆盖"日志落盘了吗"**。⇒ 健康检查与稳定窗**正交**，
-> `fast` 不得跳过（`SWITCH_BOOT_HEALTH_TIMEOUT_MS` 可调）。**事故恰发生在 fast 路径。**
-> 验证：`scripts/test-boot-health.mjs`（32 项）+ `scripts/verify-boot-health-on-real-3083.mjs`
-> （真实日志上跑：落盘前→unknown 拦截／完整→fatal 早退）；对照实验 = **旧判据放行、新判据回滚**。
-> **通用教训**：对"异步落盘的外部证据"一次性读取 = 必然竞态；纯否定式判据无法区分
-> 「干净」与「事实还没产生」；两者叠加 = **静默放行**（最危险的失败）。修法 = 有界等待 + 正向证据。
-> **P1-7 要点**：规则 = 自包含 `.md`（frontmatter + 说明 + ```pattern/```replace +
-> `##` 正/反例夹具段），住 `<project>/.design-canvas/rules/`；工具 3 个
-> （`export_rule`/`apply_rules`/`check_rules`，均 `wrapData`）；
-> ★ **逐级放宽梯子**：泛化的"度"不靠猜 —— 从最多抽象开始，每级用**验收三关**
-> （出生回归 / 反例不命中 / 幂等）裁决，全败则降级为字面量并标 `degraded`；
-> **三关不过时 dry_run=false 也绝不写盘**。新文件 `rule_{tokens,library,match,extract,apply}.ts`；
-> 测试 62 项。★ **与 Grit 的两处差异**：① 反例夹具（Grit stdlib 零反例）
-> ② 萃取动作（Grit 的 pattern 全靠手写）。细节见 `2026-09-15.md` 尾部。
-> **P0-4 要点**：级联只做 replace_text（其余 op 走 AST/显式行号天然不模糊）；新模块
-> `src/tools/fuzzy_match.ts` 四级定位（L1 逐字→L2 空白归一→L3 缩进弹性→L4 省略号占位）+
-> `realignNewTextTo`；纪律=歧义即停+唯一才动；诚实回执（级别进消息、diff "-" 侧用实际文件片段）；
-> 测试 `edit_code_fuzzy.test.ts` 7 项一次全过、全量 2100 失败数与基线一致。
-> **工具层新坑**：同一文件的两个 Edit 并行发 ⇒ 后者基于旧快照覆盖前者且报成功
-> （连踩 2 次丢改动）⇒ 同文件编辑必须串行、发后 grep 验证。
-> **参考项目**：用户发现开源项目 `dsh-flow`（多模型方向，仓未核实）——留作自进化
-> 「多模型会议室」设计参考；生态内相近项目：`dsh-collaboration`（多智能体协作+模型对比）、
-> `dsh-agent-team-gui`（多模型小队）、`dsh-ha-orchestrator`（模型高可用故障转移）。
-> **副本清理已收口**：三个目录由用户手动删（建议回收站），脚本不再执行；
-> ② 的 node_modules Junction 已安全解链。
->
-> **★ 09-15 傍晚（本轮收尾）**：
-> ① **CI 三平台全红已修**（`235bf5b`）—— ★**纠错**：不是 C/C# 环境问题。
->    122 次 run 全失败，唯一真因 = `readme_tools_gate --check`（README=63 vs 真实=64），
->    其 dogfood 测试断言 `changed===false` ⇒ 平台无关地全挂。C/C# 只是能力矩阵的**声明项，从不编译**。
->    另修 behavior 测试 `PY` 探测（CI windows 无 python）→ `describe.skipIf(!hasPython)`。
-> ② **archify 仓内 vendor ✅**（`aa944e8` + `02a1df6`）：`third_party/archify/`（69 文件/2.18MB；
->    选 third_party 因 `.gitignore:58` 忽略 `vendor/`）。`resolveArchifyRoot` 三级优先级 =
->    **显式 > `ARCHIFY_ROOT` > 仓内默认**（默认根 `import.meta.url` 上溯，不依赖 cwd）；
->    CI 加 `archify doctor`。⇒ 修掉两个长期病灶：**CI 永远验不到这条链路** + **宿主 env 污染测试**。
-> ③ **★ R5 诊断修正：`sequence`/`dataflow`/`lifecycle` 三类不合格**（早先说两类 → 那次数的是
->    Downloads 陈旧副本）。溢出：1586(+76%)/1302(+45%)/1245(+38%)，全 `viewer/viewport-overflow`。
->    **未决：等用户拍板处置**（定向修布局 / 降级旁路 / 屏蔽）。
-> ④ **纪律沉淀**：**用"仓外副本 + 环境变量"做基线诊断 ⇒ 诊断结论本身不可信**（本轮实证）；
->    本机 `find` 报错后返回 **0 是假的** ⇒ 统计一律走 node；`node -e` 里反引号被 bash 抢 ⇒ **写文件再跑**。
-> ⑤ **下一步回到主线：P1-7「修复→规则沉淀」**（设计已按 Grit 校准：md 载体 + `$hole` 元变量 +
->    CI ratchet + `todo()` 部分修 + **反例夹具（我们的差异化）** + 萃取动作）。
->
-> **★ 09-15 傍晚 ②：R5 挂起**（design-canvas 提交 `dbd7e6a`）—— 用户拍板「保留在项目里、
-> 暂时不管、别影响后续开发」。处置 = **挂起**（不删、不屏蔽），把首尾处理干净：
-> - 单点开关 `tests/helpers/r5_gate.ts` 的 `r5Describe()`：**默认照跑**（保留回归保护），
->   `DC_R5_SKIP=1` ⇒ 整线 skip 且**组名带标记（报告可见，非静默消失）**。
->   ★ 为什么默认是"跑"：静默跳过会隐瞒问题（本项目最反对"静默给旧答案"）。
-> - 4 个 R5 测试文件（**28 项**）接入；`package.json` 加 `test:main` / `test:r5`；
->   `ci.yml` 的 `archify doctor` 加 `if: DC_R5_SKIP != '1'`。
-> - ★ **挂起 ≠ 免责**：**没有**挂起 \`view_inputs.test.ts\`（测**中性数据层**，属主线资产）
->   与 \`contract.test.ts\` + \`contract.ts\` 的 \`archify-demo\`（**对外契约**，契约闸门照管）。
-> - 核实耦合面：\`/api/archify-demo\` 是**纯 API、零前端调用** ⇒ 不会造成 UI 可见故障。
-> - 验证：默认 2075 passed/32 skipped/**0 failed**；\`DC_R5_SKIP=1\` 2047 passed/60 skipped/**0 failed**
->   （差值正好 28）；三闸门 exit 0。
-> - 文档：\`docs/r5-archify-hung.md\`（R5 是什么/三层归属/为何挂起/开关/边界/恢复步骤/互不干扰约定）。
->
-> **★ design-canvas 新增环境约束**：**\`.gitignore:101\` 有 \`docs/*\`（发布划界）⇒
-> 新文档必须 \`git add -f\` 才进库**（既有 4 篇 docs 亦如此）。
-> **Git Bash 里 \`node -e\` 带正则/反引号会被 bash 抢插值 ⇒ 脚本写文件再跑**（已固化两次）。
+**下一项 = P4**（核心角色一工具名，长尾走 `delegate_capability` + `list_capabilities`）。
+细节与未闭合项见 `topics/current-status.md` 与日更 `2026-09-15.md` 尾部。
+**实践纪律**：**换代由用户自己发**；跑探针前必须重建 dist。

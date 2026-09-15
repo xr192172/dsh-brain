@@ -199,3 +199,57 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   本机 `find` 不可信（报错后返回 0）⇒ 统计走 node；`node -e` 里反引号会被 bash 抢 ⇒ 写文件再跑；
   **design-canvas 的 `docs/*` 被 gitignore（发布划界）⇒ 新文档必须 `git add -f`**。
 
+
+---
+
+## 2026-09-15 傍晚：P3 注册门 ✅
+
+**P3 已完成**（`docs/capability-registry-evolution.md` §5.4.1 + §9）。
+
+- **`scripts/capability-gate.mjs`**（新）：L0/L1 硬门。L0 对 subagent-provider **真跑**
+  `apply(mockCtx, config)` 捕获 provider → 接口 5 成员齐（`name`/`capabilities`/
+  `inheritsParentContext`/`start`/`prepareContinuable`）+ `capabilities` **键集合**与声明一致；
+  对 `kind:mcp-server` 检验入口/工具面可扫/有工具有线索/能力线目录与实际注册一致。
+  L1 = `role`·`writeScope`·`credentials`·`budget` **必须显式声明**（缺 ⇒ fail-closed）；
+  **设计类角色（scout/designer/reviewer）不得有 `production` 写权**。
+  **L2~L4 未实施**，回执写 `proofLevel:'L1'` + `unenforced:['L2','L3','L4']`。
+- **注册 ≠ 采纳**：`capability-registry.mjs` 的 `register`/`init` 只建 `pending`；
+  **只有门能把状态改成 `active`**；`acceptance.kind` 只认 `'gate'`。
+  存量 4 条原为「未经门的 active」已**如实降级**，过门后重新 active。
+- **存量 4 条全部过门**：spawn / fork / council-architect / **design-canvas（`kind:mcp-server` 工具层）**。
+- **自证** `scripts/test-capability-gate.mjs`（29 项，两方向）：6 种坏法各自被挡在**正确的级与检查项**上，
+  **且完好的能力必须被放行** —— 只证前者不够（"一律 blocked"的门同样无用）。
+
+### 本轮一并修掉的两个真问题
+
+1. **★ 扫描器过期 ⇒ 假漂移**：`capability-registry.mjs` 的 `scanMcpSource` 还在用
+   design-canvas 2026-09-14 改造**之前**的正则（找 `{ name: '...' }`），
+   报出「67 个工具全部未归线」。实为假漂移（权威值 64 工具、全部归线）。
+   **假漂移比不报更坏**：骗人修不存在的问题，还让人不再信任这个检查。
+   已抽成 `scripts/capability-sources.mjs`（**单一实现**），与 `diff-dc-capability-map.mjs`
+   走同一权威路径（import 编译产物 + `validateLanes`/`buildLanes`）。
+2. **★ 我自己的判据错了 ⇒ 假红**：我加的交叉校验「`inheritsParentContext=false` 且
+   `credentials=inherit` ⇒ 违反凭据边界」是错的 —— 两者不是一个维度
+   （前者=**会话上下文**，后者=**凭据**；in-process 子代理同进程，共用凭据是架构事实）。
+   它当场产生假红，而过门只能把声明改成 `own` = **往注册表里写假话**。
+   **会误报的门最终会被绕过去，于是什么也保护不了。** 已删除（L1 对凭据只判"已显式声明"）。
+   ⇒ **判据做错方向有两面：假绿（漏放行）与假红（误拦）同等有害。**
+
+## 未闭合 / 下一步（2026-09-15 起）
+
+- **P4**（核心角色一工具名，长尾走 `delegate_capability` + `list_capabilities`）与
+  **P5**（外部 Agent adapter，把"接入版本"纳入注册门）—— 前置 P3 已解除。
+- **L2/L3/L4 判据阶梯**未实施（需基线口径 + 独立评测集/holdoutHash + A/B 编排）。
+- design-canvas 侧：**④ 边界扩展**（拍板缓）；**R5 挂起**（`docs/r5-archify-hung.md`，
+  `DC_R5_SKIP=1`，默认照跑）。
+- 其他待拍板：`scopeToIndex` 对 MCP `watch_project` 是否默认开｜改名 working name `agentio`。
+
+## 工具层纪律增补（自 MEMORY.md 迁入）
+
+- **★ 同一文件的两个 Edit 并行发 ⇒ 后者基于旧快照覆盖前者，且两边都报成功**
+  （本轮连踩 2 次、丢改动：`KNOWN` 数组、`list`、`check` 三处被静默回滚）。
+  ⇒ **同文件编辑必须串行；改完 grep 验证关键标记**。
+- **写含反引号的 markdown 时别用 JS 模板字符串**（反引号会截断字面量，本轮踩到）
+  ⇒ 用 Write 写纯文本文件再 `cat >>` 追加。
+- 参考项目（自进化「多模型会议室」）：`dsh-flow`（仓未核实）、`dsh-collaboration`、
+  `dsh-agent-team-gui`、`dsh-ha-orchestrator`。
