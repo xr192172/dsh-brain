@@ -14,8 +14,10 @@
 // 优先读环境变量 DSH_PUBLIC_WEB_URL（由启动器注入、被子进程继承）；未设置时保持原行为。
 // 用户实际访问的是前门（3080），实例端口只是内部实现细节。
 //
-// 幂等：已打过补丁则跳过。
-import fs from 'node:fs'
+// ★ 2026-09-15：改用严格锚点应用器。旧版锚点找不到只打印 ⚠️ 然后继续，
+//   而这个脚本挂在 postinstall ⇒ 上游一变，补丁静默失效、无人被告知。
+//   现在锚点两态都不在 ⇒ 非 0 退出（`DSH_PATCH_STRICT=0` 可降级）。
+import { applyAnchors, reportAndExit } from './patch-anchors.mjs'
 
 const MARKER = 'DSH_PUBLIC_WEB_URL'
 const paths = [
@@ -36,15 +38,15 @@ const NEW = `function localWebUrl(ctx) {
 	if (typeof override === "string" && override.trim() !== "") return override.trim();
 	const port = ctx.get("webServer")?.port;`
 
-let touched = 0
-for (const p of paths) {
-  if (!fs.existsSync(p)) { console.log('skip missing:', p); continue }
-  let c = fs.readFileSync(p, 'utf8')
-  if (c.includes(MARKER)) { console.log('already patched:', p); continue }
-  if (!c.includes(OLD)) { console.log('⚠️ anchor not found (upstream changed?):', p); continue }
-  c = c.replace(OLD, NEW)
-  fs.writeFileSync(p, c, 'utf8')
-  touched++
-  console.log('patched:', p)
-}
-console.log(`done. files patched: ${touched}`)
+const EDITS = [
+  {
+    id: 'public-web-url-override',
+    anchor: OLD,
+    replace: NEW,
+    // 用「真的注入了 override 代码」作判据，比只查 MARKER 字符串更严 ——
+    // MARKER 也可能只出现在注释里。
+    done: `process.env.${MARKER}`,
+  },
+]
+
+reportAndExit('patch-web-app-public-url', paths.map((p) => applyAnchors(p, EDITS)))

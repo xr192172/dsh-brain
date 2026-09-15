@@ -19,7 +19,7 @@
 //   重复执行安全：已打补丁时直接跳过。
 //
 // 注意：这是直接改 node_modules，npm install 会被冲掉 —— 已挂到 package.json 的 postinstall。
-import fs from 'node:fs'
+import { applyAnchors, reportAndExit } from './patch-anchors.mjs'
 
 // profiles/node_modules/@deepseek-ai/* 是指向 dsh-brain/node_modules 的 junction，
 // 内容同一份文件；两个路径都探一下只是为了在 junction 布局变化时也能命中。
@@ -67,32 +67,12 @@ const EDITS = [
 // helper 插在 readProfileManifest 的 JSDoc 之前
 const HELPER_ANCHOR = '/**\n* Read a profile\'s manifest.'
 
-let touched = 0
-for (const p of PATHS) {
-  if (!fs.existsSync(p)) { console.log(`skip    missing: ${p}`); continue }
-  let c = fs.readFileSync(p, 'utf8')
+// ★ helper 的插入也算「一处改动」—— 这样"helper 进了、但 4 处调用没改"这个
+//   隐蔽假绿能被三态判定抓出来（helper=already，edits=missing），
+//   而不是像旧版那样因 MARK 命中就整文件 skip、永远显示"已打补丁"。
+const ALL = [
+  { id: 'helper', anchor: HELPER_ANCHOR, replace: HELPER + HELPER_ANCHOR, done: MARK },
+  ...EDITS.map(([anchor, replace], i) => ({ id: `edit-${i + 1}`, anchor, replace })),
+]
 
-  if (c.includes(MARK)) { console.log(`skip    already patched: ${p}`); continue }
-
-  if (!c.includes(HELPER_ANCHOR)) {
-    console.log(`FAIL    ${p}\n        helper anchor not found — 上游结构可能已变，请人工核对`)
-    continue
-  }
-  c = c.replace(HELPER_ANCHOR, HELPER + HELPER_ANCHOR)
-
-  let hit = 0
-  for (const [from, to] of EDITS) {
-    if (!c.includes(from)) {
-      console.log(`WARN    ${p}\n        edit anchor not found: ${from.slice(0, 70)}...`)
-      continue
-    }
-    c = c.replace(from, to)
-    hit += 1
-  }
-
-  fs.writeFileSync(p, c, 'utf8')
-  console.log(`patched ${p}  (edits applied: ${hit}/${EDITS.length})`)
-  touched += 1
-}
-
-console.log(touched ? `done, ${touched} file(s) patched` : 'done, nothing to do')
+reportAndExit('patch-app-boot-bom', PATHS.map((p) => applyAnchors(p, ALL)))
