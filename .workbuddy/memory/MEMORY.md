@@ -4,7 +4,7 @@
 三脑编排 / 上下文压缩 / 工具自进化 / 护栏 / LLM 路由。
 
 > 本文件是**索引**，不是全文；细节按主题拆到 `topics/`，**按需读，不要一次全读**。
-> 日更（append-only，尾部即最新）：`2026-09-13.md`、`2026-09-14.md`。
+> 日更（append-only，尾部即最新）：`2026-09-13.md`、`2026-09-14.md`、`2026-09-15.md`。
 > 2026-09-14 瘦身：资产拓扑 → `topics/asset-topology.md`；进度/下一步 → `topics/current-status.md`。
 
 ## 环境约束（本机工具层，每次都要遵守）
@@ -111,4 +111,46 @@ P2-b 重启验证｜P3 注册门。**实践纪律**：**换代由用户自己发
 
 > 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
 
-> 本轮全部细节见 `.workbuddy/memory/2026-09-14.md`（append-only 日更，**尾部即最新**）。
+> **2026-09-15 进展**：L0 首次接触建索引 ✅｜TRUST 行动附注 ✅｜P10 语言能力自述 ✅｜
+> 写闸收编**全部** ✅（refactor_pipeline=终态 L1a 写穿、scaffold=L1b+project_dir、code_workbench=无需接闸）｜
+> scopeToIndex 拍板=默认展开｜harvest file:// ✅。提交 `3b70664`。
+> **⑤ 同步工具直连 L1a ✅（09-15 下午，提交 `0f5731c`）**：prewarmKernel（registerAllTools
+> fire-and-forget）+ parseFileFullSync/syncFileSync/syncSelfWritesSync；**预热闸绝不半同步**
+> （任一未预热 ⇒ 整批落回 L1b）；remove_dead_imports/scaffold 已收编；测试 8 项 + 全量
+> 2093 项失败数与基线一致（11 环境类）。细节见 `2026-09-15.md` 尾部。
+> 剩余（"极致"清单）：仅边界扩展（拍板缓）。
+> 〔勘误 09-15：原列的"L3② 精确化（diff_impact 优先）"已由 L3① 结构性自动保鲜覆盖
+> （09-15 凌晨落地，extreme 文档 §5.1 ✅，60 工具全覆盖），勿再追。〕
+>
+> **方向拍板（2026-09-15 中午，用户定）**：先做完 design-canvas 方向再挪 DSH 底座——
+> 顺序 = ~~⑤ 预热直连 L1a~~（✅ 0f5731c）→ ~~P0-4 模糊编辑级联~~（✅ `2db7aae`，09-15 下午）→
+> **P1-7「修复→规则沉淀」（下一项）**；
+> 之后才轮到 verify-boot-health 漏判修复 + 插件 schema 无配置健壮性 + P3 注册门。
+> **P0-4 要点**：级联只做 replace_text（其余 op 走 AST/显式行号天然不模糊）；新模块
+> `src/tools/fuzzy_match.ts` 四级定位（L1 逐字→L2 空白归一→L3 缩进弹性→L4 省略号占位）+
+> `realignNewTextTo`；纪律=歧义即停+唯一才动；诚实回执（级别进消息、diff "-" 侧用实际文件片段）；
+> 测试 `edit_code_fuzzy.test.ts` 7 项一次全过、全量 2100 失败数与基线一致。
+> **工具层新坑**：同一文件的两个 Edit 并行发 ⇒ 后者基于旧快照覆盖前者且报成功
+> （连踩 2 次丢改动）⇒ 同文件编辑必须串行、发后 grep 验证。
+> **参考项目**：用户发现开源项目 `dsh-flow`（多模型方向，仓未核实）——留作自进化
+> 「多模型会议室」设计参考；生态内相近项目：`dsh-collaboration`（多智能体协作+模型对比）、
+> `dsh-agent-team-gui`（多模型小队）、`dsh-ha-orchestrator`（模型高可用故障转移）。
+> **副本清理已收口**：三个目录由用户手动删（建议回收站），脚本不再执行；
+> ② 的 node_modules Junction 已安全解链。
+>
+> **★ 09-15 傍晚（本轮收尾）**：
+> ① **CI 三平台全红已修**（`235bf5b`）—— ★**纠错**：不是 C/C# 环境问题。
+>    122 次 run 全失败，唯一真因 = `readme_tools_gate --check`（README=63 vs 真实=64），
+>    其 dogfood 测试断言 `changed===false` ⇒ 平台无关地全挂。C/C# 只是能力矩阵的**声明项，从不编译**。
+>    另修 behavior 测试 `PY` 探测（CI windows 无 python）→ `describe.skipIf(!hasPython)`。
+> ② **archify 仓内 vendor ✅**（`aa944e8` + `02a1df6`）：`third_party/archify/`（69 文件/2.18MB；
+>    选 third_party 因 `.gitignore:58` 忽略 `vendor/`）。`resolveArchifyRoot` 三级优先级 =
+>    **显式 > `ARCHIFY_ROOT` > 仓内默认**（默认根 `import.meta.url` 上溯，不依赖 cwd）；
+>    CI 加 `archify doctor`。⇒ 修掉两个长期病灶：**CI 永远验不到这条链路** + **宿主 env 污染测试**。
+> ③ **★ R5 诊断修正：`sequence`/`dataflow`/`lifecycle` 三类不合格**（早先说两类 → 那次数的是
+>    Downloads 陈旧副本）。溢出：1586(+76%)/1302(+45%)/1245(+38%)，全 `viewer/viewport-overflow`。
+>    **未决：等用户拍板处置**（定向修布局 / 降级旁路 / 屏蔽）。
+> ④ **纪律沉淀**：**用"仓外副本 + 环境变量"做基线诊断 ⇒ 诊断结论本身不可信**（本轮实证）；
+>    本机 `find` 报错后返回 **0 是假的** ⇒ 统计一律走 node；`node -e` 里反引号被 bash 抢 ⇒ **写文件再跑**。
+> ⑤ **下一步回到主线：P1-7「修复→规则沉淀」**（设计已按 Grit 校准：md 载体 + `$hole` 元变量 +
+>    CI ratchet + `todo()` 部分修 + **反例夹具（我们的差异化）** + 萃取动作）。

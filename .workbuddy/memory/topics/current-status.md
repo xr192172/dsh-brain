@@ -96,8 +96,9 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   `code-snapshots/`。探针 `scripts/probe-dc-snapshot-mcp.mjs` 5 项 PASS。
   **四根 MCP 探针（snapshot/arg-suggest/zero-setup/capability-map）一起 exit 0**。
   全量 vitest **1974 passed / 11 基线失败**（readme 工具数门禁已自愈 60→62）⇒ 无新增回归。
-  **下一步**：P0-4 模糊编辑级联（先核查 edit_code 现状；顺带确认 `op='replace_text'` 是否死代码）
-  → P1「修复→规则沉淀」（最差异化）。
+  **下一步**：~~P0-4 模糊编辑级联~~（✅ 09-15，commit `2db7aae`：fuzzy_match.ts 四级级联
+  只做 replace_text，歧义即停+诚实回执，测试 7 项+全量 2100 与基线一致）
+  → **P1「修复→规则沉淀」（当前下一项，最差异化）**。
 - **★ 换代分工（2026-09-14，用户纠正后定案）**：**我的宿主是 WorkBuddy，被换代的是 DSH**
   （`dsh web` 那套 gen/switchboard）——两者是不同系统 ⇒ **我天然是外部观察者**，
   不会再"吐槽自己不能被重启"（此前那条理由是错的）。
@@ -143,4 +144,25 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 - **★ 两个更值得修的上游问题**（尚未动）：
   ① `verify-boot-health` **漏判启动失败**（gen 崩了仍报 ok）—— 这是保险本身失效，比这次事故更危险；
   ② 插件 schema 应对"无配置"健壮（doc 明写"留空 = 默认路径"），否则任何新插入都可能崩整个 harness。
+
+## 2026-09-15 增补
+
+- **P0-4 模糊编辑级联 ✅**（commit `2db7aae`）：`src/tools/fuzzy_match.ts` 四级定位
+  （L1 逐字 → L2 空白归一 → L3 缩进弹性 → L4 省略号占位），**只做 `replace_text`**
+  （其余 op 走 AST/显式行号天然不模糊）；纪律=歧义即停+唯一才动；诚实回执（级别进消息）。
+- **CI 三平台全红已修 ✅**（commit `235bf5b`）—— ★ **不是** C/C# 环境问题（这是纠错）：
+  122 次 run 全失败，唯一真因 = `readme_tools_gate --check`（README=63 vs 真实=64），
+  其 dogfood 测试断言 `changed===false` ⇒ 三平台一致失败（与平台无关）。
+  另修：behavior 测试的 `PY` 探测（CI windows runner 无 python）→ `describe.skipIf(!hasPython)`。
+  **C/C# 只是能力矩阵里的"声明项"，从不编译**；Go job 一直是绿的。
+- **archify 仓内 vendor ✅**（commit `aa944e8` + `02a1df6`）：
+  `third_party/archify/`（69 文件/2.18MB，选 third_party 因 `.gitignore:58` 忽略 `vendor/`）；
+  `resolveArchifyRoot` 三级优先级 = **显式参数 > `ARCHIFY_ROOT` > 仓内默认**
+  （默认根用 `import.meta.url` 上溯，不依赖 cwd）；CI 加 `archify doctor` 自检。
+  ⇒ **修掉了两个长期病灶**：CI 永远验不到这条链路 + 宿主环境变量污染测试。
+- **★ R5 诊断修正：`sequence`/`dataflow`/`lifecycle` 三类不合格**（不是早先说的两类 ——
+  那次数的是 Downloads 陈旧副本）。溢出量：sequence 1586(+76%) / dataflow 1302(+45%) /
+  lifecycle 1245(+38%)，全部 `viewer/viewport-overflow`。**未决：等用户拍板处置**。
+- **纪律沉淀**：**用"仓外副本 + 环境变量"做基线诊断 ⇒ 诊断结论本身不可信**；
+  本机 `find` 不可信（报错后返回 0）⇒ 统计走 node；`node -e` 里反引号会被 bash 抢 ⇒ 写文件再跑。
 
