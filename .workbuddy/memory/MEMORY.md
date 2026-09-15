@@ -44,7 +44,9 @@
 5. **外置化 / 缩减必须在「写入时」append-only**，事后 `replace` 必击穿 prompt 前缀。
 6. **`disabled` ≠ 移除**：在 `bundles` 里就仍会被 loader 装配；有 `dsh.client` 的包目录还在就可能被前端加载。
 7. **判据与信号不可混**：裸满意度评分应被**丢弃**；采纳只认可执行 `acceptance` + 隐藏 holdout。
-   **★ 未实施的判据级不得计作通过；假绿与假红同等有害。**
+   **★ 未实施的判据级不得计作通过。** 假信号按**有没有坐标**排：
+   **假绿/空过（无处可查、且以为查过了，最坏）> 无门（诚实的无知）> 假红（给了坐标，相对最好）**。
+   **见假红 → 先证明判据错了，再改判据；绝不为消红去改被检对象**（那等于把假红转成假绿）。
 8. **压缩后端契约**：产出 summary 的路径必须携带 `measurement` +
    `start/end/shadowedSeqs/selectedNodes` → `scripts/check-compaction-fallback-shape.mjs`。
 9. **插件 `Config`**：6 个 zod 包已套 `z.preprocess(v => v ?? {}, schema)` ⇒ **漏写 `config:` 不再崩**；
