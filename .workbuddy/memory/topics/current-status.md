@@ -307,3 +307,66 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 
 > ⚠️ `device note`：`capability-bridge` 加文件后**必须重建 lib** 才能被 `check-config-tolerance`
 > 与自证脚本看到（它们跑的是编译产物）。
+
+## 2026-09-15 深夜：P4 接线路径**已核实** + 「拆装不确定」的根因定案
+
+### ✅ 接线路径核实完毕（P4 的阻塞项解除）
+
+**权威先例**：`@deepseek-ai/dsh-session-persistence`（它就是以"订阅会话"为职责的插件）：
+
+```js
+ctx.on("session/event",   (session, event) => { ... })   // ← 回调直接给**活的 session 对象**
+ctx.on("session/flush",   (session) => this.flush(session))
+ctx.on("session/created", (session) => { this.initFor(session) })
+ctx.on("session/disposed",(session) => { this.retire(session) })
+for (const session of ctx.sessions.list()) this.initFor(session)   // ← **回填既存会话**
+```
+
+⇒ 接线三件套全部确定：
+- **服务名 = `sessions`**（`SessionStore extends Service` + `super(ctx, "sessions")`）
+  ⇒ `ctx.inject(['sessions'], (sctx) => { … })`
+- **观察口**：`sctx.on('session/event', (session, event) => …)` —— 拿到的是 session 对象，
+  **不需要**自己按 id 去 `get()`（我原先的担心是多余的）
+- **写入口**：`session.append(type, data, ...opts)`（`SessionStore.append` 是公开方法）
+- ★ **必须回填既存会话**（`ctx.sessions.list()`）—— 否则插件加载前就存在的会话永远收不到通知；
+  persistence 正是这么做的。
+
+### ★ 「拆装不确定」根因定案（写入 `capability-registry-evolution.md` §6.4）
+
+用户问：DSH 宣传时间连续性/空间连续性（可热重载、Agent 自己执行、**能拆就能装**），
+为什么我们的拆装不确定？
+
+**答：体感是对的，但它描述的是「插件层」；连续性在「能力层」是真的。**
+
+| 层 | 装/卸方式 | 有连续性吗 |
+|---|---|---|
+| **能力层**（provider / tool / 会话事件类型） | **运行期 API** | ✅ 有 |
+| **插件层**（包 / bundles / patch.yml / node_modules 补丁） | 改配置 → **重新装配** | ❌ 没有 |
+
+**能力层可逆的实证**（`dsh-tool-subagent/lib/index.js:278-283`）：
+`provider-added` ⇒ `mount()`；`provider-removed` ⇒ `disposeTool()` ⇒ **注销即摘工具**。
+
+**插件层没有的两个原因**：
+1. **上游把 host 侧 HMR 关了** —— `cordis-plugin-hmr` 在 `dsh-web-app/cordis.patch.yml:21-23`
+   被 `disabled: true`，上游注释自陈「TODO: Re-enable shared HMR for Web after its
+   reload lifecycle is tested」；常驻的 `client-hmr` 只管浏览器侧 client bundle。
+   ⇒ 改 host 侧代码的最小路径仍是重启/换代。
+2. **我们的改动大量落在 cordis 之外**：node_modules 编译产物补丁（4 脚本 + 500 行
+   patch-package）、bundles 数组、两层 patch.yml、profile package.json + pnpm。
+   不在 effect 体系里 ⇒ 改了就改了，卸载不撤销。
+3. 失效模式因此全是**配置层**的：`duplicate loader entry id` / `declares no dsh.bundle` /
+   BOM / 缺 `config:` / **`disabled` ≠ 移除**。
+
+⇒ **这正是 P3/P4 的方向所在：把工作从"不成立的那一层"搬到"成立的那一层"。**
+P3 让能力采纳有判据（能力是运行期的，所以判据能真跑）；
+P4 让能力增删不改写前缀、长尾走 `delegate_capability` ⇒ **Agent 自己装卸能力而不重启**。
+
+> **可复用判据**：判断某改动能否"热拆装"，先问**它落在哪一层** —— 运行期 API（可逆）
+> 还是配置/产物（需重装配）。后者别期待回滚，也别指望 `disabled` 当卸载用。
+
+### 工具层纪律增补（本轮又踩到）
+
+- **用标题行当 Edit 锚点插入内容时，若不把标题一起写回，标题就被吃掉**
+  （本轮把 `## 7. 外部 Agent 接入` 误删，正文被并进 §6；已修复）。
+  ⇒ 以标题为锚点插入时，new_string **必须**以该标题结尾。
+- 修文档结构前先 `grep -nE "^#{1,2} "` 列全部标题核对 —— 光看正文 grep 不足以发现标题丢失。

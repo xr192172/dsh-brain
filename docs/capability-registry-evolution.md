@@ -809,7 +809,73 @@ P4 的这部分应当做成**我们自己的插件**（或并入 `capability-bri
 ⇒ 建议：锚点未命中 ⇒ **非 0 退出**（可用 `DSH_PATCH_STRICT=0` 显式降级）。
 **待用户拍板**（会影响 `npm install` 的行为）。
 
+### 6.4 ★ 为什么「拆装不确定」—— 连续性在**能力层**成立，在**插件层**不成立
 
+用户提问：DSH 宣传的是时间连续性 / 空间连续性（可热重载、由 Agent 自己执行、
+**能拆就能装**），为什么我们这里拆装感觉不确定？
+
+**答：这个体感是对的，但它描述的是「插件层」。在「能力层」连续性是真的 ——
+而我们此前把大部分工程量花在了前者。** 这不是做错了，是**层选错了**。
+
+#### 6.4.1 两个平面，两套机制
+
+| 层 | 装 / 卸的方式 | 有 cordis 的连续性吗 |
+|---|---|---|
+| **能力层**：subagent provider / tool / 会话事件类型 | **运行期 API**：`ctx.subagents.registerProvider` / `ctx.tools.register` / `session.append` | ✅ **有** |
+| **插件层**：包 / `dsh.profile.bundles` / `cordis.patch.yml` / `node_modules` 补丁 | 改配置 → 启动时**重新装配** | ❌ 没有 |
+
+**能力层可逆的实证**（`dsh-tool-subagent/lib/index.js:278-283`）：
+
+```js
+ctx.on("subagent/provider-added",   (p) => { if (p.name === config.provider && disposeTool === void 0) mount(p) })
+ctx.on("subagent/provider-removed", (n) => { if (n !== config.provider || disposeTool === void 0) return; disposeTool() })
+```
+
+⇒ **注销 provider，它的委派工具自动摘除** —— 这正是 temporal composability
+（副作用可回滚）。所以"能拆就能装"在能力层是**真的**。
+
+#### 6.4.2 插件层为什么没有
+
+1. **上游把 host 侧 HMR 关了**（决定性的一条）：
+   `@deepseek-ai/cordis-plugin-hmr` 在 `dsh-web-app/cordis.patch.yml:21-23` 被
+   **`disabled: true`**，上游注释原文：
+
+   > TODO: Re-enable shared HMR for Web after its reload lifecycle is tested.
+
+   常驻的 `client-hmr` 只管**浏览器侧 client bundle**。
+   ⇒ **改 host 侧代码的最小路径仍是重启/换代** —— 不是我们没用，是这项能力被上游按了暂停。
+
+2. **我们自己的改动大量落在 cordis 之外**：
+   - `node_modules/@deepseek-ai/*` 的**编译产物**补丁（4 个脚本 + 500 行 `patch-package`）
+   - `dsh.profile.bundles` 数组、包内与 profile 的 `cordis.patch.yml`
+   - profile 的 `package.json` + pnpm install
+   - 有 `dsh.client` 的包目录还在就可能被前端加载
+
+   这些东西**不在 effect 体系里**：改了就改了，卸载不会撤销，没有回滚语义。
+
+3. ⇒ 失效模式全是**配置层**的，cordis 的连续性在这里帮不上忙：
+   `duplicate loader entry id` / `declares no dsh.bundle` / BOM / 缺 `config:` /
+   **`disabled` ≠ 移除**（在 `bundles` 里就仍会被装配）。
+
+#### 6.4.3 这恰好解释了 P3/P4 的方向
+
+**把工作从"不成立的那一层"搬到"成立的那一层"。**
+
+- **P3 注册门**：让能力的**采纳**有判据。因为能力是运行期对象，判据才能**真跑** ——
+  门里真的调 `apply()` 捕获 provider 再内省 5 成员，就是这一点的直接体现。
+- **P4 能力清单**：让能力的**增删**不再改写 prompt 前缀；长尾走 `delegate_capability`
+  ⇒ **Agent 自己装卸能力，而不用重启** —— 这才是宣传里"由 Agent 自己执行"的形态。
+
+⇒ 所以「拆装不确定」不是我们做错了，而是：**此前工程量集中在插件层（配置与补丁），
+而 DSH 的连续性承诺只在能力层兑现。P3/P4 正是往后者靠。**
+
+> **一条可复用的判据**：判断某项改动能不能"热拆装"，先问**它落在哪一层** ——
+> 是运行期 API（能力层，可逆），还是配置/产物（插件层，需重装配）。
+> 后者不要期待回滚语义，也不要指望 `disabled` 能当卸载用。
+
+---
+
+## 7. 外部 Agent 接入 —— 你的最后一条，也是最有杠杆的一条
 
 **接口侧**：写一个 adapter，把外部 Agent 包成 provider 只需实现五个成员：
 
