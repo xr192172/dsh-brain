@@ -370,3 +370,72 @@ P4 让能力增删不改写前缀、长尾走 `delegate_capability` ⇒ **Agent 
   （本轮把 `## 7. 外部 Agent 接入` 误删，正文被并进 §6；已修复）。
   ⇒ 以标题为锚点插入时，new_string **必须**以该标题结尾。
 - 修文档结构前先 `grep -nE "^#{1,2} "` 列全部标题核对 —— 光看正文 grep 不足以发现标题丢失。
+
+## 2026-09-15 深夜（续）：P4 **接线完成** + §6.5「干净」的两种
+
+### ✅ P4 接线已完成，并被离线自证（16 项）
+
+**关键突破：真正的"搭车位"是 `tools/post-execute` waterfall，不是自己 append 一条 surface 事件。**
+
+```
+'tools/post-execute'(exec, result, next) => Promise<PostToolDecision>
+```
+- 它是**写入前**决定写什么 ⇒ **前缀不动**（与 `dsh-spill-policy` 同一机制，文档明确标它"前缀不动 ✅"）
+- 对比 `surfaceOp: replace`（事后改写）⇒ 必击穿 —— 我们正是因此关了 tool-result-pruner
+- ★ **surface 只有三类**（`user/message|assistant/message|tool/result`）⇒ 自己造一条会假装成
+  "别人说的话"；而 **`additionalContexts` 才是上游设计给插件注入上下文的通道**
+  （`dsh-agent-loop` 会 `acceptContext`；先例 `dsh-repeat-tool-reminder`）
+
+**接线的五个确定件**（全部有权威先例）：
+1. **非 surface 事件类型**：`KNOWN_SESSION_EVENT_TYPES.add('capability/change')`（照抄 tool-evolution）
+2. **服务名 `sessions`**（`SessionStore extends Service` + `super(ctx,"sessions")`）⇒ `ctx.inject(['sessions'], …)`
+3. **观察**：`sctx.on('session/event', (session, event) => …)` —— 回调直接给活的 session
+4. **写日志**：`session.append(CAP_CHANGE_EVENT, {...})`
+5. **取 session id**：`exec.agent?.session.header.id`（spill-policy 的 `ownerSessionId`）
+   —— 无 agent 时是 `undefined`（直接/测试调用），要容忍
+
+**通知条目形状**（照抄 repeat-tool-reminder）：
+```js
+{ content: [{type:'text', text}],
+  source: { kind:'plugin', plugin:'capability-bridge', form:'notice', summary } }
+```
+★ **`source` 标注是必需的**，上游注释明说：漏了它，未标注的 context 会在**派生历史里被渲染成用户提示**（假消息）。
+
+**自证** `scripts/test-capability-notice-wiring.mjs`（**16 项**，mock ctx 真调 `apply()`）：
+处理器装上、首次见到会话只记基线不记变更、能力库变了才挂车、幂等收敛、
+集合没变就不写（dropped）、`source` 齐全、能力库读不到 ⇒ 原样返回（**失败隔离**）、无 agent 调用不炸。
+
+**设计要点**：全部包 try/catch —— **通知失败绝不影响工具结果，更不能影响 boot**。
+收益是"省缓存"，boot 是命脉，代价不对等 ⇒ 一律降级为 no-op。
+
+### ★ §6.5 回答用户：「装得干净、卸得干净」的两种，以及前提的一处修正
+
+用户：*上游关了 HMR 只是不能重载，但装卸干净这个特点我们也要维护好。*
+
+**结论同意，但前提要修**：HMR 关闭**不是**与"能否卸干净"无关的事 ——
+上游注释说的是「after its **reload lifecycle** is tested」，而 reload lifecycle
+**正是拆卸与重装的顺序问题**。⇒ 它是"拆卸没把握"的**症状**。
+**不能因为 HMR 关了，就假定拆卸是干净可靠的；没被测的正是拆卸那一半。**
+
+**"干净"分两种，我们今天主要靠前者**：
+
+| 种 | 怎么来 | 可组合？ | 在哪 |
+|---|---|---|---|
+| **进程级干净** | 改配置 → **重启** = 全新进程 | ❌ | 插件层（我们的主路径） |
+| **效应级干净** | `ctx.effect` 回滚 / 依赖驱动卸载 | ✅ | 能力层 |
+
+★ 改 `bundles` 后重启**根本没有"卸载"发生** —— 是个全新进程
+⇒ 那是"简单粗暴地干净"，不是"可组合地干净"。
+
+**我们正在破坏这个性质的 5 处（可核查）**：① 手工改 node_modules 编译产物（体系外，卸不掉）
+② `disabled` 当卸载用 ③ 包目录残留（`dsh.client` 可能被前端加载）④ 状态文件残留
+⑤ **`KNOWN_SESSION_EVENT_TYPES` 的进程级 mutation**（卸载不撤销 —— **P4 自己引入的有意例外**，因为它是读日志的兼容性要求）。
+
+**建议**（未实施）：`scripts/check-plugin-hygiene.mjs` —— 正查 bundles 完整性、
+反查残留包、deps 与 bundles 一致性、遗留物、源码比产物新（提醒没重建）。
+口径：每条能指名"哪个包、哪一步没卸干净"，不出总分。
+
+## 验证（无回归）
+
+check:bom 0 违规｜check:profile 582 行/err 0｜config-tolerance 56/56｜
+boot-health 32/32｜capability-gate 29/29｜notice 内核 27/27｜**notice 接线 16/16**｜patch-anchors 17/17。

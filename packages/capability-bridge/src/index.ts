@@ -22,9 +22,30 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
+import type { CapChange, FoldState } from './notice.js'
+import { foldNotices, initialFoldState } from './notice.js'
 
 export const name = 'capability-bridge'
 export const inject: string[] = []
+
+/**
+ * 能力变更事件类型 —— **非 surface**（不在 `SurfaceEventType` 的
+ * `'user/message' | 'assistant/message' | 'tool/result'` 三元联合里）
+ * ⇒ **只在日志里、不进模型上下文** ⇒ 0 token、0 前缀影响。
+ *
+ * `KNOWN_SESSION_EVENT_TYPES` 是**共享可变 Set**（persistence 与 dsh-session 同实例），
+ * 必须在 boot 注册，否则读这份日志时会抛 `SessionFormatUnsupportedError`。
+ * 幂等：`add` 重复无害。（照抄 `packages/tool-evolution` 对 `tool/review` 的做法。）
+ *
+ * ⚠️ 这处是**进程级全局 mutation，插件卸载不会撤销** —— 属于"卸不干净"的一个已知例外，
+ * 但它是**必需**的：不注册，旧会话的日志就再也读不了。
+ */
+export const CAP_CHANGE_EVENT = 'capability/change'
+if (!KNOWN_SESSION_EVENT_TYPES.has(CAP_CHANGE_EVENT)) {
+  ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add(CAP_CHANGE_EVENT)
+  console.log(`[capability-bridge] registered custom session event type: ${CAP_CHANGE_EVENT}`)
+}
 
 export interface Config {
   /** 能力库文件路径；留空 = <DSH_HOME|~/.dsh>/capabilities/registry.json */
@@ -137,6 +158,127 @@ function renderRow(c: TCaps): string {
   return lines.join('\n')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// P4：能力变更通知（设计依据 `docs/capability-registry-evolution.md` §6.1–§6.4）
+//
+// 目标：**能力增删不再改写 prompt 前缀**。
+//   · 观察：能力库变了 ⇒ 往会话日志写一条**非 surface** 事件（0 token、0 前缀影响）
+//   · 折叠：在**工具结果写入前**（`tools/post-execute` waterfall）把「完整当前集合快照」
+//     搭车到 `additionalContexts` —— 走的是上游**给插件注入上下文**的既有通道
+//     （`dsh-agent-loop` 会 `acceptContext`；先例 `dsh-repeat-tool-reminder`）。
+//   · 为什么不用 `surfaceOp: replace` 事后改：那是**事后改写** ⇒ 必击穿前缀
+//     （我们正是因此关掉了 `dsh-compaction-tool-result-pruner`）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 当前**实际可用**的能力 id（权威来源：能力库里 `status === 'active'` 的项）。 */
+export function activeIds(db: TDb): string[] {
+  return (db.capabilities ?? []).filter((c) => c.status === 'active').map((c) => c.id)
+}
+
+/**
+ * 把折叠行包装成模型可见的 **context 条目**。
+ *
+ * ★ `source` 标注是**必需**的，不是装饰 —— 上游注释明说：
+ *   「the label is load-bearing (an unlabeled context would render as a **user prompt**
+ *     in derived history)」。漏了它，派生历史里会出现一条"用户说的"假消息。
+ * ★ `form: 'notice'` 是上游给"通知"用的既有形态。
+ */
+export function noticeContext(text: string, summary: string) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    source: { kind: 'plugin' as const, plugin: name, form: 'notice' as const, summary },
+  }
+}
+
+/**
+ * 装上通知链路。
+ *
+ * 全部包在 try/catch 里：**通知失败绝不影响工具结果，更不能影响 boot**。
+ * （P4 的收益是"省缓存"，而 boot 是命脉 —— 代价不对等，所以全部降级为 no-op。）
+ */
+function installNoticeWiring(ctx: Context, file: string): void {
+  ctx.inject(['sessions'], (sctx: any) => {
+    const foldStates = new Map<string, FoldState>()
+    const changeLogs = new Map<string, CapChange[]>()
+    /** sessionId → 上次见到的 registry.updatedAt（用来判断"能力库是否变过"） */
+    const stamps = new Map<string, string>()
+
+    const foldStateOf = (id: string): FoldState => {
+      let s = foldStates.get(id)
+      if (!s) { s = { ...initialFoldState }; foldStates.set(id, s) }
+      return s
+    }
+    const changeLogOf = (id: string): CapChange[] => {
+      let c = changeLogs.get(id)
+      if (!c) { c = []; changeLogs.set(id, c) }
+      return c
+    }
+
+    /** 当前能力库快照。读不到 ⇒ `null`（**不猜、也不写** —— 缺证据时不说话）。 */
+    const liveSnapshot = (): { ids: string[]; stamp: string } | null => {
+      const r = loadRegistry(file)
+      if (!r.ok) return null
+      return { ids: activeIds(r.db), stamp: String(r.db.updatedAt ?? '') }
+    }
+
+    // ① 观察：只记账。能力库变了 ⇒ 往日志写一条非 surface 事件（0 token）。
+    sctx.on('session/event', (session: any, event: any) => {
+      try {
+        const id = session?.id
+        if (!id) return
+        const snap = liveSnapshot()
+        if (!snap) return
+        const prev = stamps.get(id)
+        // ★ 首次见到该会话 ⇒ 只记基线、**不记为变更** ——
+        //   否则每个新会话都会平白多出一条通知（噪音 + 一次额外上下文行）。
+        if (prev === undefined) { stamps.set(id, snap.stamp); return }
+        if (prev === snap.stamp) return
+        stamps.set(id, snap.stamp)
+        changeLogOf(id).push({
+          seq: Number(event?.seq ?? 0),
+          at: new Date().toISOString(),
+          action: 'gated',
+          id: '__registry__',
+          detail: snap.stamp,
+        })
+        // 写进会话日志（非 surface；写失败不影响会话）
+        try {
+          session.append?.(CAP_CHANGE_EVENT, {
+            at: new Date().toISOString(),
+            registryUpdatedAt: snap.stamp,
+            activeCount: snap.ids.length,
+          })
+        } catch { /* 日志写失败不阻断会话 */ }
+      } catch { /* 观察侧绝不影响主流程 */ }
+    })
+
+    // ② 折叠：在工具结果**写入前**搭车（`prepend: true` ⇒ 我们先跑，再 `await next()`）
+    sctx.on(
+      'tools/post-execute',
+      async (exec: any, _result: any, next: any) => {
+        const downstream = await next()
+        try {
+          const sid = exec?.agent?.session?.header?.id
+          if (!sid) return downstream
+          const snap = liveSnapshot()
+          if (!snap) return downstream
+          const out = foldNotices(changeLogOf(sid), foldStateOf(sid), snap.ids)
+          if (out.kind === 'no-pending') return downstream
+          // 集合与上次写出去的一致 ⇒ 整段 delta 可丢（但仍推进水位，别永远留在 pending）
+          foldStates.set(sid, out.next)
+          if (out.kind === 'dropped') return downstream
+          const item = noticeContext(out.text, `能力集合 ${snap.ids.length} 项`)
+          // 搭在本就已存在的 append 上 ⇒ 前缀一字未动，只多这几行
+          return { ...downstream, additionalContexts: [item, ...(downstream?.additionalContexts ?? [])] }
+        } catch {
+          return downstream // 通知失败绝不影响工具结果
+        }
+      },
+      { prepend: true },
+    )
+  })
+}
+
 export function apply(ctx: Context, config: Config): void {
   const file = resolveRegistry(config)
 
@@ -228,6 +370,14 @@ export function apply(ctx: Context, config: Config): void {
       }),
     )
   })
+
+  // P4：能力变更通知链路。装不上也不影响本插件与 boot（内部已 try/catch，
+  // 这里再兜一层 —— 通知的收益是"省缓存"，boot 是命脉，代价不对等）。
+  try {
+    installNoticeWiring(ctx, file)
+  } catch (e) {
+    console.warn('[capability-bridge] 通知链路未装上（不影响其它功能）：' + (e as Error).message)
+  }
 
   console.log('[capability-bridge] apply running; registry=' + file)
 }
