@@ -127,3 +127,56 @@ gen 侧改动随下次换代 spawn 的新 gen 生效。
 **任务级上下文隔离的层（子代理 / 委派执行者）不需要换代** ——
 「下一次委派」天然就是蓝绿（in-flight 委派已绑定旧 provider，新委派走新注册表）。
 详见 `self-evolution-design.md`。
+
+### ★★★ 新 seq gap 的真因：换代 **hard-switch** 路径让两代**并发写同一份会话**（我们自己的协议缺口）
+
+用户选 C（查它**为什么新坏**，而不是截断）。查清了，而且这是**当前仍在发生**的问题。
+
+#### 证据（`session-3d8ea18d`，elv，createdAt 14:15:56）
+
+```
+seq=623 tool/call     tool_apply                       ← 这一轮调它触发了蓝绿发布
+seq=624 tool/result
+seq=625..627 step/end, step/start, step/end
+seq=628 turn/end      reason={"kind":"interrupted"}     ← 换代打断该回合
+seq=629 session/end-seed                                ← 旧代"封存结束"
+seq=627 assistant/chunk    ← ★★ seq **回退**：629 之后又回到 627
+seq=628 assistant/chunk
+seq=629 assistant/chunk
+seq=630 assistant/chunk …
+seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户消息"设计画布里面的能力…"）
+```
+
+⇒ 日志里出现 **seq 回退 + 区间重叠**：旧代收尾后**又回头**写 turn 2 step 2 的流式 chunk，
+**同时**新代把用户消息写进同一区间。
+
+#### 机制（我们自己的换代协议）
+
+- fencing 机制**存在且完整**（`handover-protocol.ts`）：`freezeSeq` = 旧代冻结时已落盘的全局最大 seq，
+  新代只能从 ≥freezeSeq 之后 append；`writerToken` 每次授写唯一。
+- **`coordinator.ts:298-308` 有条兜底**：
+  「freeze 活跃代无响应 → 走强切（**省去静态冻结，直接 promote**）」，记录里写作 `(hard-switch, no-freeze)`。
+- ⇒ **硬切时旧代并不知道自己该停写**（它主线程被占 —— 例如正在流式输出）⇒ 继续 append；
+  新代同时从 freezeSeq 之后写 ⇒ **两代并发追加同一文件** ⇒ 回退/重叠。
+
+#### ★ 我的操作是放大器（必须交代）
+
+`?cmd=restart` = **fast 模式**，而 fast **跳过的第一步就是 defer「先请当前活跃代收尾本轮
+（注入挂起提示 + 等 turn/end 或 grace 兜底）」**。⇒ **在"有回合在跑"时发 restart，正是这个竞态的温床。**
+今晚我连发了几次 restart —— 其中若有回合在跑，就可能制造出这种损坏。
+
+**⇒ 建议（操作纪律）**：
+- **不确定有没有回合在跑时，用 `?cmd=handover`（非 fast）**，它会等活跃代收尾。
+- `fast`/`restart` 只用在**确认空闲**时（`?cmd=status` 的 `stage==='idle'` 只是换代状态机空闲，**不代表会话无回合在跑**）。
+
+#### 末闭合：hard-switch 路径应当**先确保旧代停写**再 promote
+
+现在它是"省去静态冻结直接 promote"，等于**允许两个写者并存**。
+候选修法（**未实施**，这是最安全攸关的代码，不在深夜动）：
+① 硬切时**先 SIGKILL 旧代**再 promote；② 或 promote 前短暂等待/确认旧代不再 append；
+③ 或给新代一个 `graceSeq` 窗口，只追加不重复区间。
+
+#### 待办
+
+- `session-3d8ea18d`：**仍未修**（截断会丢 59%）。但已确认**它不阻塞启动**（seq gap 只影响该会话历史）。
+- 建议下一步：**读 `coordinator.ts` 的 hard-switch 分支 + `drain.ts`**，定一个小而安全的修法。
