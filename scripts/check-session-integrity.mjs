@@ -111,48 +111,61 @@ const targets = LIMIT ? files.slice(0, LIMIT) : files
 console.log(`会话体检：${targets.length} / ${files.length} 个${LIMIT ? `（--limit ${LIMIT}）` : ''}${FULL ? '  [全量连续性扫描]' : ''}`)
 console.log('─'.repeat(84))
 
-let nBad = 0
-let nWarn = 0
+let nFrame = 0   // ERROR：阻塞启动
+let nLoad = 0    // WARN：只让那份会话历史打不开
 for (const f of targets) {
   const rel = path.relative(ROOT, f.p)
   const id = path.basename(path.dirname(f.p))
-  const problems = []
+  const frameProblems = []
+  const loadProblems = []
   let buf
-  try { buf = fs.readFileSync(f.p) } catch (e) { problems.push('读文件失败：' + e.message) }
+  try { buf = fs.readFileSync(f.p) } catch (e) { frameProblems.push('读文件失败：' + e.message) }
 
   if (buf) {
     const fc = frameContract(buf)
-    if (!fc.ok) problems.push('帧契约：' + fc.why)
+    if (!fc.ok) frameProblems.push('帧契约：' + fc.why)
     let text = null
-    try { text = Buffer.from(decompress(new Uint8Array(buf))).toString('utf8') } catch (e) { problems.push('整份解不开：' + e.message) }
+    try { text = Buffer.from(decompress(new Uint8Array(buf))).toString('utf8') } catch (e) { frameProblems.push('整份解不开：' + e.message) }
     if (text) {
       const lines = text.split('\n')
       const eventLines = lines.slice(1).filter((l) => l.trim())
       const sc = scanEvents(eventLines, !FULL)
-      if (!sc.ok) problems.push(`seq 不连续：事件行 #${sc.at + 1}（expected ${sc.expected} / got ${sc.got}）⇒ 缺 ${sc.expected - sc.got} 个`)
+      if (!sc.ok) loadProblems.push(`seq 不连续：事件行 #${sc.at + 1}（expected ${sc.expected} / got ${sc.got}）⇒ 缺 ${sc.expected - sc.got} 个`)
       if (FULL && sc.ok) {
         const evs = []
         for (const l of eventLines) { try { for (const ev of decodeStorageRecord(JSON.parse(l))) evs.push(ev) } catch { } }
         const iv = identityViolations(evs)
-        if (iv.length) problems.push(`消息缺身份：${iv.length} 处（首处 seq=${iv[0].seq} ${iv[0].why}）`)
+        if (iv.length) loadProblems.push(`消息缺身份：${iv.length} 处（首处 seq=${iv[0].seq} ${iv[0].why}）`)
       }
     }
   }
 
-  if (problems.length) {
-    nBad++
-    console.log(`  ✗ ${id}`)
-    for (const p of problems) console.log(`      · ${p}`)
-  } else if (!FULL) {
-    nWarn++ // 仅表示"未做全量身份扫描"，不是问题
+  if (frameProblems.length) {
+    nFrame++
+    console.log(`  ✗ ERROR ${id}  ← **会让新代启动失败**`)
+    for (const p of frameProblems) console.log(`      · ${p}`)
+  }
+  if (loadProblems.length) {
+    nLoad++
+    console.log(`  ⚠ WARN  ${id}  ← 只影响这份会话的历史`)
+    for (const p of loadProblems) console.log(`      · ${p}`)
   }
 }
 
 console.log('')
-if (nBad) {
-  console.log(`  ✗ ${nBad} 个会话不合格 —— **它们会让新代启动失败**。`)
-  console.log('    修法：node scripts/repair-session-message-id.mjs <会话目录名> --apply')
-  console.log('          node scripts/repair-session-seq-gap.mjs    <会话目录名> --apply')
-  process.exit(1)
+if (nFrame) {
+  console.log(`  ✗ ${nFrame} 个会话**帧契约坏** —— 这会让新代启动失败（启动时 list() 要读每个会话的第一帧）。`)
+  console.log('    修法见下；**这类必须修**。')
 }
-console.log(`  ✅ ${targets.length} 个会话全部合格${FULL ? '（含全量连续性 + 消息身份）' : '（帧契约 + 连续性；加 --all 做全量）'}`)
+if (nLoad) {
+  console.log(`  ⚠ ${nLoad} 个会话 seq 不连续 / 消息缺身份 —— **不阻塞启动**（实测：这类会话存在时换代仍 success），`)
+  console.log('    只让那一份会话的历史打不开。修不修看你要不要那份历史。')
+}
+if (!nFrame && !nLoad) {
+  console.log(`  ✅ ${targets.length} 个会话全部合格${FULL ? '（含全量连续性 + 消息身份）' : '（帧契约 + 连续性；加 --all 做全量）'}`)
+}
+console.log('')
+console.log('  修法：node scripts/repair-session-message-id.mjs <会话目录名> --apply   # 补身份')
+console.log('        node scripts/repair-session-seq-gap.mjs    <会话目录名> --apply   # 截断（会丢尾部）')
+// 只有"会让新代起不来"的那类才算失败
+process.exit(nFrame ? 1 : 0)

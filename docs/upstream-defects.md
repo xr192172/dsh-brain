@@ -33,6 +33,7 @@
 |---|---|---|---|---|
 | U1 | `goal-round-driver`：`event.data.reason.kind` 缺可选链 | **上游 bug** | ✅ **确认仍在 master** | ✅ 可报（首选） |
 | U2 | `app-boot`：裸 `JSON.parse(readFileSync(...))` 无 BOM 防护 | **上游 bug？** | ⚠️ **待复核**（见 §2.2） | ⏸ 复核后再定 |
+| U3 | `agent-loop`：`isOwned(message)` 不保护 `message.source` ⇒ **长期 flake 真凶** | **上游 bug** | ✅ 代码仍在（见 §2.5） | ✅ 可报（与 U1 同类，**证据更强**） |
 | D1 | `web-app`：`localWebUrl` 把**实例端口**写进 system prompt → 换代必 cache miss | 上游**设计缺口** | ✅ 代码仍在（设计讨论） | ◯ 可作 feature request |
 | D2 | `--dump-config` 不校验插件 config（假绿） | 上游 **UX 缺口** | ✅ 行为已本地实测 | ◯ 可作 feature request |
 | O1 | switchboard 启动健康漏判（保险失效） | **我们自己的** | — | ✗ 不可报 |
@@ -134,6 +135,55 @@ case 'turn/end':
 
 ---
 
+### 2.5 ✅ U3 `agent-loop` 的 `isOwned()` 不保护 `message.source`（长期 flake 真凶）
+
+**症状**（用户可见）：会话报「本轮运行失败 `Cannot read properties of undefined (reading 'kind')`」，
+`reason.error.code = "UNKNOWN"`。**长期无法定位**，触发点凭经验是「**交接时又发了一句话**」。
+
+**根因**（`@deepseek-ai/dsh-agent-loop/lib/index.js`）：
+
+```js
+// :34-38  RuntimeContextProjection 构造时**倒序遍历会话里所有 user/message**
+for (let index = session.events.length - 1; index >= 0; index -= 1) {
+  const event = session.events[index];
+  if (event?.type !== "user/message" || !isOwned(event.data)) continue;   // ← 崩在这
+  ...
+
+// :18-20
+function isOwned(message) {
+  return message.source.kind === "plugin" && message.source.plugin === SOURCE;
+}                                    // ↑ message.source === undefined ⇒ reading 'kind'
+```
+
+⇒ **任何一条没有 `source` 的 `user/message`** 都会让它抛错。
+
+**实测闭环**（扫全部会话日志，2026-09-15）：
+
+| 项 | 值 |
+|---|---|
+| 出现该 flake 的会话 | **12 个** |
+| 其中同时含「缺 `source` 的注入消息」的 | **12 个（100% 相关）** |
+| 有该消息但未触发 flake 的 | 1 个（坏注入在日志末尾，之后没再开新轮次 ⇒ 未重建投影） |
+
+**触发条件**（与用户经验完全一致）：
+① **交接时**由 `switchboard` 往 `next-step` inbox 注入「【系统通知】环境即将热重载…」
+（该消息当时**只有 `role` + `content`**）→ ② 之后**开一轮新的**（`turn/start`）→
+③ agent 重建 `RuntimeContextProjection` → 倒序扫到那条消息 → **抛错**。
+
+⇒ 恰好解释四个现象：只在交接时；「用户又发一句话」会触发；**新会话没问题**；
+**一直查不出来**（崩溃点离注入点隔了两个包，且原代码**丢掉堆栈**）。
+
+**我们这半边已修**：`packages/switchboard/src/index.ts` 的 `injectedUserMessage()`
+给注入消息带上 `id` 与 `source: {kind:'plugin', plugin:'switchboard'}`。
+
+**但历史日志里的坏消息仍在** ⇒ 重放仍会崩 ⇒ 故同时把 `isOwned` 改成 `message?.source?.kind`。
+
+> **独有价值（上报时的加分项）**：我们能给出**100% 相关的统计证据**（12/12），
+> 并且触发场景（蓝绿交接 + 注入）是上游测试大概率覆盖不到的真实边界。
+
+**建议修法**：`return message?.source?.kind === "plugin" && message.source.plugin === SOURCE;`
+（对"不是自己的消息"本来也该返回 false —— 不该假设 `source` 存在。）
+
 ## 3. 如果决定上报：建议的报告形状
 
 按上游 `.agents/notes/bug-fix/` 的既有约定写（他们自己就是这么记缺陷的）：
@@ -192,6 +242,7 @@ loader 传 `undefined` ⇒ 抛 `ValidationError` ⇒ **整棵插件树装配失�
 |---|---|
 | `scripts/patch-goal-round-driver.mjs` | U1 |
 | `scripts/patch-app-boot-bom.mjs` | U2（待复核） |
+| `scripts/patch-agent-loop-hardening.mjs` | **U3**（`isOwned` 保护 + 非 LLM 错误留堆栈） |
 | `scripts/patch-web-app-public-url.mjs` | D1 |
 | `scripts/check-config-tolerance.mjs` / `probe-config-resolveconfig.mjs` | O2 |
 | `patches/@deepseek-ai+dsh-compaction-basic+0.1.1-rc.2.patch` | O3 |
