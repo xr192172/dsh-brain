@@ -161,8 +161,15 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   （默认根用 `import.meta.url` 上溯，不依赖 cwd）；CI 加 `archify doctor` 自检。
   ⇒ **修掉了两个长期病灶**：CI 永远验不到这条链路 + 宿主环境变量污染测试。
 - **★ R5 诊断修正：`sequence`/`dataflow`/`lifecycle` 三类不合格**（不是早先说的两类 ——
-  那次数的是 Downloads 陈旧副本）。溢出量：sequence 1586(+76%) / dataflow 1302(+45%) /
-  lifecycle 1245(+38%)，全部 `viewer/viewport-overflow`。**未决：等用户拍板处置**。
+  那次数的是 Downloads 陈旧副本）。溢出：sequence 1586(+76%) / dataflow 1302(+45%) /
+  lifecycle 1245(+38%)，全部 `viewer/viewport-overflow`。
+- **★ R5 已挂起 ✅**（commit `dbd7e6a`，用户拍板「保留在仓内、暂不开发、别影响后续」）：
+  处置 = **挂起**（不删、不屏蔽）；单点开关 `DC_R5_SKIP=1`（默认**照跑**，保留回归保护）；
+  4 个 R5 测试文件 28 项接入 `r5Describe`；`test:main`/`test:r5` 脚本；CI `doctor` 加 `if`。
+  **挂起 ≠ 免责**：`view_inputs.test.ts`（中性层，主线资产）与 `contract.test.ts`+`contract.ts`
+  的 `archify-demo`（对外契约）**仍受 CI 保护**，没挂。文档 `docs/r5-archify-hung.md`。
+  ⇒ **R5 手尾已处理干净，可以放心回主线**。
 - **纪律沉淀**：**用"仓外副本 + 环境变量"做基线诊断 ⇒ 诊断结论本身不可信**；
-  本机 `find` 不可信（报错后返回 0）⇒ 统计走 node；`node -e` 里反引号会被 bash 抢 ⇒ 写文件再跑。
+  本机 `find` 不可信（报错后返回 0）⇒ 统计走 node；`node -e` 里反引号会被 bash 抢 ⇒ 写文件再跑；
+  **design-canvas 的 `docs/*` 被 gitignore（发布划界）⇒ 新文档必须 `git add -f`**。
 

@@ -154,3 +154,21 @@ P2-b 重启验证｜P3 注册门。**实践纪律**：**换代由用户自己发
 >    本机 `find` 报错后返回 **0 是假的** ⇒ 统计一律走 node；`node -e` 里反引号被 bash 抢 ⇒ **写文件再跑**。
 > ⑤ **下一步回到主线：P1-7「修复→规则沉淀」**（设计已按 Grit 校准：md 载体 + `$hole` 元变量 +
 >    CI ratchet + `todo()` 部分修 + **反例夹具（我们的差异化）** + 萃取动作）。
+>
+> **★ 09-15 傍晚 ②：R5 挂起**（design-canvas 提交 `dbd7e6a`）—— 用户拍板「保留在项目里、
+> 暂时不管、别影响后续开发」。处置 = **挂起**（不删、不屏蔽），把首尾处理干净：
+> - 单点开关 `tests/helpers/r5_gate.ts` 的 `r5Describe()`：**默认照跑**（保留回归保护），
+>   `DC_R5_SKIP=1` ⇒ 整线 skip 且**组名带标记（报告可见，非静默消失）**。
+>   ★ 为什么默认是"跑"：静默跳过会隐瞒问题（本项目最反对"静默给旧答案"）。
+> - 4 个 R5 测试文件（**28 项**）接入；`package.json` 加 `test:main` / `test:r5`；
+>   `ci.yml` 的 `archify doctor` 加 `if: DC_R5_SKIP != '1'`。
+> - ★ **挂起 ≠ 免责**：**没有**挂起 \`view_inputs.test.ts\`（测**中性数据层**，属主线资产）
+>   与 \`contract.test.ts\` + \`contract.ts\` 的 \`archify-demo\`（**对外契约**，契约闸门照管）。
+> - 核实耦合面：\`/api/archify-demo\` 是**纯 API、零前端调用** ⇒ 不会造成 UI 可见故障。
+> - 验证：默认 2075 passed/32 skipped/**0 failed**；\`DC_R5_SKIP=1\` 2047 passed/60 skipped/**0 failed**
+>   （差值正好 28）；三闸门 exit 0。
+> - 文档：\`docs/r5-archify-hung.md\`（R5 是什么/三层归属/为何挂起/开关/边界/恢复步骤/互不干扰约定）。
+>
+> **★ design-canvas 新增环境约束**：**\`.gitignore:101\` 有 \`docs/*\`（发布划界）⇒
+> 新文档必须 \`git add -f\` 才进库**（既有 4 篇 docs 亦如此）。
+> **Git Bash 里 \`node -e\` 带正则/反引号会被 bash 抢插值 ⇒ 脚本写文件再跑**（已固化两次）。
