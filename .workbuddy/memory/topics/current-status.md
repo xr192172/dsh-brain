@@ -710,3 +710,57 @@ C 段（端到端折叠）需要 **DSH 侧的 agent 调一次工具**，因为�
 ⇒ 只要**在 DSH 侧（3080）让 agent 调一次工具**，链路应当：
 `session/event` 记一次变更 → 下一条 tool result 挂上 `additionalContexts` 通知。
 之后重跑 `npm run verify:p4`，C 段应出现 `capability/change ≥ 1` 与「能力集合已更新」。
+
+## 2026-09-15 深夜：诊断「elv 窗口上下文崩坏」
+
+用户报：除当前项目外最新的那个窗口**上下文又崩坏了**。
+
+### 两条**排除**（都有数据）
+
+1. **不是日志损坏**：扫全部 29 个会话，**29/29 都能正常解压解析，0 失败**。
+2. **不是我刚加的东西**：**没有任何会话含 `capability/change`**（新事件类型还没往日志写过）。
+
+### ★ 我自己的又一次假红（记下来）
+
+我一度把「`seq` 范围 0..1803 但只有 333 个事件（33 处缺口）」读成"丢了事件 ⇒ 上下文崩坏"。
+**是误读**：扫全部 29 个会话，**26 个都是稀疏的**（密度 10~36%），且各会话 max seq 互不衔接
+⇒ **`seq` 是全局/进程级计数器，不是每会话单调** ⇒ **缺口是正常的**。
+⇒ 教训：**判"异常"之前先看它在同类样本里是不是常态**（基线意识），否则又是假红。
+
+### ★★ 根因：**是我们自己**在 09-14 把默认 preset 换成了 Code Mode 版
+
+| # | 事实 |
+|---|---|
+| ① | `~/.dsh/.agent-presets/code-council/` **09-14 13:40 创建**（`scripts/add-preset-council.mjs`） |
+| ② | 其 `agent.cordis.yml` = 上游 **`code` preset 的副本**，文件头自述「presented as **Code Mode**」 |
+| ③ | `~/.dsh/settings.yaml`：`agent-presets.default: **code-council**`（同刻） |
+| ④ | ⇒ **09-14 起所有新窗口都是 Code Mode**（实测：tools=1、system 76632~81793 字符） |
+| ⑤ | 而 **09-03~09-13 的窗口都是 Native/Dual**（tools 27~102、system 6445~18020） |
+
+tools 数时间线（29 个会话实测）：09-13 14:33 = 94 / 18:05 = 95（Native）；
+**09-14 04:44 起全部 = 1（Code Mode）**；09-15 12:34（elv）= 1，system **81793**（历史最大）。
+
+**症状原文**（elv 会话 `session-faeac7ca`，错误码 `UNKNOWN_TOOL:4 / CODE_RUN_FAILED:4 / INVALID_ARGS:1`）：
+```
+Error: unknown tool "pwsh": only `run_code` is callable directly — call `pwsh` from inside a `run_code` program instead
+Error: unknown tool "read": only `run_code` is callable directly …
+Error: code run failed (exception): 'import', and 'export' cannot be used outside of module code
+Error: code run failed (exception): Expected ';', '}' or <eof>
+```
+⇒ **模型（agnes-2.5-flash）反复直接调 `pwsh`/`read`（Code Mode 下不可直调），又写不出合法 JS。**
+⇒ 那个窗口"看起来崩坏"= **Code Mode 与模型能力不匹配**。
+（对照：dsh-brain 的大会话也有 `UNKNOWN_TOOL:12 / CODE_RUN_FAILED:3` ⇒ 不是 elv 独有。）
+
+### 修法选项（**未擅自改** —— 这是面向用户的设置）
+
+- **(a) 把 `agent-presets.default` 改回非 Code 的**（如上游 `standard`）⇒ 新窗口回到 Native
+- **(b) 另造一个基于 `standard` 的 `council` preset**，保留议事厅但不用 Code Mode
+- **(c) 不动默认**，只是开窗口时手选别的 preset
+
+**待用户拍板。** 注意 09-14 那次是有意为之（为了用 council-architect），
+所以这不是"回退错误"，而是"要不要让**默认**也变成 Code Mode"。
+
+### 待确认
+
+用户说"上下文崩坏"的**界面具体表现**是什么？（一直报错 / 历史消息乱掉 / 空白 / 答非所问）
+—— 我的诊断指向"一直报错做不成事"，但要与用户实际所见对齐才算闭环。
