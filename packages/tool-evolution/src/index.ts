@@ -39,7 +39,19 @@ export interface Config {
   /** 每个工具保留的 LLM 评语条数上限。 */
   maxReviews: number
 }
-export const Config = z.object({ maxReviews: z.number().int().min(1).default(8) })
+/**
+ * ★ 容错包装（2026-09-15）：缺 `config:` 块时 loader 传 `undefined`，裸 `z.object({...})`
+ * 抛 `ValidationError: expected object, received undefined` ⇒ 插件树装配失败、gen 起不来。
+ * 详见 `scripts/check-config-tolerance.mjs` 的说明与实测表。
+ * 不要改用 `.default({})` —— 它短路内层解析、返回字面量 `{}`，使所有字段变 `undefined`。
+ */
+function tolerantConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return z.preprocess((v) => v ?? {}, schema)
+}
+
+export const Config = tolerantConfig(
+  z.object({ maxReviews: z.number().int().min(1).default(8) }),
+)
 
 const empty = (): ToolEvolState => ({ tools: {}, seq: -1 })
 

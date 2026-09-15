@@ -73,15 +73,27 @@ export interface Config {
   kernelDir: string
 }
 
-export const Config = z.object({
-  enabled: z.boolean().default(true),
-  serverName: z.string().default('design-canvas'),
-  maxFiles: z.number().int().min(1).max(10000).default(300),
-  includeTests: z.boolean().default(false),
-  includeArchive: z.boolean().default(false),
-  designMode: z.boolean().default(false),
-  kernelDir: z.string().default(''),
-})
+/**
+ * ★ 容错包装（2026-09-15）：缺 `config:` 块时 loader 传 `undefined`，裸 `z.object({...})`
+ * 抛 `ValidationError: expected object, received undefined` ⇒ 插件树装配失败、gen 起不来。
+ * 详见 `scripts/check-config-tolerance.mjs` 的说明与实测表。
+ * 不要改用 `.default({})` —— 它短路内层解析、返回字面量 `{}`，使所有字段变 `undefined`。
+ */
+function tolerantConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return z.preprocess((v) => v ?? {}, schema)
+}
+
+export const Config = tolerantConfig(
+  z.object({
+    enabled: z.boolean().default(true),
+    serverName: z.string().default('design-canvas'),
+    maxFiles: z.number().int().min(1).max(10000).default(300),
+    includeTests: z.boolean().default(false),
+    includeArchive: z.boolean().default(false),
+    designMode: z.boolean().default(false),
+    kernelDir: z.string().default(''),
+  }),
+)
 
 /** 从规范路径取一个 import_project 可用的 feature 名（只允许 [a-zA-Z0-9_-]）。 */
 function featureNameFrom(canonicalPath: string): string {

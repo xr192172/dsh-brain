@@ -63,7 +63,7 @@ if (cmd === 'handover' || cmd === 'apply') { ... }
 | P0 | 与换代的关系 | 状态 |
 |---|---|---|
 | **端口击穿**：system prompt 里嵌 gen 实例端口（3082~3089），换代迁移 → 端口变 → 首轮命中率 **0%**（`28f50f57` 迁移 13 次） | 换代**引入**的代价 | 已修（`DSH_PUBLIC_WEB_URL` → 固定为前门 3080） |
-| **插件树部分加载失败** → 工具少 25 个、Code Mode 静默回落 native、模型要靠试探发现环境 | 换代把会话**搬到坏实例** | 已修（单一来源化 + verify 启动健康检查） |
+| **插件树部分加载失败** → 工具少 25 个、Code Mode 静默回落 native、模型要靠试探发现环境 | 换代把会话**搬到坏实例** | 已修（单一来源化 + verify 启动健康检查）<br>⚠️ 其中健康检查于 **2026-09-15 二次修复**：09-14 那版是**假修复** —— 判据对但**读日志太早**（崩溃文本比 `success` 晚 637ms 落盘），gen-3083 仍被放行。现改为 `boot-health.ts` 的有界等待 + 正向完成信号要求，见 `docs/gen-plugin-tree-partial-failure.md` §0.1 |
 | **BOM 崩 gen**：`SyntaxError: Unexpected token` → 新 gen 起不来 | 换代时新代起不来 | 已修（4 处解析统一防护 + 守卫） |
 
 **所以"换代不好用"的感受，主要来自"换代的保险没装好"**——而不是"换代这件事没价值"。
@@ -80,7 +80,13 @@ if (cmd === 'handover' || cmd === 'apply') { ... }
 |---|---|---|---|---|---|
 | **L1 热重载** | 反复调 UI / client bundle | `pnpm run dev:web` + `client-hmr`（已常驻） | 无 | —— | 无 |
 | **L2 重启** | **日常插件业务代码改动** | 重启 switchboard（可做成一条命令） | 有（秒级） | 靠 git | 无 |
-| **L3 换代** | **内核机制 / 插件树组合 / profile 配置 / 判据自身**的改动 | `?cmd=handover` 或 `scripts/evolve.mjs` | 无 | ✅ `rollbackFlip` | probe + 启动健康检查 + verify 闸 |
+| **L3 换代** | **内核机制 / 插件树组合 / profile 配置 / 判据自身**的改动 | `?cmd=handover` 或 `scripts/evolve.mjs` | 无 | ✅ `rollbackFlip` | probe + 启动健康检查（有界等待 + 正向信号）+ verify 闸 |
+
+> **★ fast 与"启动健康检查"是两条独立防线（2026-09-15 澄清）**：
+> fast 跳过的是**稳定观察窗**（`verifyStableMs`），而稳定窗只重探 `probe`（"进程还活着吗"）——
+> 它**不覆盖"日志落盘了吗"**。gen-3083 事故恰好发生在 **fast 路径**上：进程当时确实还活着
+> （probe 会通过），崩溃文本 637ms 后才落盘。⇒ 健康检查的有界等待与 `verifyStableMs` **正交**，
+> fast 模式**不得跳过**（现实现亦未跳过；另有 `SWITCH_BOOT_HEALTH_TIMEOUT_MS` 可调窗口）。
 
 **分工的判据只有一句**：**这次改动坏了，会不会立刻被发现？**
 

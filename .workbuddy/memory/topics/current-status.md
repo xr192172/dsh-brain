@@ -147,6 +147,32 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
 
 ## 2026-09-15 增补
 
+- **① verify-boot-health 漏判 ✅ 已修**（2026-09-15 下午）：抽成 `packages/switchboard/src/boot-health.ts`。
+  根因**不是判据错、是读得太早**（崩溃文本比 `result:success` 晚 **637ms** 落盘；旧实现读一次就定论）。
+  修法 = **有界等待重读**（6s）+ **要求正向完成信号** `dsh web: http://127.0.0.1:<port>`
+  （实测 10 个真实启动段 9 个有它，唯一没有的正是崩溃段 ⇒ 零误报的精确判别器）；
+  三态 `healthy/fatal/unknown`，**`unknown` 同等回滚**；新增 3 条裸根因模式 +
+  确定性死亡信号 `proc.exitCode !== null`（无竞态）优先于 `kill(pid,0)`。
+  **关键澄清**：`fast` 跳过的稳定窗只重探 probe（崩溃前进程确实还活着），
+  **不覆盖"日志落盘了吗"** ⇒ 健康检查与 `verifyStableMs` 正交，fast 不得跳过。
+  验证：`scripts/test-boot-health.mjs` 32 项全通 + `scripts/verify-boot-health-on-real-3083.mjs`
+  在真实日志上跑（落盘前 → unknown 拦截；完整 → fatal 早退）；
+  对照实验：**旧判据=健康放行，新判据=回滚**。文档 §0.1 已诚实化（原"已修"是假修复）。
+- **② 插件 schema 无配置健壮性 ✅ 已修**（2026-09-15 傍晚）：6 个 zod 包的 `Config`
+  套上 `tolerantConfig` = `z.preprocess(v => v ?? {}, schema)` ⇒ **缺 `config:` 块不再炸插件树**
+  （`subagent-council` 用 schemastery，原生容忍，未改）。
+  三个反直觉点：裸 `z.object` + undefined ⇒ **抛 ValidationError**（gen-3083 原事故，真机复现 2 REJECT）；
+  `.default({})` 是**更坏的假修复**（返回字面量 `{}`、短路内层解析、全字段变 undefined，静默降级）；
+  `preprocess` 才是正解（默认值生效 **且类型错仍拒绝**）。
+  ★ **认知修正**：`npm run check:profile`（`--dump-config`）**不校验插件 config** ——
+  删掉 `config:` 仍 EXIT=0/579 行（它只组装打印文本，不实例化插件、不调 `resolveConfig`）。
+  产物：`scripts/check-config-tolerance.mjs`（**56 项**，经 **cordis 真实 `resolveConfig`**）
+  + `scripts/probe-config-resolveconfig.mjs`（真机探针）；门禁已**回归自证非空过**
+  （换回裸 z.object ⇒ EXIT=1 指名 `缺 config（undefined）`）。
+  写门禁踩到两个"空过"坑：`.default({})` 返回的 `{}` **没有值为 undefined 的字段**（须做**键集合比对**）；
+  `z.preprocess` 编成 **pipe**、内层在 `def.out`（内省须下钻，否则 zod **忽略未知键** ⇒ 假通过）。
+- **下一项：P3 注册门** → 之后 ④ 边界扩展（拍板缓）。
+
 - **P0-4 模糊编辑级联 ✅**（commit `2db7aae`）：`src/tools/fuzzy_match.ts` 四级定位
   （L1 逐字 → L2 空白归一 → L3 缩进弹性 → L4 省略号占位），**只做 `replace_text`**
   （其余 op 走 AST/显式行号天然不模糊）；纪律=歧义即停+唯一才动；诚实回执（级别进消息）。

@@ -214,6 +214,10 @@ if (isMain) {
     deferMs: envInt('SWITCH_DEFER_MS', 20_000),
     // verify 稳定观察窗口（ms）：flip 后再稳 2s 并二次探测，拦"probe 假 ok、稍后崩"的假成功
     verifyStableMs: envInt('SWITCH_VERIFY_STABLE_MS', 2_000),
+    // 启动健康检查有界等待窗口（ms，默认 6s）：boot.log 是跨进程异步产物，崩溃文本可能
+    // 比 flip 晚数百 ms 才落盘（gen-3083 实测 637ms；崩溃本身 3.4s）⇒ 必须轮询重读，
+    // 直到出现正向完成信号 / 命中致命模式 / 窗口耗尽。**fast 模式同样适用。**
+    bootHealthTimeoutMs: envInt('SWITCH_BOOT_HEALTH_TIMEOUT_MS', 6_000),
     // 可选验证闸（自进化·实验脑）：verifyCmd 非空则 staging 须跑该命令且 ok 才 flip。
     ...(envStr('VERIFY_CMD', '') ? { verifyCmd: envStr('VERIFY_CMD', '') } : {}),
     // 安全白名单：VERIFY_ALLOW=<path1>;<path2>...（verifyCmd 脚本须落在其中某目录前缀内）

@@ -40,8 +40,18 @@ export interface Config {
 // schemastery-style default schema（插件可仅用 zod 浅校验，DSH 不强制本包用 schemastery）
 import { z } from 'zod'
 
-export const Config = (() => {
-  const s = z.object({
+/**
+ * ★ 容错包装（2026-09-15）：缺 `config:` 块时 loader 传 `undefined`，裸 `z.object({...})`
+ * 抛 `ValidationError: expected object, received undefined` ⇒ 插件树装配失败、gen 起不来。
+ * 详见 `scripts/check-config-tolerance.mjs` 的说明与实测表。
+ * 不要改用 `.default({})` —— 它短路内层解析、返回字面量 `{}`，使所有字段变 `undefined`。
+ */
+function tolerantConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return z.preprocess((v) => v ?? {}, schema)
+}
+
+export const Config = tolerantConfig(
+  z.object({
     poolEnv: z.string().default('AGNES_KEY_POOL'),
     fallbackEnvs: z.array(z.string()).default([]),
     upstreamBase: z.string().default('https://apihub.agnes-ai.com'),
@@ -49,9 +59,8 @@ export const Config = (() => {
     cooldownMs: z.number().int().min(0).default(15000),
     maxRetries: z.number().int().min(0).default(3),
     retryStatuses: z.array(z.number().int()).default([429, 500, 502, 503, 504]),
-  })
-  return s
-})()
+  }),
+)
 
 /** 从主池 + 回退池读取去重 key 列表。 */
 function loadPool(config: Config): string[] {

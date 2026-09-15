@@ -32,10 +32,28 @@ export interface Config {
   /** list_capabilities 单次最多列几条 */
   maxRows: number
 }
-export const Config = z.object({
-  registryPath: z.string().default(''),
-  maxRows: z.number().int().min(1).default(50),
-})
+/**
+ * ★ 容错包装（2026-09-15）：缺 `config:` 块时 loader 传 `undefined`，
+ * 裸 `z.object({...})` 会抛 `ValidationError: expected object, received undefined`
+ * ⇒ **整棵插件树装配失败、gen 启动即 EXIT code=1**（2026-09-14 gen-3083 实事故）。
+ *
+ * 为什么不能只靠字段的 `.default()`：那些默认值只在"对象存在但缺键"时生效，
+ * 对"对象本身是 undefined"不生效。也**不要**用 `.default({})` —— 它看似修好，
+ * 实则短路内层解析、返回字面量 `{}`，让所有字段变成 `undefined`（更隐蔽的坏）。
+ *
+ * `preprocess` 归一化：`undefined`/`null` → `{}` → 内层默认值照常生效；
+ * 而**类型错误仍然报错**（不是无脑吞掉配置）。
+ */
+function tolerantConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return z.preprocess((v) => v ?? {}, schema)
+}
+
+export const Config = tolerantConfig(
+  z.object({
+    registryPath: z.string().default(''),
+    maxRows: z.number().int().min(1).default(50),
+  }),
+)
 
 function resolveRegistry(config: Config): string {
   if (config.registryPath && config.registryPath.trim()) return config.registryPath.trim()

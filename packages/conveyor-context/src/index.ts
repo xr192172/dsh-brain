@@ -37,13 +37,25 @@ export interface Config {
   enableCodeModePrompt: boolean
 }
 
-export const Config = z.object({
-  foldEveryTurns: z.number().int().min(1).default(6),
-  maxKeptFacts: z.number().int().min(1).default(32),
-  maxFolds: z.number().int().min(1).default(40),
-  enableValueRules: z.boolean().default(true),
-  enableCodeModePrompt: z.boolean().default(true),
-})
+/**
+ * ★ 容错包装（2026-09-15）：缺 `config:` 块时 loader 传 `undefined`，裸 `z.object({...})`
+ * 抛 `ValidationError: expected object, received undefined` ⇒ 插件树装配失败、gen 起不来。
+ * 详见 `scripts/check-config-tolerance.mjs` 的说明与实测表。
+ * 不要改用 `.default({})` —— 它短路内层解析、返回字面量 `{}`，使所有字段变 `undefined`。
+ */
+function tolerantConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
+  return z.preprocess((v) => v ?? {}, schema)
+}
+
+export const Config = tolerantConfig(
+  z.object({
+    foldEveryTurns: z.number().int().min(1).default(6),
+    maxKeptFacts: z.number().int().min(1).default(32),
+    maxFolds: z.number().int().min(1).default(40),
+    enableValueRules: z.boolean().default(true),
+    enableCodeModePrompt: z.boolean().default(true),
+  }),
+)
 
 /**
  * 价值选择指令（内联标记 + 折叠前回顾）。通过 ctx.systemPrompt.context 作为

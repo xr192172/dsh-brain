@@ -48,6 +48,10 @@
    → **gen 启动即 EXIT code=1**；**而换代接口仍报 `success`（静默失败！）**。
    ⇒ 换代后别只看 `?cmd=result`，必须看 `~/.dsh/switchboard/gen-*/boot.log` 与 `crash-investigation/`。
    （2026-09-14 实测：`capability-bridge` 漏 config，gen-3083 崩溃；7 个 `@dsh-brain/*` 包现已全部显式写。）
+   **〔2026-09-15 更新〕** 6 个 zod 包已套 `z.preprocess(v => v ?? {}, schema)` ⇒ **漏写也不再致命**；
+   但**显式写仍是推荐**（配置值要摆在明面上）。**且 `npm run check:profile` 不校验插件 config**
+   （`--dump-config` 只组装打印配置文本，不实例化插件）⇒ 别拿它当配置正确性的判据，
+   用 `scripts/check-config-tolerance.mjs` 或真启动。
 
 ## 主题索引（**按需读**）
 
@@ -125,7 +129,33 @@ P2-b 重启验证｜P3 注册门。**实践纪律**：**换代由用户自己发
 > **方向拍板（2026-09-15 中午，用户定）**：先做完 design-canvas 方向再挪 DSH 底座——
 > 顺序 = ~~⑤ 预热直连 L1a~~（✅ 0f5731c）→ ~~P0-4 模糊编辑级联~~（✅ `2db7aae`）→
 > ~~**P1-7「修复→规则沉淀」**~~（✅ `340e476`，09-15 下午）；
-> 之后才轮到 verify-boot-health 漏判修复 + 插件 schema 无配置健壮性 + P3 注册门。
+> 之后才轮到 ~~verify-boot-health 漏判修复~~（✅ 09-15 下午）+ ~~插件 schema 无配置健壮性~~
+> （✅ 09-15 傍晚）+ **P3 注册门（下一项）**。
+> **插件配置健壮性要点（09-15 傍晚）**：6 个 zod 包 `Config` 套 `tolerantConfig`
+> = `z.preprocess(v => v ?? {}, schema)` ⇒ 缺 `config:` 不再炸插件树；schemastery 的
+> `subagent-council` 原生容忍（未改）。三个反直觉点：裸 `z.object`+undefined ⇒ 抛 `ValidationError`
+> （真机复现）；**`.default({})` 是更坏的假修复**（返回字面量 `{}`、短路内层解析、全字段
+> 变 undefined）；`preprocess` 正解（默认值生效**且类型错仍拒绝**）。
+> ★ **认知修正**：`npm run check:profile`（`--dump-config`）**不校验插件 config** ——
+> 删掉 `config:` 仍 EXIT=0/579 行。⇒ "check:profile 绿 ⇒ 配置没问题"是错误推论；
+> 该类 bug 只由 `scripts/check-config-tolerance.mjs`（56 项，经 **cordis 真实 `resolveConfig`**）
+> 或真启动发现。写门禁两大空过坑：`.default({})` 的 `{}` **没有值为 undefined 的字段**
+> （须**键集合比对**）；`z.preprocess` 编成 **pipe**、内层在 `def.out`（须下钻内省，
+> 否则 zod **忽略未知键** ⇒ 假通过）。
+> **verify-boot-health 修复要点（09-15 下午）**：根因**不是判据错、是读得太早** ——
+> 崩溃文本比 `result:success` 晚 **637ms** 落盘，旧实现「读一次 boot.log + 纯否定式」必然漏判。
+> 抽成 `packages/switchboard/src/boot-health.ts`：① 有界等待重读（6s，实测 3.41s 的 1.75×）；
+> ② **要求正向完成信号** `dsh web: http://127.0.0.1:<port>`（实测 10 个真实启动段 9 个有，
+> 唯一没有的正是崩溃段 ⇒ 零误报判别器）；③ 三态 `healthy/fatal/unknown`，**`unknown` 同等回滚**；
+> ④ 新增 `invalid config`/`ValidationError`/`Node.js v<x>` 三条裸根因 +
+> `proc.exitCode !== null`（内核回填，无竞态）优先于 `kill(pid,0)`。
+> **★ 关键澄清**：`fast` 跳过的 `verifyStableMs` 稳定窗只重探 `probe`（"进程还活吗"）——
+> 崩溃前进程**确实还活着**，探得通；它**不覆盖"日志落盘了吗"**。⇒ 健康检查与稳定窗**正交**，
+> `fast` 不得跳过（`SWITCH_BOOT_HEALTH_TIMEOUT_MS` 可调）。**事故恰发生在 fast 路径。**
+> 验证：`scripts/test-boot-health.mjs`（32 项）+ `scripts/verify-boot-health-on-real-3083.mjs`
+> （真实日志上跑：落盘前→unknown 拦截／完整→fatal 早退）；对照实验 = **旧判据放行、新判据回滚**。
+> **通用教训**：对"异步落盘的外部证据"一次性读取 = 必然竞态；纯否定式判据无法区分
+> 「干净」与「事实还没产生」；两者叠加 = **静默放行**（最危险的失败）。修法 = 有界等待 + 正向证据。
 > **P1-7 要点**：规则 = 自包含 `.md`（frontmatter + 说明 + ```pattern/```replace +
 > `##` 正/反例夹具段），住 `<project>/.design-canvas/rules/`；工具 3 个
 > （`export_rule`/`apply_rules`/`check_rules`，均 `wrapData`）；

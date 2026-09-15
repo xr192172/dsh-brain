@@ -7,11 +7,14 @@
 #   走的是同一条路，实测工具确实出现在模型手里。
 #
 # ⚠️ 不要再在 profile 的 cordis.patch.yml 里写同 id 的覆盖块 —— duplicate loader entry id。
-# ⚠️ config 块必须显式写：本插件的 Config 是 `z.object({...})`，
-#    缺 config 时 loader 传 undefined → zod 校验失败（expected object, received undefined）
-#    → 整个 gen 启动即 EXIT code=1（2026-09-14 实测，且 swap 仍报 success）。
-#    其余四个 @dsh-brain 插件（tool-evolution / conveyor-context / design-canvas-bridge /
-#    subagent-council）都显式写了 config，本包此前漏了。
+#
+# ✅ 关于 config 块（2026-09-15 已加固）：
+#    本插件的 Config 现为 `z.preprocess(v => v ?? {}, z.object({...}))`，
+#    **缺 config 时不再崩**（loader 传 undefined → 归一化为 {} → 默认值生效）。
+#    历史上这里是 `z.object({...})`，缺 config 会抛 `expected object, received undefined`
+#    → 整棵插件树装配失败 → gen 启动即 EXIT code=1（2026-09-14 事故）。
+#    现在 7 个 @dsh-brain 包全部做了同样加固，门禁：`scripts/check-config-tolerance.mjs`。
+#    下面显式写 config 仍保留 —— 不是必需，而是**把生效值摆在明面上**便于阅读与调参。
 - insert:
     - id: capability-bridge
       name: '@dsh-brain/capability-bridge'

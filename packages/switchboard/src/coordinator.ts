@@ -14,6 +14,7 @@ import { request as httpRequest } from 'node:http'
 import { LeaseStore } from './lease.js'
 import type { FrontDoor } from './proxy.js'
 import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
+import { verifyBootHealth, lastBootSegment } from './boot-health.js'
 import { AdminClient } from './adminclient.js'
 import { writeOverlay } from './overlay.js'
 import type { GenInstance, HandoverStage, StateRecord, FreezeReply } from './handover-protocol.js'
@@ -37,6 +38,15 @@ export interface CoordinatorConfig {
   deferMs: number
   /** verify 稳定观察窗口：flip 后 probe ok 仍需稳定存活该毫秒数（再探一次成功）才判定成功，拦截"probe 假 ok、稍后进程才崩"的假成功。 */
   verifyStableMs: number
+  /**
+   * 启动健康检查的有界等待窗口 ms（2026-09-15 新增，默认 6000）。
+   *
+   * 为什么需要：boot.log 是**跨进程异步产物**，落盘时机不可控 —— gen-3083 的崩溃文本
+   * 比 `result:success` **晚 637ms** 才写到磁盘，读一次必然读到"还没写完"的干净段。
+   * 窗口内轮询重读，直到出现正向完成信号（健康）／命中致命模式（失败，早退）／窗口耗尽
+   * （欠证据，按失败处理）。**fast 模式同样适用**（它跳过的是耗时项，不是判据）。
+   */
+  bootHealthTimeoutMs?: number
   /** 可选验证闸（自进化·实验脑）：非空时，staging 除探活外还须跑该命令且返回 ok 才 flip。默认空=只探活。 */
   verifyCmd?: string
   /** 安全白名单：verifyCmd 指向的可执行/脚本的绝对路径（目录前缀匹配）。不在白名单 → 拒绝执行并回滚（安全失败）。 */
@@ -166,6 +176,12 @@ export class Coordinator {
    *   · probe（端口通、进程活）
    *   · 启动健康检查（本次启动无插件树装载失败 —— 拦截"环境漂移"）
    *   · rollbackFlip（旧代尚在，回滚是免费的）
+   *
+   * ★ fast 与健康检查的关系（2026-09-15 修正认知）：fast 跳过的是 **③ 稳定观察窗**，
+   * 而稳定观察窗只重探 `probe`（"进程还活吗"）—— 它**不覆盖**"日志落盘了吗"。
+   * gen-3083 事故恰好发生在 **fast 路径**上：进程当时确实还活着（probe 会过），
+   * 崩溃文本 637ms 后才落盘，于是被判 ok。⇒ 健康检查的**有界等待**是独立机制，
+   * 与 `verifyStableMs` 正交，fast 模式不得跳过（现实现亦未跳过）。
    *
    * 定位：日常插件业务代码改动走 fast；内核机制 / 插件树组合 / profile 配置 / 判据自身的改动
    * 走完整路径（见 docs/handover-vs-restart.md 的三级替换策略）。
@@ -336,21 +352,40 @@ export class Coordinator {
       return this.rollbackFlip(old, b, cfg, '(probe 失败) 已回滚旧代 ' + old.inst.gen)
     }
 
-    // 启动健康检查（2026-09-14）：probe 只证明「端口通、进程活」，**不证明插件树装配完整**。
+    // 启动健康检查（2026-09-14 新增；2026-09-15 重构为「有界等待 + 正向信号」）。
+    // probe 只证明「端口通、进程活」，**不证明插件树装配完整**。
     // 插件树部分失败时 gen 仍会就绪，但能力残缺：工具集少 N 个、Code Mode 因 codeRuntime
     // 服务缺失而静默回落 native、system+tools 同时变化使 prompt 前缀全失效
     // （会话迁过去后首轮命中率 0%，且模型只能靠试探发现"现在能用什么"）。
     // 这类 gen 一旦 promote 就是"环境漂移"——必须在此拦下，让它永远接不到会话。
-    const bootFatal = findFatalBootErrors(lastBootSegment(join(cfg.coordDir, b.inst.gen, 'boot.log')))
-    if (bootFatal.length > 0) {
+    //
+    // ★ gen-3083 教训（2026-09-15）：原实现「读一次 boot.log + 纯否定式判据」漏判了崩溃代 ——
+    //   崩溃文本比 `result:success` 晚 637ms 才落盘，健康检查读到的是"还没写完"的段。
+    //   修法两条（都在 boot-health.ts 里）：
+    //     ① 有界等待重读（崩溃文本 3.4s 落盘，窗口 6s）；
+    //     ② 除"无致命模式"外，还要求**正向完成信号**（`dsh web: http://...`）——
+    //        否则"还没写完"与"干净启动"观测上同形。欠证据（unknown）按失败处理。
+    const bootProbe = { readSegment: () => lastBootSegment(join(cfg.coordDir, b.inst.gen, 'boot.log')) }
+    const bootHealth = await verifyBootHealth(bootProbe, {
+      timeoutMs: cfg.bootHealthTimeoutMs ?? 6000,
+      // 确定性死亡信号优先：child_process 的 exitCode 由内核回填，无竞态窗口。
+      // （gen-3083 正是"端上还 probe 得通、进程随即 code=1"——exitCode 是最早可见的硬事实。）
+      hasExited: () => b.spawned.proc.exitCode !== null,
+      isAlive: () => pidAliveFrom(b.inst.pid),
+    })
+    if (bootHealth.verdict !== 'healthy') {
+      const why =
+        bootHealth.verdict === 'fatal'
+          ? bootHealth.fatal.join('、')
+          : `启动完成信号未出现（等待 ${bootHealth.waitedMs}ms / 日志 ${bootHealth.segmentLines} 行）`
       return this.rollbackFlip(
         old,
         b,
         cfg,
-        `(启动健康检查失败) 已回滚旧代 ${old.inst.gen}：本次启动出现 ${bootFatal.join('、')}`,
+        `(启动健康检查失败·${bootHealth.verdict}) 已回滚旧代 ${old.inst.gen}：${why}`,
       )
     }
-    this.record('verify-boot-health ok: 本次启动无装载失败')
+    this.record(`verify-boot-health ok: 本次启动无装载失败（等待 ${bootHealth.waitedMs}ms）`)
 
     // 可选验证闸（自进化·实验脑）：verifyCmd 非空时，staging 还须跑白名单内命令且返回 ok 才 flip。
     // verifyOverride = 本次 apply 由脑(LLM)随 tool_apply 提交的验证脚本。它让交接变成"进化脑管控"：
@@ -592,51 +627,12 @@ function tailFile(path: string, n: number): string {
 }
 
 /**
- * boot.log 中代表「本次启动装配失败」的致命模式（2026-09-14 新增）。
+ * 启动健康判据已抽到 `./boot-health.ts`（2026-09-15）。
  *
- * 背景：probe 只反映「端口通不通、进程活不活」，**不反映插件树是否装配完整**。
- * 实测 gen-3086 / 3087 / 3088 因 `duplicate loader entry id: design-canvas-bridge`
- * 导致 `plugin tree failed to load`，但 gen 仍以「能力残缺」状态就绪：
- *   - 工具集少 25 个（design-canvas 全套）
- *   - Code Mode 因 codeRuntime 服务缺失而静默回落 native
- *     （dsh-agent-tool-presentation 的 ctx.inject(["codeRuntime"], ...) 回调不执行）
- *   - system + tools 同时变化 → prompt 前缀全失效（会话迁移后首轮命中率 0%）
- * 这类 gen 一旦 promote，会话迁过去就是「环境漂移」，模型只能靠试探发现。
+ * 迁出理由：它是**事故的保险本身**，必须可单测。原实现（`FATAL_BOOT_PATTERNS` +
+ * `findFatalBootErrors` + `lastBootSegment`）是纯否定式且"读一次就定论"，
+ * 漏判了 gen-3083 的崩溃代。新实现加了两条：有界等待重读 + 正向完成信号要求。
  */
-const FATAL_BOOT_PATTERNS: Array<[RegExp, string]> = [
-  [/plugin tree failed to load/i, '插件树加载失败'],
-  [/duplicate loader entry id/i, 'loader entry id 重复'],
-  [/failed to apply loader entry include/i, 'loader entry include 应用失败'],
-  [/declares no dsh\.bundle/i, '无效 bundle 声明（缺 dsh.bundle）'],
-  [/cannot resolve profile bundle/i, 'profile bundle 无法解析'],
-  [/SyntaxError: Unexpected token/i, '配置 JSON/YAML 语法错误（常见：UTF-8 BOM）'],
-]
-
-/** 在给定 boot.log 片段里找致命装载错误，返回可读原因列表（空数组 = 健康）。 */
-function findFatalBootErrors(boot: string): string[] {
-  const hits: string[] = []
-  for (const [re, label] of FATAL_BOOT_PATTERNS) {
-    if (re.test(boot) && !hits.includes(label)) hits.push(label)
-  }
-  return hits
-}
-
-/**
- * 取 boot.log 中「最后一次启动」的片段。
- * spawner 每次启动会写 `===== BOOT ... =====` 分隔标记；旧日志无标记时退回尾部 300 行
- * （宁可少判，也不把历史启动的错误误判成本次失败）。
- */
-function lastBootSegment(logPath: string, tailFallback = 300): string {
-  if (!existsSync(logPath)) return ''
-  try {
-    const all = readFileSync(logPath, 'utf8').replace(/^\uFEFF/, '')
-    const idx = all.lastIndexOf('===== BOOT ')
-    if (idx >= 0) return all.slice(idx)
-    return all.split(/\r?\n/).slice(-tailFallback).join('\n')
-  } catch {
-    return ''
-  }
-}
 
 /** PID 是否存活（signal 0 探活；ESRCH=不存在，EPERM=存在但无权，视为存活）。 */
 function pidAliveFrom(pid: number): boolean {
