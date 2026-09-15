@@ -61,6 +61,14 @@ const GATES = [
     side: '写 registry.json 的 acceptance 回执',
   },
   {
+    id: 'session-integrity',
+    what: '会话日志体健（帧契约 + seq 连续）—— 坏日志会让整代起不来',
+    // ★ 只查最近 12 个：全量扫要 25s（耗时全在几个几万行的历史大会话上），
+    //   而**新损坏只可能出现在近期会话**。换代前要彻底，单独跑
+    //   `node scripts/check-session-integrity.mjs --all`。
+    cmd: ['node', 'scripts/check-session-integrity.mjs', '--limit', '12'],
+  },
+  {
     id: 'test:patch-anchors',
     what: '上游补丁锚点严格化（两方向）',
     cmd: ['node', 'scripts/test-patch-anchors.mjs'],
