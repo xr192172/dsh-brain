@@ -95,6 +95,11 @@ const GATES = [
     what: '插件卫生门自证（两方向）',
     cmd: ['node', 'scripts/test-plugin-hygiene.mjs'],
   },
+  {
+    id: 'test:message-shape',
+    what: '注入会话的消息必须带身份（id/source）+ 反模式扫描',
+    cmd: ['node', 'scripts/test-injected-message-shape.mjs'],
+  },
 ]
 
 // ⚠️ 刻意**不**收录 `scripts/verify-p4-after-swap.mjs`：

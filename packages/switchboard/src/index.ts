@@ -14,8 +14,37 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { appendFileSync, mkdirSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { startAdminServer } from './admin.js'
+
+/**
+ * 构造一条**带身份**的注入消息（switchboard 往会话里插话时用）。
+ *
+ * ★★ 为什么必须带 `id` 与 `source`（2026-09-15 实事故，本函数即其修复）
+ *
+ * `dsh-session` 的 `assertMessageEventShape`（`lib/index.js:1246-1258`）对 surface 事件
+ * 要求：`id` 是非空字符串、`role` 正确、`source.kind` 是非空字符串、`content` 是数组。
+ * **缺 `id` 或 `source` 的任一项** ⇒ 该会话日志被判
+ * `SessionPersistenceCorruptionError: session event at seq N lacks an identified message`
+ * ⇒ **整份历史永久读不出来**（实测已废掉一个会话：`session-b79a6e91` 的 seq 5342）。
+ *
+ * 旧代码是 `{ role: 'user', content: [...] }` —— 两个字段都缺，而注释当时**已经写明**
+ * "agent-loop 会把它 append 落盘"，却没给它身份。凡往会话里写消息，一律走本函数。
+ *
+ * `source` 用 `{kind:'plugin', plugin:'switchboard'}`：这是上游注入上下文用的既有形态
+ * （`dsh-agent-loop` / `dsh-time-context` / `dsh-compaction` 同款），
+ * 且**不会**被 `agent-loop` 的 `isOwned()` 误认成 system-prompt 的 runtime-context
+ * —— 它比对的是 `plugin === '@deepseek-ai/dsh-system-prompt'`。
+ */
+export function injectedUserMessage(text: string) {
+  return {
+    role: 'user' as const,
+    id: randomUUID(),
+    source: { kind: 'plugin', plugin: 'switchboard' },
+    content: [{ type: 'text', text }],
+  }
+}
 import { newDrain, evaluateStatic } from './drain.js'
 import { computeCaughtUpSeq } from './preseed.js'
 import { noSnapshot, type SnapshotProvider } from './snapshot.js'
@@ -143,7 +172,8 @@ function scheduleResume(agentsRef: { current: AgentShim | undefined }, sessionId
         // 真正把一条 user-role 消息追加进会话（同浏览器 session.prompt 经由
         // agent-loop `session.append("user/message", …, {surfaceOp:'append'})` 落盘），
         // 再 steer 唤醒 driver 消费它——而不是只投 steering 信号、却不进用户消息流。
-        const msg = { role: 'user', content: [{ type: 'text', text } as { type: string; text: string }] }
+        // ★ 消息必须带 id/source，否则落盘后会让整份历史读不出来（见 injectedUserMessage）。
+        const msg = injectedUserMessage(text)
         try {
           ;(agent as unknown as { session?: { append?: (t: string, m: unknown, o?: unknown) => unknown } }).session?.append?.('user/message', msg, { surfaceOp: 'append' })
         } catch {
@@ -376,11 +406,12 @@ export function apply(ctx: Context, patch: Config): void {
         }
         // 注入挂起提示：让大脑把当前任务收尾、把话说完，交接由控制面在后台完成。
         try {
-          agent?.steer?.({
-            role: 'user',
-            content:
+          // ★ 同样走带身份的工厂：若 steer 路径也把它持久化，缺 id/source 会污染会话日志。
+          agent?.steer?.(
+            injectedUserMessage(
               '【系统通知】环境即将热重载。请把当前任务收尾：完成手头步骤、把结论说清楚后自然结束本轮；交接由控制面在后台执行，完成后会自动唤醒你继续之前未完成的工作，无需你重复说明。',
-          })
+            ),
+          )
         } catch {
           /* steer 失败也要继续等待 turn/end（兜底走 grace） */
         }
