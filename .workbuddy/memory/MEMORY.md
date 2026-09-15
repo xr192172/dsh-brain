@@ -51,6 +51,11 @@
    `start/end/shadowedSeqs/selectedNodes` → `scripts/check-compaction-fallback-shape.mjs`。
 9. **插件 `Config`**：6 个 zod 包已套 `z.preprocess(v => v ?? {}, schema)` ⇒ **漏写 `config:` 不再崩**；
    显式写仍推荐。**别用 `.default({})`**（返回字面量 `{}`、短路内层解析 = 静默坏，比崩更隐蔽）。
+10. **★ 不追上游版本**（2026-09-15 用户定）：DSH 上游是移动靶 ⇒ **只按需合并对我们有利的改动**，
+   不为"追新"而升级。**上游自身的问题暂不处理**（HMR 被上游 `disabled`、boot 重构、BOM 防护不全等）。
+   **边界**：只管 `@dsh-brain/*` 与我们自己的 profile（`~/.dsh/profiles/web/`）；
+   `@deepseek-ai/*` 从 `profiles/node_modules/` 那条**上游共享树**解析，不归我们管。
+   归属逐项清单见 `docs/upstream-defects.md`。
 
 ## 主题索引（**按需读**）
 
