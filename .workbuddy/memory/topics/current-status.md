@@ -439,3 +439,54 @@ P4 让能力增删不改写前缀、长尾走 `delegate_capability` ⇒ **Agent 
 
 check:bom 0 违规｜check:profile 582 行/err 0｜config-tolerance 56/56｜
 boot-health 32/32｜capability-gate 29/29｜notice 内核 27/27｜**notice 接线 16/16**｜patch-anchors 17/17。
+
+## 2026-09-15 深夜：插件卫生门 ✅（装得干净/卸得干净可核查）
+
+用户选 ① —— 把 §6.5 的性质做成可跑的门。产物 `scripts/check-plugin-hygiene.mjs`
++ 自证 `scripts/test-plugin-hygiene.mjs`（**26 项，两方向**）。
+
+### ★ 它一上来就报出两处**真问题**（不是空门）
+
+1. **4 个 bundle 未在 profile 的 `dependencies` 里声明**（tool-evolution / subagent-council /
+   capability-bridge / switchboard）—— 它们靠 `profiles/web/node_modules/@dsh-brain/*` 的
+   **符号链接**解析。⇒ **跑一次 `pnpm install` 可能把它们剪掉，那几个 bundle 会静默失效。**
+   ⚠️ 这与我们这两天修的"静默失效"是**同一类失败**，只是换了层。
+   **未擅自修**：改 profile + pnpm install 是今天出过事的操作，blast radius 大，待用户拍板。
+2. **`~/.dsh/pet.json` 残留**（桌宠插件已移除，状态文件还在）+ `~/.dsh/.backup/` 一个备份目录
+   —— 正是 §6.5.3 表里的第 4 类"卸不干净"。留着无害，但如实报出。
+
+### 门的设计口径（三条，都写进脚本头注释）
+
+- **每条指名「哪个包 / 哪一步」，不出总分**（沿用 §5 fail-closed 逐项纪律）。
+- **ERROR ⇒ 非 0 退出；WARN ⇒ 退出 0 但大声打印**。
+  ★ 为什么 WARN 不失败：有些项**可能是有意为之**（如 `packages/` 里留一个开发中的新包）。
+  **一律判红 ⇒ 门会被绕过 ⇒ 比不设门更糟**（与"假红"的教训一致）。
+  想要更严用 `--strict`。
+- `--json` 可机读；`--profile-dir / --packages-dir` 供自证夹具注入（默认走真实路径）。
+
+### 检查项
+
+正查（ERROR）：bundle 的包目录存在 / `lib/index.js` 存在 / `cordis.patch.yml` 存在 /
+`package.json` 有 `dsh.bundle` / profile 侧链接存在且不悬空 / manifest 无 BOM。
+反查（WARN）：`packages/` 里有但未被任何 bundle 启用（残留 or WIP，需人甄别）/
+bundle 未声明进 deps / 已移除插件的遗留状态文件 / `.backup` / **源码比编译产物新**（改了没重建）。
+
+### 自证的诚实边界
+
+悬空链接那条本来"跳过"（本机建不了符号链接）⇒ 我没就这么算它验过：
+改用**空目录当链接**命中同一条判据（「link 路径存在 且 link/package.json 不存在」），
+现在该分支有覆盖，且额外断言"不能误报成缺链接"。
+
+### ⚠️ 一个待处理的组织问题
+
+现在**门已经有 9 个**（check:bom / check:profile / config-tolerance / boot-health /
+capability-gate / notice 内核 / notice 接线 / patch-anchors / plugin-hygiene 自证），
+**缺一个统一入口** —— 这本身就会变成"开发起来混乱"的新来源。
+建议加 `npm run check:all`（复用 `check-plugin-hygiene.mjs` 的"逐项 + 汇总"口径）。
+**待用户拍板**（要不要做、失败语义怎么定）。
+
+## 验证
+
+九门全绿：check:bom 0 违规｜check:profile 582 行/err 0｜config-tolerance 56/56｜
+boot-health 32/32｜capability-gate 29/29｜notice 内核 27/27｜notice 接线 16/16｜
+patch-anchors 17/17｜**plugin-hygiene 自证 26/26**；门本体：ERROR 0 / WARN 6。
