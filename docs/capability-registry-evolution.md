@@ -568,12 +568,6 @@ apply 抛错 / 不调 registerProvider / 设计者声明生产写权 / 缺不变
 
 ### 6.1 ★ 方案 C 的加强版：能力清单走「追加 + 压缩时物化」（用户提案，2026-09-15）
 
-用户提案：*工具注入改为动态 —— 初始化注入当前清单；之后卸载就追加一条「卸载指令」，
-新加载追加一条「加载指令」；到压缩时对加载/卸载做一次**零和运算**（抵消），
-只保留当前状态 = 相当于刷新一遍。这样对缓存更友好？*
-
-**结论：方向对，而且它比原方案 C 更强 —— 但它能不能成立，取决于一条硬约束。**
-
 #### 6.1.1 为什么方向是对的（这是我们自己已验的原则）
 
 `prompt-cache.md` 已固化的原则：
@@ -653,6 +647,92 @@ delta = 自 M 以来按序记录的 +/- 事件
 
 ---
 
+### 6.2 ★★ 更好的一步：不进 surface，而不是「进去再剔除」（用户提案，2026-09-15）
+
+用户追问：*我们给这个工具的指令带上一条不显示在上下文中的标记，然后由工具去手动合并和剔除。不行吗？*
+
+**行，而且 DSH 原生就有全套机制 —— 但要分清"藏起来的标记"与"根本不写进去"。**
+
+#### 6.2.1 关键事实：`surface` 就是「模型可见面」，只有三类事件
+
+```ts
+export type SurfaceEventType = 'user/message' | 'assistant/message' | 'tool/result'
+```
+
+（`dsh-session/lib/types/surface.js`：`isSurfaceEvent` / `isAppendSurfaceEvent` /
+`isReplacementSurfaceEvent` / `foldSurface` / `deriveEventMessage`）
+
+**⇒ 只有这三类事件会产生模型消息；其它事件类型只在日志里，根本不进模型上下文。**
+这是类型系统层面的硬保证 —— 不属于这个三元联合的类型，**按构造就不可能**成为模型消息。
+
+**⇒ 所以"能力增删"可以写成一个自定义事件类型（如 `capability/registry-changed`），
+成本 = 0 token、0 前缀影响。** 这比"写进去再剔除"好一整档。
+
+（自家已有先例：`packages/tool-evolution` 就注册了自定义会话事件类型 `tool/review`。）
+
+#### 6.2.2 「由工具去手动合并和剔除」的现成机制：`surfaceOp` + `sourceEventSeqs`
+
+```ts
+SessionEvent = { type, seq, time, data, ignorable?: true }
+             & (K extends SurfaceEventType
+                  ? { sourceEventSeqs?: number[]; surfaceOp?: SurfaceOp }
+                  : object)
+```
+
+- `surfaceOp`：`'append'` 或 replace 变体（`isReplacementSurfaceEvent`）
+- `sourceEventSeqs`：**本事件取代/派生自哪些更早的事件** ⇒ 这就是"标记 + 精确剔除"的载体
+- 非 surface-eligible 的事件**携带** `surfaceOp` 会**直接抛错**（`dsh-client-connection` 校验）
+
+#### 6.2.3 ★ 但剔除的代价要分清 —— 我们踩过
+
+`replace` 是**事后改写**。实测口径（`prompt-cache.md` ② 行）：
+
+> `dsh-compaction-tool-result-pruner` 用 `surfaceOp: replace`，**161 次改写里占 72 次** ⇒
+> **已消除（`disabled: true`）**。
+
+⇒ 中途 `replace` = 击穿前缀（贵）；**压缩时 `replace` = 免费**（压缩本来就要重写）。
+
+#### 6.2.4 ★★ 最优形态：不靠 replace，靠「搭已有 append 的车」
+
+把"剔除"升级成"**从未进入**"，代价从"一次重写"降到 **0**：
+
+```
+① 能力增删            → 写**非 surface** 自定义事件（0 token / 0 前缀影响）
+② 折叠时机            → **搭在本来就要发生的 append 上**（下次 user/message 或 tool/result）
+                       把累积的变更折叠成一行，作为**该次 append 的内容**写出
+③ 模型提前需要知道     → list_capabilities() 按需查（pull 兜底）
+④ 幂等记账            → 记「已折叠到哪个 seq」（`sourceEventSeqs` 的用法），
+                       重复折叠无副作用、且不会漏
+```
+
+**为什么②是零成本**：append 发生在**尾部** ⇒ 前缀一字未动 ⇒ 只有新增那几行未命中缓存。
+而 `replace` 改的是**已有节点** ⇒ 它之后的一切全部重算。**"从未进入"严格优于"进入后剔除"。**
+
+⇒ 于是标记的**真正作用不是"藏起来"，而是"幂等记账"** —— 让折叠可定位、可校验、可重复。
+
+#### 6.2.5 一处纠正：`ignorable` 不是这个用途
+
+`SessionEvent.ignorable?: true` 容易被误读成"不显示在上下文"。实际语义是**日志前向兼容**：
+`dsh-session-persistence` 在读日志时，遇到本 build 不认识的事件类型，
+**若不认识且未标 `ignorable` 就拒绝解释整份日志**（"likely written by a newer harness"）；
+标了则可跳过。⇒ 它管的是**跨版本读日志**，与模型上下文无关。
+
+#### 6.2.6 与 §6.1 合并后的完整方案
+
+| 层 | 承载 | 变化 |
+|---|---|---|
+| `tools` 段 | `delegate_capability` + 核心角色工具 | **恒定**（指纹 `(system|tools)` 不跳） |
+| 能力增删 | **非 surface** 自定义事件（只在日志） | 随时，**0 成本** |
+| 模型可见的当前集合 | 折叠行（搭 append 的车）或 `list_capabilities` 按需 | 低频，未命中仅新增行 |
+
+
+
+用户提案：*工具注入改为动态 —— 初始化注入当前清单；之后卸载就追加一条「卸载指令」，
+新加载追加一条「加载指令」；到压缩时对加载/卸载做一次**零和运算**（抵消），
+只保留当前状态 = 相当于刷新一遍。这样对缓存更友好？*
+
+**结论：方向对，而且它比原方案 C 更强 —— 但它能不能成立，取决于一条硬约束。**
+
 ## 7. 外部 Agent 接入 —— 你的最后一条，也是最有杠杆的一条
 
 **接口侧**：写一个 adapter，把外部 Agent 包成 provider 只需实现五个成员：
@@ -715,7 +795,7 @@ delta = 自 M 以来按序记录的 +/- 事件
 | ~~**P1**~~ ✅ | 最小 `SubagentProvider` → **已完成**：`packages/subagent-council`（议事厅 · 架构师 `council-architect`）。装配离线验收 + 重启后真实委派全通过。流程见 `docs/subagent-provider-howto.md` | ✅ |
 | **P2** ← 当前 | **`capability-registry.json`**（lineage + acceptance + holdoutHash + 状态） | P1 ✅ |
 | **P3** ✅ | **注册门**已落地（L0/L1 先，L2-L4 后）：`scripts/capability-gate.mjs`（L0/L1 硬门，真跑 `apply` 捕获 provider 内省 5 成员）+ **注册≠采纳**（`pending` → 过门才 `active`）+ 自证 `scripts/test-capability-gate.mjs`（29 项，两方向）。存量 4 条（spawn / fork / council-architect / **design-canvas 即 `kind:mcp-server` 工具层**）已全部过门拿到 `proofLevel:'L1'` 回执。**L2~L4 仍未实施**，门显式标 `unenforced` 且不计作通过。见 §5.4.1 | P2 ✅ |
-| **P4** | 按 §6 方案 C **＋§6.1 加强版**（用户提案）：`tools` 段**恒定**（核心角色工具 + `delegate_capability` + `list_capabilities`），长尾能力的"地址集合"走**尾部追加通知** + **压缩时物化**（op-log + snapshot）。**开工前先定「核心 vs 长尾」的切分判据**。⚠️ 硬约束：追加文本不能让未声明的工具变得可调用 ⇒ 长尾必须经 `delegate_capability` 中转 | P3 ✅ |
+| **P4** | 按 §6 方案 C ＋**§6.1/§6.2 加强版**（用户提案）：`tools` 段**恒定**（`delegate_capability` + 核心角色工具）；能力增删写**非 surface 自定义事件**（只在日志、**0 成本**）；模型可见的当前集合靠**「搭已有 append 的车」折叠一行**或 `list_capabilities` 按需。★ 两条硬约束：① 追加文本不能让未声明的工具变得可调用 ⇒ 长尾必须经 `delegate_capability` 中转；② 别用中途 `surfaceOp: replace`（= 事后改写必击穿，我们正是因此关了 tool-result-pruner）。**默认全部走 dispatcher，只有当"经中转"真不够用时才升级成专属工具槽** | P3 ✅ |
 | **P5** | **外部 Agent adapter**（第一个：包一个现成的开源 agent），并把"接入版本"纳入注册门 | P3 ✅ |
 
 **P0' 是关键路径起点**：因为注册表是全局单例、注册名全局唯一，
