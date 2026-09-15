@@ -764,3 +764,55 @@ Error: code run failed (exception): Expected ';', '}' or <eof>
 
 用户说"上下文崩坏"的**界面具体表现**是什么？（一直报错 / 历史消息乱掉 / 空白 / 答非所问）
 —— 我的诊断指向"一直报错做不成事"，但要与用户实际所见对齐才算闭环。
+
+## 2026-09-15 深夜：诊断「历史加载失败」与「交接后 reading 'kind' flake」
+
+用户给出**真实报错**（比我的推测有价值得多）：
+- `session-b79a6e91`: `SessionPersistenceCorruptionError: session event at seq 5342 lacks an identified message`
+- `session-432f6207`: `corrupt session log: seq gap in committed region at line 2167 (expected 9435, got 9428)`
+- `session-ce5fa937`: 同上，`line 3031 (expected 16099, got 16096)`
+- 另有若干会话「本轮运行失败 `Cannot read properties of undefined (reading 'kind')`」+ `UNKNOWN`
+- 用户补充：**新会话没问题**；那个是 PTC/Code Mode
+
+### ✅ 已闭环：seq 5342 —— **全库只有 1 条真正坏掉的事件**
+
+**方法**（这次终于做对）：**先从全体样本统计每种类型的正常形状，再找离群**。
+
+```
+user/message（469 条）
+   468  (99.8%)  {content,id,role,source}    ← 正常（平铺）
+     1  (0.2%)   {content,role}              ← ★ 唯一离群 = seq 5342
+assistant/message（3535）  99.9% {message,step,turn,usage}（2 条带 interrupted，合理）
+tool/result（9374）        71.1% {message,step,turn} + 24.7% +meta + 4.1% +error（都是正常变体）
+```
+
+⇒ **`session-b79a6e91` 的 `seq=5342`**：`user/message` 只有 `{role, content}`，**缺 `source` 与 `id`**
+⇒ 正是报错说的「lacks an identified message」。**逐字对上。**
+⇒ 旁边紧邻 `seq=5343 agent/inbox/spliced` ⇒ **嫌疑生产者 = inbox splice 路径写出了"匿名" user/message**。
+
+### ⚠️ 未闭环（诚实标注）
+
+- **seq gap（432f6207 / ce5fa937）**：日志在某处 seq 不连续（9430~9433 缺失等），
+  validator 判为 `corrupt session log`。**已刻画、未定根因**。
+- **`reading 'kind'` flake**：
+  - **已排除 `turn/end.reason`**：`dsh-agent-loop:592-597` 上游自己就有兜底
+    `reason: turnEnds ?? { kind: "completed" }`，且全库实测 **缺 reason 的 turn/end = 0**。
+  - 已定位**呈现路径**：`本轮运行失败` 是 `dsh-client-ui-conversation` 对
+    `turn/end`(reason.kind==='error') 的 UI 文案；`UNKNOWN` = agent-loop 给非 LLM 错误的兜底 code。
+    ⇒ 所以那个 `.kind` 崩溃发生在**服务端跑一轮的过程中**，被捕获后变成 turn 错误。
+  - **未定根因** —— 不假装。候选站点还有：`dsh-agent:197`、`dsh-session-query:308/312`、
+    `dsh-session-telemetry:242`（都是无保护的 `switch (reason.kind)` 类）。
+
+### ★★ 我在本轮**连续三次写错判据**（重要教训）
+
+为了查"坏事件"，我先后用了三个**凭印象**的判据，全部假红：
+1. `seq 缺口` ⇒ 误判为"丢事件"（真因：`seq` 是**全局计数器**，26/29 会话都稀疏）
+2. `surface 事件一律要有 data.message` ⇒ 误判 469 条（真相：`user/message` 是**平铺**的，
+   只有 `assistant/message`/`tool/result` 才包 `message`）
+3. `user/assistant/message 一律要有 id+source` ⇒ 误判 3536 条（真相：`assistant/message` 用 `{turn,step,message,usage}`）
+
+**正确方法（应一开始就用）**：
+> **先把该类型的「正常形状」从全体样本里统计出来（键集合频次分布），再找离群。**
+> 即：**判据来自数据，不来自我的印象。**
+
+这与 `gate-authoring` 里那条"依赖脆弱假设 ⇒ 假红"同源；已在技能里，但我仍未内化。
