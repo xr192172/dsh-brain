@@ -733,7 +733,83 @@ SessionEvent = { type, seq, time, data, ignorable?: true }
 
 **结论：方向对，而且它比原方案 C 更强 —— 但它能不能成立，取决于一条硬约束。**
 
-## 7. 外部 Agent 接入 —— 你的最后一条，也是最有杠杆的一条
+### 6.3 架构决策：**自建插件**，不加深对上游的补丁（2026-09-15）
+
+用户提问：*我们依赖这个不稳定版本的内部实现挺多的 —— 要不要自己建一个新插件来做？
+还是去改它？而且它现在的上下文管理是 append-only（只追加），能做到我们说的那个吗？*
+
+#### 6.3.1 答「append-only 能做到吗」：**能，而且 append-only 是我们的朋友**
+
+先把两层分开 —— 这是关键：
+
+| 层 | 是否只追加 |
+|---|---|
+| **会话日志**（`session.jsonl`） | **严格只追加**，从不改写 |
+| **surface 投影**（`foldSurface` → 模型可见消息） | **可收缩/可替换** |
+
+`surfaceOp: replace` **不是**"改日志"，而是**往日志里追加一条「替换意图」**；
+`foldSurface` 在**投影时**把它折叠掉。⇒ **日志仍然只追加。**
+
+⇒ **所以 append-only 不但不阻碍 §6.2 的方案，反而正是它要的形态**：
+
+- 写能力变更 → **追加**一个非 surface 事件 ✓ 纯追加
+- 搭车折叠 → **追加**一行（作为某次 append 的内容）✓ 纯追加
+- 唯一与 append-only 语义相冲的是 `replace` —— 而 `replace` **恰恰是我们不能用的那条**
+  （事后改写 ⇒ 击穿前缀，见 §6.2.3）
+
+**⇒ 用户担心的那条约束，正好指向我们要走的反方向。**
+
+#### 6.3.2 答「自建插件还是改它」：**自建插件，且不需要改它**
+
+已核实的**扩展点**（全是公开面，不是内部实现）：
+
+| 需要的能力 | 现成机制 | 性质 |
+|---|---|---|
+| 观察每次追加 | `ctx.on('session/event', (id, event))` + `session/flush` | 公开 firehose |
+| 往日志写自己的能力变更 | `ctx.session.append(type, data, ...opts)` | 公开方法 |
+| 自定义事件类型 | 支持（**自家先例**：`packages/tool-evolution` 已注册 `tool/review`） | 既有扩展点 |
+| 非 surface ⇒ 不进模型上下文 | `SurfaceEventType` 是固定三元联合，其它类型**按构造**不进 | 类型系统保证 |
+
+⇒ **这套东西正好是"写插件"的用法，不是"改内核"的用法。**
+P4 的这部分应当做成**我们自己的插件**（或并入 `capability-bridge`），
+而不是继续给 `dsh-compaction-basic` 加深补丁。
+
+**理由（不是洁癖，是可维护性）**：
+- 上游是**移动靶**，且这一点已被证实：2026-09-14 上游把 boot 重构成
+  `profile-resolution/{service,resolver}.ts`，我们 `patch-app-boot-bom.mjs`
+  引用的行号（`:412/:430/:551`）**当场失效**（见 `docs/upstream-defects.md` §U2）。
+- 我们已有 5 个上游补丁脚本 + 1 个 500 行的 `patch-package` 补丁；每加一处，
+  就是又一处"上游一改就坏、而且不告诉你"的地方。
+- 补丁打的是**编译产物**（`lib/*.js`），不是源码 ⇒ 上游重构后**行号/函数名全部失效**。
+
+#### 6.3.3 ★ 顺带把 §6.1.4 的不变量 2 松开了：**折叠写「快照」，不写「diff」**
+
+把 §6.1.3（op-log + diff）与 §6.2.4（搭车折叠）合起来看，会出现一个更好用的形态：
+
+> **内部记账**用 diff（哪些变更还没进模型）；
+> **写出去的**是**完整当前集合快照**，不是增量。
+
+这样带来两个直接好处：
+
+1. **幂等且可丢**：快照可以重复写、可以丢。
+2. **★ 丢掉的后果是「不知道」，而不是「以为错」。**
+   §6.1.4 的不变量 2（"物化必须与压缩摘要同一次写入"）担心的
+   **"摘要丢了加载却留下卸载 ⇒ 静默状态丢失"**，在**写快照**的形态下**不会发生** ——
+   快照里没有"卸载"这种相对量，只有当前集合；丢了最多是模型不掌握当前清单，
+   **由 `list_capabilities`（已有工具）兜底恢复**。
+
+⇒ **不需要 patch 压缩插件来保证"同一次写入"**，这条约束自然消失。
+
+#### 6.3.4 待办：给上游补丁脚本加「锚点找不到即失败」
+
+核查发现（2026-09-15）：`scripts/patch-*.mjs` **没有任何 `process.exit`** ——
+锚点找不到时只打印 `FAIL` / `⚠️ anchor not found` 然后**继续**。
+而它们挂在 `postinstall` ⇒ **上游一变，补丁静默失效，而没有任何人被告知。**
+这与我们反复修的"假绿"是同一类失败。
+⇒ 建议：锚点未命中 ⇒ **非 0 退出**（可用 `DSH_PATCH_STRICT=0` 显式降级）。
+**待用户拍板**（会影响 `npm install` 的行为）。
+
+
 
 **接口侧**：写一个 adapter，把外部 Agent 包成 provider 只需实现五个成员：
 
@@ -795,7 +871,7 @@ SessionEvent = { type, seq, time, data, ignorable?: true }
 | ~~**P1**~~ ✅ | 最小 `SubagentProvider` → **已完成**：`packages/subagent-council`（议事厅 · 架构师 `council-architect`）。装配离线验收 + 重启后真实委派全通过。流程见 `docs/subagent-provider-howto.md` | ✅ |
 | **P2** ← 当前 | **`capability-registry.json`**（lineage + acceptance + holdoutHash + 状态） | P1 ✅ |
 | **P3** ✅ | **注册门**已落地（L0/L1 先，L2-L4 后）：`scripts/capability-gate.mjs`（L0/L1 硬门，真跑 `apply` 捕获 provider 内省 5 成员）+ **注册≠采纳**（`pending` → 过门才 `active`）+ 自证 `scripts/test-capability-gate.mjs`（29 项，两方向）。存量 4 条（spawn / fork / council-architect / **design-canvas 即 `kind:mcp-server` 工具层**）已全部过门拿到 `proofLevel:'L1'` 回执。**L2~L4 仍未实施**，门显式标 `unenforced` 且不计作通过。见 §5.4.1 | P2 ✅ |
-| **P4** | 按 §6 方案 C ＋**§6.1/§6.2 加强版**（用户提案）：`tools` 段**恒定**（`delegate_capability` + 核心角色工具）；能力增删写**非 surface 自定义事件**（只在日志、**0 成本**）；模型可见的当前集合靠**「搭已有 append 的车」折叠一行**或 `list_capabilities` 按需。★ 两条硬约束：① 追加文本不能让未声明的工具变得可调用 ⇒ 长尾必须经 `delegate_capability` 中转；② 别用中途 `surfaceOp: replace`（= 事后改写必击穿，我们正是因此关了 tool-result-pruner）。**默认全部走 dispatcher，只有当"经中转"真不够用时才升级成专属工具槽** | P3 ✅ |
+| **P4** | 按 §6 方案 C ＋**§6.1/§6.2 加强版**（用户提案）：`tools` 段**恒定**（`delegate_capability` + 核心角色工具）；能力增删写**非 surface 自定义事件**（只在日志、**0 成本**）；模型可见的当前集合靠**「搭已有 append 的车」折叠一行**或 `list_capabilities` 按需。★ 两条硬约束：① 追加文本不能让未声明的工具变得可调用 ⇒ 长尾必须经 `delegate_capability` 中转；② 别用中途 `surfaceOp: replace`（= 事后改写必击穿，我们正是因此关了 tool-result-pruner）。**默认全部走 dispatcher，只有当"经中转"真不够用时才升级成专属工具槽**。★ **架构决策（§6.3）：做成我们自己的插件，不加深对 `dsh-compaction-basic` 的补丁** —— 所需的三个机制（`session/event` firehose、`session.append`、自定义事件类型）全是公开扩展点 | P3 ✅ |
 | **P5** | **外部 Agent adapter**（第一个：包一个现成的开源 agent），并把"接入版本"纳入注册门 | P3 ✅ |
 
 **P0' 是关键路径起点**：因为注册表是全局单例、注册名全局唯一，
