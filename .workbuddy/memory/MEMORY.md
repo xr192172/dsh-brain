@@ -69,6 +69,7 @@
 | 自进化设计 | `topics/self-evolution-design.md` | 判据阶梯、能力库、单前脑委派、多模型会议室、子脑记忆（tier+发表门）、信号/判据分工 |
 | 项目治理 | `topics/project-governance.md` | 资产边界（**别重造**）、文档可信度、`docs/` 索引、设计原则汇总 |
 | 资产拓扑 | `topics/asset-topology.md` | 分不清资产/副本、design-canvas 真身与副本、归一化、archify |
+| **接手指南（下一项任务）** | `topics/next-task-handover.md` | **新会话接手时先读这个**（自包含：任务/证据/要读的文件/纪律/验证命令） |
 | **当前状态 / 下一步** | `topics/current-status.md` | 接手前看进度：到哪了、未闭合项、工具层纪律增补 |
 
 **入口级**：`docs/ideas-spec.md`（实现无关的思路规格，**改架构前先读**）。
@@ -76,12 +77,16 @@
 
 ## ⏭ 交接
 
-**一句话现状（2026-09-15 晚）**：P3 注册门 ✅ 已落地 ——
-`scripts/capability-gate.mjs`（L0/L1 硬门，**真跑 `apply()` 捕获 provider** 内省 5 成员）+
-**注册 ≠ 采纳**（`pending` → 过门才 `active`）+ 自证 `scripts/test-capability-gate.mjs`（29 项，两方向）；
-存量 4 条（spawn / fork / council-architect / design-canvas）全过门，`proofLevel:'L1'`，
-**L2~L4 未实施**（门显式标 `unenforced`，不计作通过）。
+> **★ 新会话接手 → 先读 `topics/next-task-handover.md`**（自包含的接手指南：
+> 下一项任务、已破的案、要读的文件、操作纪律、验证命令、今晚踩过的坑）。
+> 本文件只放**每次都要遵守**的东西；进度与细节不进这里。
 
-**下一项 = P4**（核心角色一工具名，长尾走 `delegate_capability` + `list_capabilities`）。
-细节与未闭合项见 `topics/current-status.md` 与日更 `2026-09-15.md` 尾部。
-**实践纪律**：**换代由用户自己发**；跑探针前必须重建 dist。
+**一句话现状（2026-09-15 深夜）**：
+- P3 注册门 ✅、P4 能力通知（含真机换代验证）✅、方案 B（preset 回切 Native）✅
+- **长期 flake「交接后 `reading 'kind'`」已破案并修复** ✅（上游 `isOwned` 不保护 `message.source`）
+- **下一项 = 修换代的 hard-switch 写入竞态**（两代并发写同一份会话 ⇒ seq 回退/重叠）
+- ⚠️ **操作纪律**：不确定有无回合在跑时用 `?cmd=handover`，**别用 `restart`**（fast 跳过"等活跃代收尾"，
+  正是该竞态的温床）；`stage==='idle'` ≠ 没有回合在跑
+- ⚠️ **换代前先跑** `node scripts/check-session-integrity.mjs`（坏会话能让整代起不来）
+
+**实践纪律**：跑探针前必须重建 dist；改 `~/.dsh` 下的文件先备份。
