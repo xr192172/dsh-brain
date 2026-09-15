@@ -942,3 +942,52 @@ tool/result（9374）        71.1% {message,step,turn} + 24.7% +meta + 4.1% +err
 1. **还没被触发过** —— 要等 flake 复现才有堆栈可看；
 2. **要换代才生效** —— 运行中的 gen-3087 载入的是旧代码；patch 改的是 `node_modules`，
    新代才会读到。**换代由用户发**。
+
+### ★★★ 事故：我的"修复"把换代搞挂了 —— 教训是「复验要覆盖读者最先检查的那层」
+
+**经过**：我用 `repair-session-message-id.mjs` 修了 `b79a6e91`（补 `id`/`source`），
+复验全绿（能解压 ✓ 往返一致 ✓ 违规归零 ✓）。然后用户让我发换代：
+
+```
+result: "rolled-back"
+note: "(启动健康检查失败·fatal) 插件树加载失败…进程因未捕获异常退出"
+```
+
+**真因**（新代 boot.log 的堆栈）：
+```
+corrupt Zstandard session log: first frame is not exactly one header line
+  at assertZstdHeaderFrame (dsh-session-persistence-jsonl:742)
+  at readFirstZstdLine → listArtifacts → list → [cordis.init] (dsh-workspace:324)
+```
+
+- 启动时 `dsh-workspace` 会 **`list()` 所有会话** ⇒ 撞上我改过的那个文件
+- 判据（`assertZstdHeaderFrame:741-743`）：**第一帧的明文必须恰好一行**（只有一个 `\n` 且在末尾）
+- 我用 `zstdCompressSync(整份)` 压成了**单帧** ⇒ 第一帧装了整份日志 ⇒ 违规
+- 实测对照：**原始文件 ≥20 帧**；**我改坏的只有 1 帧**
+
+**⇒ 核心教训**：
+> **修复/写入类脚本的复验，必须按「真实读者的检查顺序」来，而不是按"我关心的那几项"。**
+> 我把"能解开 + 内容对 + 我的违规归零"当成了充分条件，**而读者最先查的物理帧契约我一个字没验**。
+> 这是**假绿**：我的复验全绿，而文件对真实读者根本不可读。
+
+**处置**：
+1. **立刻回滚**（`.backup/` 里的备份 → 覆盖）⇒ 换代随即 `success`（gen-3084）⇒ 系统恢复
+2. 把改坏的样本另存为 `.backup/session-b79a6e91.MY-BROKEN-REPAIR.jsonl.zstd`（留证）
+3. 脚本改成**多帧**：`frame1 = 仅 header 行`，`frame2 = 其余`；
+   并加**三层帧契约复验**（自检 / 临时文件 / 落盘后），且**全部复验过完才替换**
+4. 重新修复 ⇒ 帧契约 ✓ / 违规 0 ⇒ **再发换代 ⇒ `success → gen-3085`**（端到端对照成立）
+
+**★ 另一件值得记的好事**：这次**是健康检查拦住的**（自动回滚，旧代继续服务）。
+那张网正是我们前面修过的 `boot-health`（三态 + 正向完成信号 + `unknown` 同等回滚）——
+**它今天真的救了一次场。**
+
+### 修好的脚本带来的额外好处
+
+`repair-session-message-id.mjs` 现在会打印**帧契约自检**（第一帧字节数），
+这类"格式契约"问题以后在写入前就会被拦下。
+
+### 已同步进 `gate-authoring` 技能
+
+新增「★ 复验必须覆盖**读者最先检查的那层**」：先读读者自己的校验函数，
+把它的判据逐条复刻进复验；**"我能解开" ≠ "读者能接受"**。
+格式契约（帧、编码、分隔、行尾）永远优先于语义校验。

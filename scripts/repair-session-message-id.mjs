@@ -175,19 +175,60 @@ fs.copyFileSync(FILE, bak)
 console.log('')
 console.log(`已备份原文件 → .backup/${path.basename(bak)}`)
 
-const tmp = `${FILE}.${process.pid}.tmp`
-fs.writeFileSync(tmp, zstdCompressSync(Buffer.from(out, 'utf8')))
+// ★★ 压缩必须写成**多帧**，且第一帧恰好是 header 那一行 —— 这是 2026-09-15 的实事故：
+//   我第一版用 `zstdCompressSync(整份)` 压成**单帧**，文件本身"能解、内容对、违规也归零"，
+//   但下次换代时 `dsh-workspace` 启动要 `list()` 所有会话 ⇒
+//   `assertZstdHeaderFrame`（dsh-session-persistence-jsonl:741-743）要求
+//   **第一帧的明文恰好一行**（只有一个 \n 且在末尾）⇒ 抛
+//   `corrupt Zstandard session log: first frame is not exactly one header line`
+//   ⇒ **整代起不来**（健康检查回滚）。
+//
+//   ⇒ 教训：复验不能只验"我关心的那层"（解压 + 违规），
+//     还必须验**读者最先检查的那层**（物理帧契约）。否则就是假绿。
+const firstLineEnd = out.indexOf('\n')
+if (firstLineEnd < 0) { console.error('✗ 解压文本里没有换行，无法切出 header 帧'); process.exit(1) }
+const headerLine = out.slice(0, firstLineEnd + 1)   // 含行尾 \n
+const rest = out.slice(firstLineEnd + 1)
 
-// 临时文件复验：能解、内容一致、违规归零
-const back = Buffer.from(decompress(fs.readFileSync(tmp))).toString('utf8')
+const headerFrame = zstdCompressSync(Buffer.from(headerLine, 'utf8'))
+// 直接按 `assertZstdHeaderFrame` 的语义自检：第一帧解出来必须**恰好一行**
+const firstPlain = Buffer.from(decompress(new Uint8Array(headerFrame))).toString('utf8')
+if (firstPlain.length === 0 || firstPlain.indexOf('\n') !== firstPlain.length - 1) {
+  console.error('✗ 第一帧不是"恰好一行"，拒绝写入（否则会让整代起不来）')
+  process.exit(1)
+}
+if (firstPlain !== headerLine) { console.error('✗ 第一帧内容与 header 行不一致'); process.exit(1) }
+console.log(`帧契约自检：第一帧 = 恰好一行（${firstPlain.length} 字节）✓`)
+
+const packed = Buffer.concat([headerFrame, zstdCompressSync(Buffer.from(rest, 'utf8'))])
+const tmp = `${FILE}.${process.pid}.tmp`
+fs.writeFileSync(tmp, packed)
+
+// 临时文件复验：① 能解且内容一致；② 违规归零；③ **帧契约**（读者最先检查的那层）
+const tmpBuf = fs.readFileSync(tmp)
+const back = Buffer.from(decompress(new Uint8Array(tmpBuf))).toString('utf8')
 const tmpEvents = back.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+const tmpFrame = Buffer.from(decompress(new Uint8Array(tmpBuf.subarray(0, headerFrame.length)))).toString('utf8')
+const tmpFrameOk = tmpFrame.length > 0 && tmpFrame.indexOf('\n') === tmpFrame.length - 1 && tmpFrame === headerLine
 if (back !== out) { fs.unlinkSync(tmp); console.error('✗ 临时文件往返内容不一致，已放弃'); process.exit(1) }
 if (violations(tmpEvents).length) { fs.unlinkSync(tmp); console.error('✗ 临时文件复验仍有违规，已放弃'); process.exit(1) }
-console.log('临时文件复验：往返一致 + 违规归零 ✓')
+if (!tmpFrameOk) { fs.unlinkSync(tmp); console.error('✗ 临时文件帧契约不成立（第一帧不是恰好一行），已放弃'); process.exit(1) }
+console.log('临时文件复验：往返一致 + 违规归零 + 帧契约成立 ✓')
 
+// ★ 全部复验都在**临时文件**上过完了，才替换（避免"替换后才发现不合格"）
 fs.renameSync(tmp, FILE)
-const final = Buffer.from(decompress(fs.readFileSync(FILE))).toString('utf8')
+
+const finalBuf = fs.readFileSync(FILE)
+const finalFirst = Buffer.from(decompress(new Uint8Array(finalBuf.subarray(0, headerFrame.length)))).toString('utf8')
+const frameOk = finalFirst.length > 0 && finalFirst.indexOf('\n') === finalFirst.length - 1 && finalFirst === headerLine
+const final = Buffer.from(decompress(new Uint8Array(finalBuf))).toString('utf8')
 const finalEvents = final.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
-console.log('替换后再验：违规 ' + violations(finalEvents).length + ' 处 / 事件 ' + finalEvents.length + ' 条')
+console.log('替换后再验：帧契约 ' + (frameOk ? '✓' : '✗') +
+  ' / 违规 ' + violations(finalEvents).length + ' 处 / 事件 ' + finalEvents.length + ' 条')
+if (!frameOk) {
+  console.error('✗ 落盘后帧契约不成立 —— 用 .backup/ 里的备份回滚：')
+  console.error(`    cp "${bak}" "${FILE}"`)
+  process.exit(1)
+}
 console.log('')
 console.log('✓ 修复完成。若该会话正被打开，请关掉重开。')
