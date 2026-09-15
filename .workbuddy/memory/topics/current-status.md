@@ -253,3 +253,57 @@ coordinator 判据 = **`waitedForTurnEnd === true`**；fast 不注入。
   ⇒ 用 Write 写纯文本文件再 `cat >>` 追加。
 - 参考项目（自进化「多模型会议室」）：`dsh-flow`（仓未核实）、`dsh-collaboration`、
   `dsh-agent-team-gui`、`dsh-ha-orchestrator`。
+
+## 2026-09-15 夜：P4 进度 —— 补丁严格化 ✅ + 折叠内核 ✅（接线待做）
+
+### ✅ 上游补丁锚点严格化（提交 `4d9feb6`）
+
+`scripts/patch-*.mjs` 原先**没有任何 `process.exit`**：锚点找不到只打印 `FAIL`/`⚠️` 后继续，
+而挂在 `postinstall` ⇒ **上游一变补丁静默失效、无人被告知**（与"假绿"同类）。
+
+- 新增 `scripts/patch-anchors.mjs`：**三态判定**（already / pending / **missing ⇒ 非 0 退出**，
+  `DSH_PATCH_STRICT=0` 可降级）。
+- ★ 单列 `missing` 是为了抓一个**隐蔽假绿**：若 helper 插进去了（其 MARK 命中）但后续 edit
+  没打上，之后每次运行都因 MARK 命中而整文件 skip ⇒「有 helper 但没人调用」= **毫无防护**，
+  却永远显示"已打补丁"。现在 app-boot 把 helper 也算一处改动（共 5 处），该状态必然暴露。
+- `all:true`（替换全部）**顺序要紧**：只要锚点还在就必须继续替换，否则"改了一半"会被
+  误判成 already，从此永远停在半成品。
+- 顺带：`patch-goal-round-driver` **此前不在 postinstall 里**（补丁存在但装完不自动打）——已挂上。
+  `patch-profile-deps` ① 只在内容真变化时才写 ② **加后置校验**（原把 `BOM: PRESENT(bad)`
+  打印出来却不当回事 = 自己报红还照样成功）。
+- 自证 `scripts/test-patch-anchors.mjs`（**17 项，两方向**）。
+  ★ 测试自身也踩过一次假绿：首版用 `execFileSync`，成功退出时拿不到 stderr，
+  导致"降级告警"那条恒假通过 —— 已改 `spawnSync`。
+
+### ✅ 折叠内核（P4 骨架，离线可验）
+
+`packages/capability-bridge/src/notice.ts` —— **纯函数**，不碰 ctx / IO / 时钟。
+自证 `scripts/test-capability-notice.mjs`（**27 项**，跑编译产物）。
+
+证的三件事（都是最容易做错、做错了还不显眼的）：
+1. **幂等**：同状态重复折叠，第二次起恒为 `no-pending`/`dropped`，绝不重复写。
+2. **写的是快照不是增量**：断言文本含全部当前项、**且不含"新增/已卸载"等增量措辞** ——
+   因为写增量就引入相对量，一旦丢了模型会**以为错**（而非"不知道"）。
+3. **顺序无关**：判据是「当前集合 == 上次折叠时的集合？」，不是"成对相消" ⇒
+   `+X,-X` 与 `-X,+X` 结果相同，§6.1.3 那个顺序坑自然消失。
+   集合未变时 `dropped`（不写）**但仍推进水位**，否则 delta 永远留在 pending 白做功。
+
+### ⏳ 未做（下一步）：**接线**
+
+折叠内核已验证，但**尚未接进 live 会话**。刻意停在这里 ——
+接错会把坏插件塞进 boot 路径，而装配链今天刚出过事。
+
+接线需要先定两件事：
+- **观察口**：`ctx.on('session/event', (id, ev) => …)`（`SessionStore` 注释明说
+  「persistence plugins subscribe to `session/event` and flush on `session/flush`」
+  ⇒ 这是插件观察会话的官方姿势）。
+- **写入口**：`session.append(type, data, ...opts)`。但**从事件拿到的是 session id**，
+  要经哪个服务取回 session 句柄待核（`tool-evolution` 是在工具 `execute` 里用
+  `exec.agent.session`，插件级路径不同）。
+- 另需：模块级注册自定义事件类型（照抄 `tool-evolution` 的
+  `KNOWN_SESSION_EVENT_TYPES.add('tool/review')`，幂等），本次事件名暂定 `capability/notice`。
+- 验收：装进 profile 后，用 `dump-request-tools.mjs` 断言 **`tools` 数在无压缩轮里恒定**
+  （指纹 `1789|69~71` → `1789|N`，N 不跳）。**换代由用户自己发。**
+
+> ⚠️ `device note`：`capability-bridge` 加文件后**必须重建 lib** 才能被 `check-config-tolerance`
+> 与自证脚本看到（它们跑的是编译产物）。
