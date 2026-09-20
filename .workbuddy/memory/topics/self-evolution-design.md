@@ -253,17 +253,27 @@ L4 反事实对照 同任务集 shadow A/B，逐切片比到显著性
 ⑤ 子脑自进化后顶层认知过期 → **能力清单做成契约**（见 §7）
 ⑥ "看起来只有一个脑"会掩盖委派失败 → 委派卡片必须显示**健康状态**（`diagnostic.*` 是现成挂载点）
 
-## 10. 落地顺序
+## 10. 落地顺序（**能力库线**；2026-09-20 校订状态）
 
-| 阶段 | 做什么 |
-|---|---|
-| ~~P0'~~ ✅ | ~~在 preset 层启用委派工具~~ —— **2026-09-14 实测：无需改，上游已实现**。`code`/`standard`/`cordis` 三个随附 preset **本来就挂了** `tool-subagent` / `-fork` / `-control` / `-list-agents`；host plane 只提供 registry + spawn/fork backends。之前"被禁用"的结论是**只看 host plane 的 `--dump-config`**（那里确实写着 `disabled: true`）导致的误判。详见 `2026-09-14.md` 12:40 段 |
-| **P1-a** ✅ | **已通过**：真实委派跑通 —— `subagent` → Code Mode `run_code` 派发 → 子代理（独立上下文）→ 结果回流顶层。⚠️ **Code Mode 下唯一入口是 `run_code` 里的 `tools.*()`**，直接调工具名会被拒（模型必然先白烧一轮） |
-| **P1-b** ← 当前 | 写我们自己的第一个 `SubagentProvider`。契约极简：`inject:['subagents']` + `apply()` 里 `ctx.subagents.registerProvider()`；provider 成员 `name`/`capabilities`/`inheritsParentContext`/`start(request)`/`prepareContinuable()`。**`start()` 里可注入 `persona`/`toolFilter`/`outputSchema`/`maxDepth`/`agentOptions` —— 这正是"多模型会议室"的技术底座**（一个 provider = 一个预配置的子代理工厂） |
-| P2 | **`capability-registry.json`**（lineage + acceptance + holdoutHash + 状态） |
-| P3 | **注册门**：判据阶梯接成"注册前必须过"（L0/L1 先） |
-| P4 | 按 §5 方案 C 分层：核心角色一工具名，长尾走 `delegate_capability` + `list_capabilities` |
-| P5 | **外部 Agent adapter**（第一个：包一个现成开源 agent），把"接入版本"纳入注册门 |
+> ⚠️ **本节是"能力库线"的顺序**，与 `docs/self-evolution-master-plan.md` §10 的**总纲线**
+> （P0 判据阶梯骨架 → P1 三脑环接阶梯 → P2 holdout → P3 记忆 → P4 技能 → P5 工具 → P6 红队 → P7 元层）
+> **是两张不同的表**，别混。**总纲 P0「Genome + 分维度判定报告」代码里还没有**（2026-09-20 实测无 `Genome`）。
+
+| 阶段 | 做什么 | 状态（2026-09-20 校订） |
+|---|---|---|
+| ~~P0'~~ | ~~在 preset 层启用委派工具~~ | ✅ 无需改（上游随附 preset 本就挂了 4 个 tool-subagent 行）。详见 `2026-09-14.md` 12:40 段 |
+| **P1-a** | 真实委派跑通 | ✅ ⚠️ Code Mode 下唯一入口是 `run_code` 里的 `tools.*()` |
+| **P1-b** | 写我们自己的第一个 `SubagentProvider` | ✅ **已建**：`packages/subagent-council/src/index.ts:122` 的 `ctx.subagents.registerProvider(...)` |
+| **P2** | `capability-registry.json`（lineage + acceptance + holdoutHash + 状态） | ✅ 已建（`node scripts/capability-registry.mjs list` = 4 条能力） |
+| **P3** | **注册门**：判据阶梯接成"注册前必须过" | 🟡 **只到 L1**；L2/L3/L4 的 `enforced:false`（且各自写着 why）。**见新议题 `tool-refinement-handover.md`** |
+| **P4** | 按 §5 方案 C 分层：核心角色一工具名，长尾走 `delegate_capability` | ✅ 能力通知已落地并真机验证（`npm run verify:p4`） |
+| **P5** | **外部 Agent adapter**（包一个现成开源 agent） | ⬜ **未开工**（`packages/` 下无 adapter 包） |
+
+**P1-b 的契约（写新 provider 时照抄，别重查）**：`inject:['subagents']` + `apply()` 里
+`ctx.subagents.registerProvider()`；provider 成员 `name` / `capabilities` / `inheritsParentContext` /
+`start(request)` / `prepareContinuable()`。
+**`start()` 里可注入 `persona` / `toolFilter` / `outputSchema` / `maxDepth` / `agentOptions`
+—— 这正是"多模型会议室"的技术底座**（一个 provider = 一个预配置的子代理工厂）。
 
 ## 11. 外部 Agent 接入（四个硬问题）
 
