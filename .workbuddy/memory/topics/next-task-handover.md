@@ -1,161 +1,137 @@
-# 接手指南：下一项 —— 修换代的写入竞态（hard-switch）
+# 接手指南：下一项 —— **真机验收 drain 修复**，然后接 M1（实验/判据）
 
-> **给新会话读的**。这是一份**自包含**的交接：读完它 + 它列出的文件，就能接着干，不必回溯前面的对话。
-> 写于 2026-09-15 深夜。
+> **给新会话读的**。自包含：读完它 + 它列出的文件就能接着干，不必回溯前面的对话。
+> 写于 2026-09-20 12:30（上一项 = hard-switch 写入竞态，已修完待验收；M1 已开工）。
 
 ---
 
 ## 0. 一句话
 
-**下一项任务**：修 `packages/switchboard` 的换代协议里 **`hard-switch` 路径的写入竞态** ——
-它会让**两代同时往同一份会话日志追加**，产生 `seq 回退/重叠` ⇒ 会话历史永久打不开。
-
-**为什么是它**：它是今晚唯一查清、但**没修**的问题；而且**仍在发生**（不是历史遗留）。
-
----
-
-## 1. 先看结论速览：今晚做过什么（避免重复劳动）
-
-| # | 事项 | 状态 |
-|---|---|---|
-| 1 | **长期 flake「交接后 `Cannot read properties of undefined (reading 'kind')`」** | ✅ **已破案并已修**（见 §2）。**不要再查它。** |
-| 2 | preset 默认从 Code Mode 换回 Native（`council`） | ✅ 已生效（用户实测 100 个工具） |
-| 3 | 注入消息缺 `id`/`source` ⇒ 会话永久读不出来 | ✅ 已修（源头）+ 历史消息重放也安全（上游侧加固） |
-| 4 | 3 个坏会话（1 个补身份 + 2 个截断） | ✅ 已修 |
-| 5 | **换代 hard-switch 写入竞态** | ❌ **未修 ← 本次任务** |
-| 6 | `session-3d8ea18d`（elv）seq gap | ⏸ **未修**（截断会丢 59%）。**不阻塞启动** |
-| 7 | `.kind` flake 的**主动复现** | 不需要了（已从历史日志破案） |
+1. **上一项已修完并全门通过**：换代写入竞态的**真因**被更正为「`freeze` 从来没让人停过写」，
+   已在 `drain.ts` / `coordinator.ts` / `index.ts` 修好（`docs/handover-vs-restart.md` §8，已重写）。
+2. **本次（09-20）新增**：真机验收脚本、上游漂移体检、两服务架构评审、M1 的实验地基（见 §4）。
+3. **下一项 = 真机验收**（§1），验收通过后按 §4 继续 M1。
 
 ---
 
-## 2. 已破案的那个 flake（**别重复查**）
+## 1. 首要：真机验收（~~未做~~ → **M0 已通过 2026-09-20 13:15**）
 
-**根因**（`@deepseek-ai/dsh-agent-loop`）：`isOwned(message)` 直接读 `message.source.kind`；
-会话里只要有一条**没有 `source` 的 user message**，`RuntimeContextProjection` 构造时就会抛
-`reading 'kind'`。而**没有 `source` 的那种消息是我们自己注入的**（旧的 `{role,content}` 写法）。
+**已通过的**（用户终端启动 + 一次非 fast 换代）：`verify-drain-after-swap.mjs` = **11 ok / 0 FAIL**，
+流水 `freeze a lastSeq=-1 quiesced=true (canSeeAgents=true running=0→cancel=0 …)` + `seal: keep-old`，
+全程 4.5s；gen 侧 `resume.jsonl` 有 `{"phase":"drain"}`、boot.log 有 drain 行。
 
-**已修两处**：
-- 源头：`packages/switchboard/src/index.ts` 的 `injectedUserMessage()` → 带 `id` + `source`
-- 上游侧：`scripts/patch-agent-loop-hardening.mjs` → `isOwned` 改成 `message?.source?.kind`
-  （**必要** —— 老日志里的坏消息重放仍会崩）
+**仍未验的两个分支（不许当已通过）**：
+1. `running>0 ⇒ cancel 回合并等 whenIdle` —— 那次是**空闲**发起的（`running=0→cancel=0`）；
+2. "真 `lastSeq` 非 0" —— 那次**没有任何 live 会话**（`max(∅) = -1`，是诚实值）。
 
-**证据**：12/12 会话相关（见 `docs/upstream-defects.md` §2.5 的 U3）。
-**回归守卫**：`scripts/test-injected-message-shape.mjs`（已并入 `check:all`）。
+⇒ **要在回合运行中发一次换代**才能覆盖这两条：在 GUI 里（或 `node scripts/session-drive.mjs prompt <id> "…"`）
+发一条**不调用工具**的长回答请求，然后立刻 `curl.exe "http://127.0.0.1:31800/?cmd=handover"`，
+再看流水应出现 `running=1→cancel=1` 与**非负的 lastSeq**。
 
----
+### 步骤（一条命令，以后要重跑时）
 
-## 3. 本次任务：hard-switch 写入竞态
+为什么必须：门是"假件 + 源码"级的，**没有在活的 switchboard 上跑过一次换代**。
+`gen 侧接线在真机可用` 目前只有三条间接证据（既有生产证据 `resume.jsonl` 里 `agents:true`、
+上游形状门、假件单测），不等于实测。
 
-### 3.1 症状（实测证据）
 
-`session-3d8ea18d`（elv，`createdAt` 14:15:56）日志里：
-
-```
-seq=623 tool/call     tool_apply                       ← 该轮调它触发了蓝绿发布
-seq=628 turn/end      reason={"kind":"interrupted"}     ← 换代打断该回合
-seq=629 session/end-seed                                ← 旧代"封存结束"
-seq=627 assistant/chunk    ← ★★ seq 回退：629 之后又回到 627
-seq=629 assistant/chunk
-seq=630 assistant/chunk …
-seq=630 agent/inbox/spliced    ← ★ 又一条 630
+```bash
+# 0) 启动/重启 switchboard —— **必须在用户终端跑**（Agent 侧即使 detached 也会被回收，2026-09-20 实测）
+cd D:\project_develop\dsh-brain
+node scripts\relaunch-switchboard.mjs                  # 分离式；日志 → out\switchboard-run.log
+node scripts/check-session-integrity.mjs --all          # 换代前：坏帧契约会让整代起不来
+curl.exe "http://127.0.0.1:31800/?cmd=handover"         # 非 fast；空档时发（PowerShell 里 curl 是别名，写 curl.exe）
+node scripts/verify-drain-after-swap.mjs                # 或 npm run verify:drain
 ```
 
-⇒ 旧代「封存结束」后**又回头**写它正在流式输出的 chunk，**同时**新代把用户消息写进同一区间。
+`scripts/verify-drain-after-swap.mjs`（= `npm run verify:drain`）把验收做成了判据表：R1 有 `quiesced=` 读数 / R2 `quiesced=true` / R3 `canSeeAgents=true` / R4 `stillBusy=[] flushFailed=[]` /
+R5 `seal: keep-old` / R6 catchup 观测项 / R7 `resume-session` / R8 旧代 `resume.jsonl` 有 `phase:"drain"` /
+R9 会话体健 / **R9b 没有新增 seq gap（本 bug 的直接指纹，靠 `out/drain-acceptance-baseline.json` 基线对比）**。
+它自带 `--selftest`：真·修复前日志必须红（7 FAIL）、合成修复后必须全绿 —— 判据自身两方向自证过。
+**注意**：它**不在** `check:all` 里（换代前本来就该红；与 `verify:p4` 同理）。
 
-### 3.2 机制（已定位到代码）
+输出为 `FAIL 0`（且 `R9b` 不是红）即验收通过；红在哪一条，就按下面的嫌疑表查。
 
-- fencing 机制**存在且完整**：`packages/switchboard/src/handover-protocol.ts`
-  的 `freezeSeq`（旧代冻结时已落盘的全局最大 seq，新代只能从 ≥freezeSeq 之后 append）
-  + `writerToken`（每次授写唯一 UUID）。
-- **但 `packages/switchboard/src/coordinator.ts:298-308` 有一条兜底**：
-  > `freeze 活跃代无响应 → 走强切（省去静态冻结，直接 promote）`
+### 验收失败时的第一嫌疑（按顺序）
 
-  记录里写作 `via … (hard-switch, no-freeze)`。
-- ⇒ **硬切时旧代不知道自己该停写**（主线程被占，例如正在流式输出）⇒ 继续 append；
-  新代同时从 `freezeSeq` 之后写 ⇒ **两代并发追加同一文件**。
-
-### 3.3 要读的文件（按顺序）
-
-1. `packages/switchboard/src/coordinator.ts` —— 换代状态机；重点看 **hard-switch 分支（约 296-330 行）**
-2. `packages/switchboard/src/handover-protocol.ts` —— lease / `freezeSeq` / `writerToken` 的契约
-3. `packages/switchboard/src/drain.ts` —— 「收到 freeze 后武装 drainArmed」的实现，看它**到底能不能真正阻止旧代继续写**
-4. `docs/handover-vs-restart.md` **§8** —— 本次问题的完整记录（症状/机制/操作纪律/候选修法）
-
-### 3.4 候选修法（都**未实施**）
-
-1. 硬切时**先 SIGKILL 旧代**再 promote（最强，但要先确认不会误杀共享进程）
-2. promote 前**短暂等待 / 主动确认旧代不再 append**
-3. 给新代一个 `graceSeq` 窗口：**只追加不重复区间**
-
-> ⚠️ **这是最安全攸关的一段代码（换代本身）**。开工前先把"旧代到底有没有可能还在写"**fact-check 清楚**，
-> 再定一个小而安全的修法，并**为它写自证**（见 §5 的纪律）。
-
-### 3.5 必须先回答的问题（动手前）
-
-- [ ] `freeze` 到底做了什么？`drainArmed` 之后旧代在**哪些边界**停止发起新动作？
-- [ ] 硬切路径**是否**已经杀了旧代？（看代码，别猜）
-- [ ] 旧代的**流式 chunk 写入**会不会绕过 drain？（本次证据显示「会」）
-- [ ] `freezeSeq` 在新代侧是怎么用来防重复区间的？为什么没挡住？
+1. `canSeeAgents=false` ⇒ `ctx.inject(['agents'])` 或 `agents.list()` 不可用 ⇒ 看
+   `toDrainAgents()`（`packages/switchboard/src/index.ts`）与 `drain.ts` 的 `agentPhase`。
+2. `quiesced=false` 且 `stillBusy` 非空 ⇒ `cancel()` 没能让回合停下，或 `phase` 读错位
+   （上游形状变了 → 门 §C 会先报红）。
+3. `flushFailed` 非空 ⇒ `SessionStore.flush` 抛错（多半是会话已不在 live 列表里）。
 
 ---
 
-## 4. ★★ 操作纪律（**违反会制造新的损坏**）
+## 2. 这次改了什么 / 别踩回去
 
-今晚的惨痛教训，务必遵守：
-
-1. **不确定有没有回合在跑时，用 `?cmd=handover`（非 fast）**；`restart`/`fast=1` **只在确认空闲时用**。
-   → 因为 fast **跳过的第一步正是 defer**「等活跃代收尾本轮」—— 那正是这个竞态的温床。
-2. **`?cmd=status` 的 `stage==='idle'` 只表示换代状态机空闲，不代表会话没有回合在跑。**
-3. **一份坏会话能让整代起不来**（启动时 `dsh-workspace` 会 `list()` 所有会话）
-   ⇒ **换代之前先跑** `node scripts/check-session-integrity.mjs`。
-   但注意：**只有帧契约坏会阻塞启动**；seq gap / 缺身份只影响那份会话的历史。
-4. 改 `~/.dsh` 下的文件（**不在 git 里**）：**先备份**，且**复验要覆盖读者最先检查的那层**
-   （帧契约！—— 我今晚就是用单帧压缩把整代搞挂过一次）。
-
----
-
-## 5. 可用工具与验证
-
-| 命令 | 用途 |
+| 文件 | 改动要点 |
 |---|---|
-| `npm run check:all` | 全套 14 道门（约 13s）。**改动后必跑** |
-| `node scripts/check-session-integrity.mjs --all` | 会话体健全量扫（约 25s；换代前跑） |
-| `npm run verify:p4` | P4 能力通知的换代验收（A 段 = 新代码是否上了） |
-| `node scripts/repair-session-seq-gap.mjs <目录名> [--apply]` | 截断修复 seq gap（**默认 dry-run**） |
-| `node scripts/repair-session-message-id.mjs <目录名> [--apply]` | 补消息身份（**默认 dry-run**） |
-| `curl "http://127.0.0.1:31800/?cmd=status\|result\|handover\|restart"` | 换代控制面（3080 是 GUI 前门，**不是**控制面） |
+| `packages/switchboard/src/drain.ts` | **重写**：`drainForHandover()` 真停（cancel 回合 + 有界 `whenIdle` + 官方 flush + 真 `lastSeq` + `primarySessionId` + `quiesced`）；`agentPhase()`；`sealPlan()` |
+| `packages/switchboard/src/index.ts` | freeze 走 drain；`prepareSwitch` 改用**真实 phase**（旧的跨插件 `turn/start` 监听是死代码，已删）；reply 带 `quiesced/primarySessionId/drain` |
+| `packages/switchboard/src/coordinator.ts` | 记录真读数；`resumeId` 优先 `primarySessionId`；`sealPlan` ⇒ **释放前门锁之前**强杀未停写的旧代（失败落盘 `unfenced-old-gen.txt`）；`waitCatchUp` 支持超时（freeze 后追平 → 1.5s 观测项） |
+| `packages/switchboard/src/handover-protocol.ts` | `FreezeReply` 增 `quiesced?` / `primarySessionId?` / `drain?` |
+| `packages/switchboard/scripts/build.mjs` | 不再依赖全局 `tsc`（用仓库内 `node_modules/typescript`） |
+| `scripts/test-handover-drain.mjs` | **新门**（36 项）：红/绿双向 + 封口顺序**两方向自证** + 上游形状断言 |
+| `scripts/check-all.mjs` | 收进新门（15 道） |
 
-**写门的纪律**（今晚反复用到，已固化进 `gate-authoring` 技能）：
-- 门要**两方向自证**（该红的红、该绿的不红）；
-- **未实施的级不得计作通过**；假绿与**假红**同等有害；
-- **复验必须覆盖读者最先检查的那层**（不是"我关心的那几项"）。
-
----
-
-## 6. 今晚踩过的坑（**别再踩**）
-
-1. **假红三次**（都是我凭印象写判据）：
-   `seq 缺口`（其实是行编码）、`surface 要有 data.message`（其实 user/message 是平铺的）、
-   `user/assistant/message 都要 id+source`（其实 assistant/message 用 `{turn,step,message,usage}`）。
-   ⇒ **先把该类型的"正常形状"从全体样本统计出来，再找离群。判据来自数据，不来自印象。**
-2. **用单帧 zstd 重写会话 ⇒ 整代起不来**（`first frame is not exactly one header line`）。
-   ⇒ 读者最先查的就是物理帧契约。
-3. **注释里写 `packages/*/src` ⇒ `*/` 提前闭合块注释**，报错指向**后面某一行**（真因在前面）。
-4. **反模式扫描没排除 `out/`** ⇒ 一次报 72 处假红。
-5. **同一文件的两个 Edit 并行发 ⇒ 后者按旧快照覆盖前者，两边都报成功。** 同文件编辑必须串行。
-6. **`node -e` 带正则/反引号会被 bash 抢插值** ⇒ 写 `.mjs` 文件再跑。
+**构建**：`cd packages/switchboard && node scripts/build.mjs`（会翻 `lib` junction，并重写 `bin.cjs`）。
+**运行中进程不受影响** ⇒ 改完要先构建，再换代/重启才生效。
 
 ---
 
-## 7. 环境与边界（**每轮都要遵守**）
+## 3. 纪律与坑（本次新增的两条）
 
-见 `MEMORY.md` 的「环境约束」与「铁律」两节（Bash PATH、`.ps1` 必须带 BOM、
-`git -C` 用 `D:/…`、同文件 Edit 串行……）。
+1. **判"某机制有没有在工作"不许读注释、不许读代码意图** —— 去历史记录里**数"判据为真的次数"**。
+   本案就是靠「`waitedTurnEnd=true` 计数 = 0 / `lastSeq=0` 计数 = 171」破的。**从未为真的判据 = 假绿。**
+2. **"看不到" ≠ "没有"**：服务缺失 / 列表为空 / 读数拿不到，一律**不得**当作正向判据
+   （`drain` 的 `agentsObservable` 就是这个原则的落地）。
+3. `npm run check:all` 在 Agent 的 shell 里**会被安全策略拦**（wsl.exe 在黑名单）⇒ 直接用
+   `node scripts/check-all.mjs`（等价）。
+4. `tsc` 不在 Agent 的 PATH 上 —— 已修进 `build.mjs`，不要再写依赖全局 `tsc` 的脚本。
 
-**归属边界**（2026-09-15 用户定）：**不追上游版本**；只按需合并对我们有利的改动。
-**只管 `@dsh-brain/*` 与我们自己的 profile**（`~/.dsh/profiles/web/`）；
-`@deepseek-ai/*` 从 `profiles/node_modules/` 那条上游共享树解析，**上游自身的问题暂不处理**
-（例外：已记入 `docs/upstream-defects.md` 的 U1/U3 我们打了补丁）。
+---
 
-**换代由谁发**：改动 `node_modules` 或 profile 后**需要换代才生效**。
-**Agent 可以发**（`curl …?cmd=handover`），但遵守 §4 的纪律。
+## 4. 验收之后的候选（按建议优先级）
+
+> **口径已定（2026-09-20）**：下一步不是拆服务，而是补**判据那一半**。
+> 完整论证：`docs/oss-prior-art-and-next-steps.md`（含 M0–M3 里程碑 + 开源先例）；
+> 靶场调研：`docs/agent-eval-arenas.md`（公开榜怎么测、用什么数据、2026 的四条教训）。
+
+### M1-step-1 ✅ 已开工（本轮）= 实验的**判据地基**
+
+- `evals/README.md` —— 任务集格式 + 两条不许破的规则（**判据必须在 Agent 够不到的地方**；
+  **每题必须证明有信号**）。
+- `evals/pilot/tasks.jsonl` —— 首批 3 题，全部是**把我们的回归反向打回去**：
+  `cli-0001` 注入消息缺 id/source（oracle = `test-injected-message-shape.mjs`）、
+  `cli-0002` 封口顺序（oracle = `test-handover-drain.mjs`）、
+  `cli-0003` defer 直读真实 phase（同门）。
+- `scripts/eval-validate.mjs`（`npm run eval:validate`）—— **有效性校验**：
+  ①干净态绿 ②打 seed 后 oracle **必须红**（否则是**假题**）③字节级 sha256 还原 + 复绿。
+  实测 **3 题有效 / 0 题有问题**；它**不在** `check:all` 里（会临时改工作区文件，理由写在 check-all 注释里）。
+  `--prepare <id>` / `--restore` 给下一半（跑 Agent）复用。
+
+### M1-step-2 ⬜ 未做 = 跑 Agent 的那一半
+
+把 `task.invariant` 当题面交给**只读沙箱/分叉会话**里的挑战者 → 收轨迹 → 跑 oracle + `regression`
+→ 产出**现行 vs 挑战者的 delta 报告**（成功率 / 工具调用数 / token / 延迟 / **dangerousActions**）。
+依赖运行时起来（M0），所以先在 step-1 把"题目真的有效"这半边钉住。
+★ 复用点：`tool_apply(verify=…)` + `VERIFY_ALLOW` 就是现成的验收闸（M2）。
+
+### M3（触发式，别提前做）
+
+custody 拆分（写权收授 + 前门搬家）——**触发条件**：替换频率高到"每次都要跑实验/停机"不能接受。
+设计口径见 `docs/two-service-custody-review.md`（含 §8 的"同时开 2 号进程"三条件：
+写权互斥 / 副作用隔离 / 判据非环）。
+
+### 另外两项技术债（不阻塞）
+
+1. **让 ready / 追平门槛不再惰性**（或正式废弃它）：
+   `computeCaughtUpSeq`（`src/preseed.ts`）依赖 `sessionPersistence.listSessions` +
+   `projectionCache.coldSnapshot(id).asOfSeq`，实测恒 0。现状：已降级成 1.5s 观测项。
+   要真修先搞清这两个服务在 gen 里为什么取不到（`--dump-config` + 在 gen 里打印 `Object.keys(ctx)`）。
+2. **回滚路径的重叠窗口**：`quiesced=false` 时若 flip 后 verify 失败并回滚，两代仍可能碰同一会话。
+   备选修法：verify 全部前移到 flip 之前，flip 与"杀旧代"变成原子的一步（动最安全攸关的顺序，需真机数据打底）。
+
+**其他未闭合**：`session-3d8ea18d` 的 seq gap（截断丢 59%，需用户决定）；
+`lease.freezeSeq` 现在有真值了但**没有任何读者**（fencing 仍未落地）；
+"重复副作用/幂等"建议单独立案（durable execution 的教训：`checkpoint ≠ durable`）。

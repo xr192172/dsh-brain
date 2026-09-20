@@ -13,9 +13,14 @@
 | 15813 | 目前是 **Go Hub**（`agent-shell.exe --hub-server`），**不是 elv/dsh-hub** | 手工 |
 | 15817 | hub mock | 手工 |
 
-- 启动器：`C:\Users\Admin\AppData\Local\Temp\start-switchboard-ascii.ps1`（纯 ASCII；从
-  `D:\project_develop\ai-base\agent-shell\.env` 读 `AGENTSHELL_MAIN_LLM_API_KEY(S)` 注入 `GEN_ENV_EXTRA`）。
-  等价脚本：`scripts/relaunch-switchboard.mjs`。
+- 启动器（**2026-09-20 更新：Temp 里那个 ps1 已被清掉**，别再照旧路径启动）：
+  - 推荐：`cd D:\project_develop\dsh-brain && node scripts\relaunch-switchboard.mjs`
+    —— **分离式**（`detached+unref`），立刻返回，日志落 `out\switchboard-run.log` / `.err.log`。
+  - 或者：`& .\scripts\start-switchboard.ps1`（仓库内版本，前台占住当前窗口；同样读 `ai-base/agent-shell/.env` 注入 key）。
+  - ⚠️ 旧的 `C:\Users\Admin\AppData\Local\Temp\start-switchboard-ascii.ps1` **在机器维修后已不存在**（Temp 被清）。
+  - ⚠️ **Agent 侧启动不管用**：实测（2026-09-20 13:05）从工具层用 `detached+unref` 拉起，
+    switchboard 与 gen **都完整启动到就绪**，但**工具调用一结束整棵树就被回收**（无任何错误日志、
+    `err.log` 时间戳没变）⇒ **必须由用户终端启动**。
   注意 `NODE_BIN`/`DSH_BIN` 默认值依赖 `process.cwd()`，务必用启动器或显式设置。
 - 运行中的 switchboard 实际执行的是**打包产物** `packages/switchboard/out/b*/main.js`（不是 `src/*.ts`）——
   **改了 src 必须重新构建**（`packages/switchboard/scripts/build.mjs`），`lib` 是指向最新 build 的 junction。
