@@ -100,8 +100,10 @@ const DOC_ONLY = /^(\.workbuddy[\\/]|docs[\\/])/
  * ★ 2026-09-20 放宽：原先**任何**已跟踪改动都拦 —— 于是"另一个会话改了 MEMORY.md"这种常态
  *   会把实验完全堵死（实测撞到两次）。判据要盯**会不会污染被测对象**，不是"有没有人动过仓库"。
  */
-function worktreeState() {
-  const lines = sh('git', ['status', '--porcelain']).stdout.split('\n').filter((l) => l.trim())
+function worktreeState(dir = REPO) {
+  const lines = sh('git', ['status', '--porcelain'], { cwd: dir })
+    .stdout.split('\n')
+    .filter((l) => l.trim())
   const modifiedTracked = lines.filter((l) => /^( M|M |MM|A | D|D )/.test(l))
   const codeDirty = modifiedTracked.filter((l) => !DOC_ONLY.test(l.slice(3).trim()))
   const docDirty = modifiedTracked.filter((l) => DOC_ONLY.test(l.slice(3).trim()))
@@ -384,7 +386,11 @@ if (has('--plan') || (!sid && !has('--pair') && !has('--repeat') && !argOf('--ar
  * @param {{task:object, sid:string, arm?:string|null, label?:string}} o
  * @returns {Promise<object>} report（含 stages）
  */
-async function runArm({ task, sid, arm = null, label = '', profile = null, ignoreWindows = [], armLabel = null }) {
+async function runArm({ task, sid, arm = null, label = '', profile = null, ignoreWindows = [], armLabel = null, worktree = null }) {
+  // ★ 该臂的工作区（不给 = 主仓库）。判据脚本都在这里面跑；`sh` 的 cwd 跟着走。
+  const WORK = worktree ? path.resolve(worktree) : REPO
+  const shW = (cmd, args) => sh(cmd, args, { cwd: WORK }) // 判据/seed 用
+  const shJudgeW = (cmd) => sh(cmd[0], cmd.slice(1), { cwd: WORK, env: { ...process.env, CODEBUDDY_SAFE_DELETE_ENABLED: '0' } })
   const t0 = Date.now()
   const tag = label ? `${label} ` : ''
   const report = { task: task.id, arm, session: sid, at: new Date().toISOString(), stages: {} }
@@ -396,7 +402,7 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   /** 跑完必须干净：否则后面的（尤其成对的后续跑）会在 `--prepare` 上连环失败（2026-09-20 实测）。
    *  判据只看**代码/脚本**有没有残留（文档/记忆被别的会话改是常态，不该算残留）。 */
   const assertClean = (where) => {
-    const dirty = worktreeState().codeDirty
+    const dirty = worktreeState(WORK).codeDirty
     if (dirty.length) {
       console.error(`${tag}✗ ${where}：代码/脚本仍有改动（后续跑会连环失败）：\n${dirty.join('\n')}`)
       return false
@@ -406,7 +412,7 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
 
   // ① 打 seed + 证明题目有信号
   console.log(`${tag}① 打 seed 并确认 oracle 变红（题目有信号）…`)
-  const prep = sh('node', ['scripts/eval-validate.mjs', '--only', task.id, '--prepare', task.id])
+  const prep = shW('node', ['scripts/eval-validate.mjs', '--only', task.id, '--prepare', task.id])
   if (prep.status !== 0) {
     console.error(tag + prep.stdout + prep.stderr)
     restoreAll()
@@ -443,7 +449,7 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
     console.warn(`${tag}⚠ 有并发写者改了**文档/记忆**（不影响被测代码路径）：${extra.join(', ')}`)
     report.stages.foreignEdits = extra
   }
-  const seeded = shJudge(oracle)
+  const seeded = shJudgeW(oracle)
   report.stages.seededOracle = { status: seeded.status, hasSignal: seeded.status !== 0 }
   if (seeded.status === 0) {
     console.error(`${tag}题目没有信号（seed 之后 oracle 仍绿）⇒ 弃跑，先修题`)
@@ -463,11 +469,12 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
       ` · 我的报告 ${report.stages.traceInventory.myReports} 份 · 索引 ${report.stages.traceInventory.indexWarm ? '热' : '冷'}(${report.stages.traceInventory.indexNewest ?? '-'})` +
       ` · git 近 6h ${report.stages.traceInventory.gitCommitsLast6h} 个提交`,
   )
-  const preRunState = worktreeState()
+  const preRunState = worktreeState(WORK)
 
   // ② 交给 Agent
   const before = await sessionStats(sid)
   // ★ 记账：**模型**与**这次的 DSH build/profile** —— 没有这两项，"差异来自我们哪一层"就无从证明
+  report.stages.worktree = worktree ? WORK : null
   report.stages.model = await sessionModel(sid)
   report.stages.dsh = dshFacts()
   console.log(`${tag}② 把题面发给会话 ${sid}（cwd=${before?.cwd ?? '?'} preset=${before?.agentPreset ?? '?'} model=${report.stages.model ?? '?'}）…`)
@@ -509,15 +516,15 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   )
 
   // ④ 判据 + 轨迹
-  const after = shJudge(oracle)
-  const reg1 = shJudge(regression)
+  const after = shJudgeW(oracle)
+  const reg1 = shJudgeW(regression)
   // ★ regression 红了先**复跑一次**确认：本机的 gate 里有一条（capability-gate）依赖**运行中的 DSH 栈**
   //   会写的运行态文件（能力注册表），并发活动可能让它瞬时变红（2026-09-20 观察到的"red 不复发"现象）。
   //   两次读数都留档，并用 `regressionFlaky` 标出"两次不一致" —— **不许静默吞掉 flaky**。
   let reg = reg1
   let regRetry = null
   if (reg1.status !== 0) {
-    regRetry = shJudge(regression)
+    regRetry = shJudgeW(regression)
     if (regRetry.status === 0) reg = regRetry
   }
   report.stages.regressionRun = {
@@ -774,6 +781,29 @@ function dshFacts() {
   return { build: build ?? '(未知)', profile: process.env.WEB_PROFILE ?? '(未设；gen 默认 web)' }
 }
 
+/**
+ * **每臂工作区**：确保该目录是一份 git worktree，并把 `node_modules` 接过去。
+ * 为什么必须：worktree 是干净检出，**没有 node_modules / 没有构建产物** ⇒ 判据脚本在里面跑不起来。
+ * 只建一次；已存在就跳过。失败**如实报**（不静默降级成"跑在主仓库"）。
+ */
+function ensureWorktree(dir) {
+  const abs = path.resolve(dir)
+  const out = { dir: abs, created: false, nodeModules: false, problems: [] }
+  if (!fs.existsSync(path.join(abs, '.git'))) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    const r = sh('git', ['worktree', 'add', '--detach', abs, 'HEAD'])
+    if (r.status !== 0) out.problems.push('git worktree add 失败: ' + String(r.stderr ?? '').trim().slice(0, 160))
+    else out.created = true
+  }
+  const nm = path.join(abs, 'node_modules')
+  if (!fs.existsSync(nm)) {
+    const r = sh('cmd', ['/c', 'mklink', '/J', nm.replace(/\//g, '\\'), path.join(REPO, 'node_modules').replace(/\//g, '\\')])
+    out.nodeModules = r.status === 0
+    if (!out.nodeModules) out.problems.push('node_modules junction 失败（判据可能跑不动）')
+  } else out.nodeModules = true
+  return out
+}
+
 // ── 臂切换：按次换代到另一个 profile（`?cmd=handover&profile=<name>`）────────────
 /**
  * "能力开/关"两臂的机械装置：switchboard 本来就支持按次指定脑 profile
@@ -989,6 +1019,20 @@ if (has('--pair')) {
   console.log(`  本次跑在：build=${pair.dsh.build}  profile=${pair.dsh.profile}`)
   // ★ 臂 = **profile 变体**（同一 build，只少/多装配某个包）⇒ "能力开/关"能真正分离。
   const profByLabel = { A: argOf('--profileA') ?? null, B: argOf('--profileB') ?? null }
+  // ★ B1（2026-09-20 用户批准）：**每臂独立工作区**（`git worktree`）——
+  //   两臂连工作区都不共享：脏状态/mtime/构建产物互不干扰，两条臂的改动可以并存。
+  //   ⚠️ 它**不**隔离共享 HOME（别的会话转录、能力库、索引）——那要 B2（独立 HOME/容器）。
+  const wtByLabel = { A: argOf('--worktreeA') ?? null, B: argOf('--worktreeB') ?? null }
+  for (const [label] of ARM_LIST) {
+    const wt = wtByLabel[label]
+    if (!wt) continue
+    const info = ensureWorktree(wt)
+    pair.arms[label].worktree = info
+    console.log(
+      `  [工作区] ${label}: ${info.dir}（新建=${info.created} node_modules=${info.nodeModules}）` +
+        (info.problems?.length ? ` ⚠ ${info.problems.join('; ')}` : ''),
+    )
+  }
   const ignoreWindows = [] // 我们自己切臂造成的换代窗口：不算"污染"，但留痕
   if (profByLabel.A || profByLabel.B)
     console.log(`  臂 profile：A=${profByLabel.A ?? '(当前)'}  B=${profByLabel.B ?? '(当前)'}（每次跑前换代切臂并按插件指纹验证）`)
@@ -1010,7 +1054,8 @@ if (has('--pair')) {
       if (!rd.ready) console.error('  [就绪闸] ' + label + ' 臂（' + prof + '）没就绪 ⇒ 该臂结果不可信')
       else console.log('  [就绪闸] ' + label + ' 臂（' + prof + '）✓ 工具面 ' + rd.toolSetSize + ' 个')
     }
-    const sid0 = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+    const wt0 = wtByLabel[label]
+    const sid0 = path.basename(String(sh('node', ['scripts/session-create.mjs', ...(wt0 ? ['--cwd', wt0] : [])]).stdout).trim())
     const sel = await rpc('agentPreset.select', { sessionId: sid0, agentPreset: preset })
     const rb = await sessionStats(sid0)
     const model = await sessionModel(sid0)
@@ -1078,7 +1123,7 @@ if (has('--pair')) {
           const sw = await ensureProfile(prof)
           if (sw.switched && sw.t0) ignoreWindows.push([sw.t0, sw.t1])
         }
-        sidUse = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+        sidUse = path.basename(String(sh('node', ['scripts/session-create.mjs', ...(wtByLabel[label] ? ['--cwd', wtByLabel[label]] : [])]).stdout).trim())
         const sel = await rpc('agentPreset.select', { sessionId: sidUse, agentPreset: preset })
         const rb = await sessionStats(sidUse)
         const model = await sessionModel(sidUse)
@@ -1094,6 +1139,7 @@ if (has('--pair')) {
         arm: preset,
         label: `[${label}/${preset}${profByLabel[label] ? '@' + profByLabel[label] : ''} 第 ${i + 1}/${REPEAT} 次]`,
         profile: profByLabel[label] ?? null,
+        worktree: wtByLabel[label] ?? null,
         ignoreWindows,
         armLabel: label,
       })
