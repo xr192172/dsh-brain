@@ -44,6 +44,9 @@ const argOf = (k) => {
 const has = (k) => argv.includes(k)
 
 const sh = (cmd, args, opts = {}) => spawnSync(cmd, args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts })
+/** 跑**被测的判据**时给子进程关掉宿主的 safe-delete 钩子：它会把"删一个不存在的临时文件"升级成硬崩溃，
+ *  而仓库自己那些门的自证步骤恰好会删临时文件 ⇒ 会间歇性把 regression 打成红（假红，2026-09-20 实测）。 */
+const shJudge = (cmd) => sh(cmd[0], cmd.slice(1), { env: { ...process.env, CODEBUDDY_SAFE_DELETE_ENABLED: '0' } })
 const loadTasks = () =>
   fs
     .readFileSync(TASKS, 'utf8')
@@ -410,7 +413,7 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
     console.warn(`${tag}⚠ 有并发写者改了**文档/记忆**（不影响被测代码路径）：${extra.join(', ')}`)
     report.stages.foreignEdits = extra
   }
-  const seeded = sh(oracle[0], oracle.slice(1))
+  const seeded = shJudge(oracle)
   report.stages.seededOracle = { status: seeded.status, hasSignal: seeded.status !== 0 }
   if (seeded.status === 0) {
     console.error(`${tag}题目没有信号（seed 之后 oracle 仍绿）⇒ 弃跑，先修题`)
@@ -467,15 +470,15 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   )
 
   // ④ 判据 + 轨迹
-  const after = sh(oracle[0], oracle.slice(1))
-  const reg1 = sh(regression[0], regression.slice(1))
+  const after = shJudge(oracle)
+  const reg1 = shJudge(regression)
   // ★ regression 红了先**复跑一次**确认：本机的 gate 里有一条（capability-gate）依赖**运行中的 DSH 栈**
   //   会写的运行态文件（能力注册表），并发活动可能让它瞬时变红（2026-09-20 观察到的"red 不复发"现象）。
   //   两次读数都留档，并用 `regressionFlaky` 标出"两次不一致" —— **不许静默吞掉 flaky**。
   let reg = reg1
   let regRetry = null
   if (reg1.status !== 0) {
-    regRetry = sh(regression[0], regression.slice(1))
+    regRetry = shJudge(regression)
     if (regRetry.status === 0) reg = regRetry
   }
   report.stages.regressionRun = {
@@ -497,6 +500,13 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
     tail: `${reg.stdout ?? ''}${reg.stderr ?? ''}`.slice(-2000),
   }
   report.stages.regressionFlaky = report.stages.regressionRun.flaky
+  // ★ 宿主的 safe-delete 钩子会让某些门的自证**崩溃**（trace 里出现 node-safe-delete-shim）⇒ 那是**基建假红**，
+  //   不算被测对象的失败（但要**如实标注**，不静默吞掉）。
+  const regTails = [report.stages.regressionRun.first?.tail, report.stages.regressionRun.retry?.tail].filter(Boolean).join(String.fromCharCode(10))
+  if (/node-safe-delete-shim/.test(regTails)) {
+    report.stages.regressionInfra = { reason: 'safe-delete-shim-crash', note: '门在删临时文件时被宿主钩子打断 ⇒ 基建假红，非被测对象失败' }
+    console.error(`${tag}⚠ regression 的失败里有**宿主 safe-delete 钩子**造成的崩溃 ⇒ 记为基建假红（regressionInfra）`)
+  }
   // ★ `git diff` 为空 **不等于**"它什么都没做"（正解常是改回 HEAD）⇒ 必须看轨迹
   report.stages.trajectory = analyzeTrajectory(sid)
   report.stages.verdict = outcome === 'settled' && after.status === 0 && reg.status === 0 ? 'FIXED' : 'NOT-FIXED'
