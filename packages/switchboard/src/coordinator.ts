@@ -66,6 +66,39 @@ export interface CoordinatorConfig {
   resumePromptText?: string
 }
 
+/**
+ * 保留端口：gen 端口分配**必须跳过**这些号（2026-09-20 事故）。
+ *
+ * 现场：gen 的编号就是它自己的监听端口（`gen-3100` → `--port 3100`，见 `spawner.ts` 的 `--port`）。
+ * 而 **3101 是 key-pool-proxy 的固定监听口**（`packages/key-pool-proxy/src/index.ts`：
+ * `port: z.number().int().default(3101)`）—— 活跃代会在**自己的进程内**再占一个 3101
+ * （netstat 实测：`127.0.0.1:3100` 与 `127.0.0.1:3101` 同属现役 gen 的 pid）。
+ * ⇒ 编号递增到 3101 的那一代，要**同时**绑"自己的 3101"和"key-pool-proxy 的 3101"
+ *   ⇒ **必然 EADDRINUSE** ⇒ 这一代永远起不来（表现为 handover 恒 `b-not-ready`、旧代一直服务）。
+ *
+ * 注：key-pool-proxy 自己**容忍** EADDRINUSE（它注释里的"per-gen 单活跃代独占"），
+ * 但 gen 的**主端口**不容忍 ⇒ 崩的是 gen 自己。所以只能从"分配"侧回避，不能指望容错。
+ */
+export const RESERVED_GEN_PORTS: readonly number[] = [3101]
+
+/**
+ * 由"第几代"（slot，1 = bootstrap 代；handover 从 2 起）算出 gen 端口，跳过 `RESERVED_GEN_PORTS`。
+ *
+ * ★ 跳号不能只做"撞上就 +1"：那会让"跳过 3101 落到 3102"与**下一个 slot 的 3102** 撞车
+ *   （旧代默认还要留活 30s，同号必冲突）。这里按"区间内被挡了几个就整体后推几格"来算，
+ *   保证 slot→port **严格单调递增**（单射），见 `scripts/test-gen-port-alloc.mjs`。
+ */
+export function allocGenPort(portBase: number, slot: number): number {
+  let port = portBase + slot
+  for (let guard = 0; guard < 1024; guard++) {
+    const blocked = RESERVED_GEN_PORTS.filter((p) => p > portBase && p <= port).length
+    const want = portBase + slot + blocked
+    if (want === port) return port
+    port = want
+  }
+  return port
+}
+
 interface Cage {
   inst: GenInstance
   spawned: SpawnedGen
@@ -256,10 +289,13 @@ export class Coordinator {
     }
 
     this.stage = 'spawn'
-    const genId = `gen-${cfg.portBase + this.genCounter + 2}`
+    // slot：第几代（1 = bootstrap 代，handover 代从 2 起）。端口经 allocGenPort 分配（跳保留端口），
+    // 编号沿用既有不变量 **gen 编号 = 本代端口**，故 genId 由 port 反推而非另算一份。
+    const slot = this.genCounter + 2
     this.genCounter += 1
-    const port = cfg.portBase + this.genCounter + 1
-    const adminPort = cfg.adminBase + this.genCounter + 1
+    const port = allocGenPort(cfg.portBase, slot)
+    const genId = `gen-${port}`
+    const adminPort = cfg.adminBase + slot
     const genDir = join(cfg.workDir, genId)
     mkdirSync(genDir, { recursive: true })
     const overlayFile = writeOverlay(join(genDir, 'run'), {
@@ -684,7 +720,17 @@ export class Coordinator {
 
   private async abort(b: Cage, reason: string): Promise<HandoverStage> {
     this.record('abort ' + reason)
-    this.recordResult({ t: Date.now(), result: 'aborted', note: '切换失败 (' + reason + ') · 旧代 ' + this.active.inst.gen + ' 继续服务', gen: b.inst.gen, reason })
+    // 可诊断性（2026-09-20）：note 里带上 staging 代 boot.log 的**错因**，
+    // 否则失败读数只有一句 `b-not-ready`，要人去翻 gen 目录才知道是 EADDRINUSE 还是 MODULE_NOT_FOUND
+    // （那次事故里正是因为这样，才让人连试 3 次都没看出真因）。
+    const bootHint = bootErrorHint(tailFile(b.spawned.logPath, 30))
+    this.recordResult({
+      t: Date.now(),
+      result: 'aborted',
+      note: '切换失败 (' + reason + ') · 旧代 ' + this.active.inst.gen + ' 继续服务' + (bootHint ? ' · boot: ' + bootHint : ''),
+      gen: b.inst.gen,
+      reason,
+    })
     // 失败自证：把"它为什么不成功"（boot.log 尾）连同失败原因一起落盘，供人工/脑自检。
     const tail = tailFile(b.spawned.logPath, 30)
     const stopRes = await b.spawned.stop()
@@ -720,6 +766,21 @@ function tailFile(path: string, n: number): string {
  * `findFatalBootErrors` + `lastBootSegment`）是纯否定式且"读一次就定论"，
  * 漏判了 gen-3083 的崩溃代。新实现加了两条：有界等待重读 + 正向完成信号要求。
  */
+
+/**
+ * 从 boot.log 尾部抽出"错因"摘要（单行、截断到 `max` 字符），供 `result.note` 直读。
+ *
+ * 优先取带错因特征的行（EADDRINUSE / MODULE_NOT_FOUND / errno / Error: …），取最后 3 行；
+ * 一行都没有就退回尾部原文——宁可多带一点上下文，也不要只留一句 `b-not-ready`。
+ */
+export function bootErrorHint(tail: string, max = 240): string {
+  if (!tail || tail === '(no boot.log)' || tail === '(boot.log unreadable)') return ''
+  const lines = tail.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  if (lines.length === 0) return ''
+  const errish = lines.filter((l) => /EADDRINUSE|MODULE_NOT_FOUND|EACCES|ERR_[A-Z_]+|Error:|errno|Cannot find|not found/i.test(l))
+  const s = (errish.length > 0 ? errish : lines).slice(-3).join(' | ').replace(/\s+/g, ' ')
+  return s.length > max ? s.slice(0, max - 1) + '…' : s
+}
 
 /** PID 是否存活（signal 0 探活；ESRCH=不存在，EPERM=存在但无权，视为存活）。 */
 function pidAliveFrom(pid: number): boolean {
