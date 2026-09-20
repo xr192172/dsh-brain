@@ -252,7 +252,19 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   const oracle = task.oracle.cmd
   const regression = task.regression.cmd
   const budgetMs = (task.budget?.maxMinutes ?? 15) * 60_000
-  const restoreAll = () => sh('node', ['scripts/eval-validate.mjs', '--restore'])
+  // ★ `--force`：实验期间改那些文件的**就是我们自己派出去的 Agent** ⇒ 跑完无条件回到实验起点（保护留给手工 `--restore`）。
+  const restoreAll = () => sh('node', ['scripts/eval-validate.mjs', '--restore', '--force'])
+  /** 跑完必须干净：否则后面的（尤其成对的后续跑）会在 `--prepare` 上连环失败（2026-09-20 实测）。 */
+  const assertClean = (where) => {
+    const dirty = sh('git', ['status', '--porcelain']).stdout
+      .split('\n')
+      .filter((l) => l.trim() && !l.startsWith('??'))
+    if (dirty.length) {
+      console.error(`${tag}✗ ${where}：工作区仍有已跟踪文件被改（后续跑会连环失败）：\n${dirty.join('\n')}`)
+      return false
+    }
+    return true
+  }
 
   // ① 打 seed + 证明题目有信号
   console.log(`${tag}① 打 seed 并确认 oracle 变红（题目有信号）…`)
@@ -357,6 +369,7 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   // ⑤ 还原
   restoreAll()
   report.stages.statusAfterRestore = sh('git', ['status', '--porcelain']).stdout.trim()
+  report.stages.cleanAfterRestore = assertClean('还原后')
 
   console.log(`${tag}④ oracle：${after.status === 0 ? '绿 ✓' : '红 ✗'}   regression：${reg.status === 0 ? '绿 ✓' : '红 ✗'}`)
   const traj = report.stages.trajectory
@@ -396,8 +409,12 @@ async function runArmRepeated(task, preset, k, label) {
       runs.push({ preset, session: sidArm, error: 'preset-not-applied', readback: rb?.agentPreset ?? null })
       continue
     }
-    const r = await runArm({ task, sid: sidArm, arm: preset, label: `[${preset}#${i}]` })
+    const r = await runArm({ task, sid: sidArm, arm: preset, label: tag })
     runs.push({ preset, session: sidArm, ...r.stages })
+    if (r.stages.cleanAfterRestore === false) {
+      console.error('⇒ 工作区没回到干净状态，**中断这一批**（继续跑只会连环失败）')
+      break
+    }
     console.log('')
   }
   return runs
@@ -434,10 +451,16 @@ if (has('--pair')) {
   for (const [label, preset] of ARM_LIST) pair.arms[label] = { preset, runs: [] }
   // ★ **交替跑**（A1,B1,A2,B2…）而不是"A 全跑完再跑 B"：让两臂经历**同样**的时间背景
   //   （别的进程负载、我自己的编辑、缓存状态都会随时间漂移），这是成对比较的基本要求。
-  for (let i = 0; i < REPEAT; i++) {
+  let aborted = false
+  for (let i = 0; i < REPEAT && !aborted; i++) {
     for (const [label, preset] of ARM_LIST) {
       const runs = await runArmRepeated(task, preset, 1, `[${label}/${preset} 第 ${i + 1}/${REPEAT} 次]`)
       pair.arms[label].runs.push(...runs)
+      if (runs.some((r) => r.cleanAfterRestore === false)) {
+        console.error('⇒ 工作区没回到干净状态 ⇒ **中断整批**（否则后续跑会连环失败）')
+        aborted = true
+        break
+      }
     }
   }
 

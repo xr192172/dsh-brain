@@ -118,8 +118,13 @@ function prepare(task) {
   return files
 }
 
-/** 按 manifest 还原 + **字节级 sha256 校验**（不匹配 ⇒ 报错且**保留备份**，绝不静默）。 */
-function restore() {
+/** 按 manifest 还原 + **字节级 sha256 校验**（不匹配 ⇒ 报错且**保留备份**，绝不静默）。
+ *
+ * `force=true`（`--restore --force`）：**无条件用改前字节还原**，跳过"疑似并发写者就拒绝"的保护。
+ * 给**实验台**（`eval-run.mjs`）用：实验期间改那些文件的**就是它自己派出去的 Agent**，
+ * 跑完把工作区恢复到实验起点是它的职责。⚠️ 手工用 `--restore`（不带 force）时保持保护不变。
+ */
+function restore(force = false) {
   if (!fs.existsSync(MANIFEST)) return { restored: 0, ok: true }
   const man = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'))
   let ok = true
@@ -129,7 +134,7 @@ function restore() {
     if (cur === f.sha256) continue // 已是原字节
     // ★★ 2026-09-20 加的**防覆盖**：本仓库可能**同时有别的会话在写**（实测发生过）。
     //   只有"当前内容 == 我们打进去的那个 seed"才允许还原；否则**拒绝改写**（否则会把并发写者的编辑抹掉）。
-    if (f.after && cur !== f.after) {
+    if (!force && f.after && cur !== f.after) {
       ok = false
       say(`  ✗ 拒绝还原 ${f.file}：当前内容既不是原字节、也不是我们打进去的 seed（**疑似并发写者**）⇒ 不覆盖它。`)
       say(`     备份仍在：${f.backup}（人工决定怎么处理；处理完删掉 ${MANIFEST} 即可恢复流程）`)
@@ -152,8 +157,12 @@ function restore() {
 
 // ── --restore：独立入口 ────────────────────────────────────────────────────
 if (argv.includes('--restore')) {
-  const r = restore()
-  say(r.restored ? `已还原 ${r.restored} 个文件（sha256 校验 ${r.ok ? '通过' : '**失败**'}）` : '没有待还原的 seed')
+  const force = argv.includes('--force')
+  const r = restore(force)
+  say(
+    (r.restored ? `已还原 ${r.restored} 个文件（sha256 校验 ${r.ok ? '通过' : '**失败**'}` : '没有待还原的 seed') +
+      (r.restored ? `；${force ? 'force 模式：实验台用，无条件回到实验起点' : '保护模式：拒绝覆盖并发写者的编辑'}）` : ''),
+  )
   process.exit(r.ok ? 0 : 1)
 }
 
