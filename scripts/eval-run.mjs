@@ -984,8 +984,17 @@ if (has('--pair')) {
   console.log('')
   console.log(bothAllFixed ? '⇒ 两臂每次都过地板（差异看成本/路径）' : '⇒ **有跑没过地板** ⇒ 先看那几跑，别急着解读均值')
   pair.bothAllFixed = bothAllFixed
-  const out = path.join(REPO, 'out', `eval-pair-${task.id}-${Date.now()}.json`)
-  fs.writeFileSync(out, JSON.stringify(pair, null, 2), 'utf8')
+  // ★ 写入报告后**自动跑一次两臂隔离审计**（把有没有碰到共享面落进产物里，见 eval-isolation-audit.mjs）
+  pair.isolationAudit = { ranAt: new Date().toISOString() }
+  try {
+    fs.writeFileSync(out, JSON.stringify(pair, null, 2), 'utf8')
+    const au = sh('node', ['scripts/eval-isolation-audit.mjs', '--pair', out])
+    pair.isolationAudit.output = String(au.stdout ?? '').trim().slice(-1500)
+    fs.writeFileSync(out, JSON.stringify(pair, null, 2), 'utf8')
+    console.log(String.fromCharCode(10) + pair.isolationAudit.output)
+  } catch (e) {
+    pair.isolationAudit.error = String(e?.message ?? e)
+  }
   console.log(`报告 → ${path.relative(REPO, out)}`)
   process.exit(bothAllFixed ? 0 : 2)
 }
