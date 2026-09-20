@@ -79,3 +79,38 @@
    （若发现 HEAD 里有，就说明我记错了 —— 那就改用形态 B 新写一段。）
 3. 用 `--pair --task cli-0004 --armA council --armB minimal --repeat 3` 复验：**成功率是否真的分化**；
 4. 只有成功率分化了，才谈把结论接进 **M2**。
+
+---
+
+## 5. cli-0004 精确规格（可直接落盘，2026-09-20 16:30 定稿）
+
+> 目标只有一句：**让"能不能做出来"这件事本身成为判据**（而不是"能不能把一行改回去"）。
+
+### 5.1 seed（怎么"打坏"才有意义）
+
+本题**不是**把已有修复反向打回（那会被 `git checkout` 秒解），而是：**删掉一个 HEAD 里不存在的能力**
+—— 即把 `verify-drain-after-swap.mjs` 的 `--json` 相关内容**设为不存在**（当前它本来就不存在 ⇒ seed 可以是"空操作/极小"
+或干脆**不 seed**）。**因此本题的 `seed.edits` 允许为空**（`eval-validate` 需要支持"空 seed 题"：
+判据是"不打 seed 本来就红 ⇒ 这是**缺能力**题而不是**回归**题"）。
+⇒ 对 harness 的要求：`eval:validate` 对空 seed 题跳过"打 seed 后必须变红"这条，改用
+"**在 HEAD 上跑 oracle 必须红**"（等价语义：能力不存在 ⇒ oracle 失败）。
+
+### 5.2 oracle（`evals/checks/cli-0004.mjs`，真跑不读源码）
+
+1. `node scripts/verify-drain-after-swap.mjs --selftest` ⇒ **exit 0**（旧行为没坏）；
+2. `node scripts/verify-drain-after-swap.mjs --json` ⇒
+   ① **stdout 整体可 `JSON.parse`**（不许混人读文本；诊断走 stderr）；
+   ② 对象里含 `R0a/R0b/R0c/R1..R9b` 每个键，值为 `{status: 'ok'|'warn'|'fail', detail: string}`；
+   ③ 含 `ok: boolean` 与 `fails: number`，且 `fails` == `status==='fail'` 的条数；
+   ④ 退出码语义不变（0/1/2）；
+3. **不带 `--json`** 跑一次：判据的**名字集合**必须与改造前一致（防止"加功能顺手改文本判据"）；
+   —— 实现上用 `evals/checks/cli-0004.baseline.txt`（题面外、Agent 够不到的位置）存基线名单。
+4. `--json` 与不带参数**两次运行的 `ok` 值必须一致**（同一环境下不许自相矛盾）。
+
+### 5.3 难度与预算
+
+- **难度来自**：要读 400 行脚本、抽出判据、把诊断改道 stderr、**保住旧行为**（`--selftest` 两方向自证会抓它）、
+  还要处理"退化环境"（栈没起/R0 前置三种状态）下 JSON 仍必须合法。
+- `budget`：`maxMinutes 15`、`maxToolCalls 30`（比前三题宽——它真的要写代码）。
+- **预期**：`council` 大概率能做出来；`minimal`（两工具 + 大量 `docker exec` 式的间接操作）大概率做不出来
+  ⇒ **成功率终于会分化**。若两臂都 100%，说明还得再加难度（那时再考虑多文件重构题）。
