@@ -14,6 +14,9 @@
     "check:bom": "node scripts/check-bom.mjs",
     "check:all": "node scripts/check-all.mjs",
     "verify:p4": "node scripts/verify-p4-after-swap.mjs",
+    "verify:drain": "node scripts/verify-drain-after-swap.mjs",
+    "check:upstream": "node scripts/check-upstream-drift.mjs",
+    "eval:validate": "node scripts/eval-validate.mjs",
     "check:profile": "node node_modules/@deepseek-ai/dsh/lib/bin.js web --dump-config"
   },
   "dependencies": {

@@ -108,12 +108,31 @@ const GATES = [
     what: '注入会话的消息必须带身份（id/source）+ 反模式扫描',
     cmd: ['node', 'scripts/test-injected-message-shape.mjs'],
   },
+  {
+    id: 'test:handover-drain',
+    what: '换代前必须真的停写（drain 三方向 + 封口顺序两方向自证）',
+    cmd: ['node', 'scripts/test-handover-drain.mjs'],
+  },
 ]
 
 // ⚠️ 刻意**不**收录 `scripts/verify-p4-after-swap.mjs`：
 //   它在换代之前**本来就该是红的**（判据是"新代码有没有上"），
 //   收进来会让 `check:all` 在换代前恒红 ⇒ 门被当成噪音 ⇒ 门被绕过。
 //   它由 `npm run verify:p4` 单独跑（换代后跑）。
+//
+// ⚠️ 同理**不**收录 `scripts/verify-drain-after-swap.mjs`（`npm run verify:drain`）：
+//   它验的是"**真机上**这次换代是不是由新版跑、旧代有没有确认停写" ——
+//   换代前必然红（而且它带 seq-gap 基线状态），塞进 check:all 同样会被绕过。
+//   离线那半边（drain 三方向 + 封口顺序）已由下面的 test:handover-drain 守住。
+//
+// ⚠️ `scripts/check-upstream-drift.mjs`（`npm run check:upstream`）也**不**收录：
+//   它要**联网**拉 registry 上的新版本 tarball，且结论依赖"当前 registry 上有什么"——
+//   放进每次的本地门里会让门变慢、变飘。它是"要不要升上游"这一决策的手动前置检查。
+//
+// ⚠️ `scripts/eval-validate.mjs`（`npm run eval:validate`）同样**不**收录，理由不同：
+//   它要给每题**打上 seed（临时改工作区文件）再还原** —— 虽然做了字节级备份 + sha256 校验，
+//   但"会临时改动被检文件的检查"不能混进总门，否则没人敢在改动中途跑 check:all。
+//   它由 `npm run eval:validate` 单独跑（收题、改 seed、换代前跑）。
 
 const selected = only ? GATES.filter((g) => g.id.includes(only)) : GATES
 if (!selected.length) {
