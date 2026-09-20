@@ -55,8 +55,8 @@
 
 ### 1.5 提交与推送状态
 
-本地 4 个新提交（`fix(switchboard)` / `test(drain)` / `docs(arch)+feat(eval)` / `docs(memory)`），
-**共 39 个提交未推送**。⚠️ **推送卡住了**：git 配的代理 `127.0.0.1:7890` **没在跑**，
+本地 5 个新提交（`fix(switchboard)` / `test(drain)` / `docs(arch)+feat(eval)` / `docs(memory)` / `docs(handover)`），
+连同早前积累的，**共 40 个提交待推送**。⚠️ **推送卡住了**：git 配的代理 `127.0.0.1:7890` **没在跑**，
 直连 GitHub 超时，工作层代理拒绝 CONNECT。
 ⇒ **请启动你的代理客户端**（监听 7890 的那个），然后 `git push origin master`（或让我再推一次）。
 
