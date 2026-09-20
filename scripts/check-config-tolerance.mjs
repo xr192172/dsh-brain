@@ -54,7 +54,9 @@ try {
 }
 const PKGS = [
   'capability-bridge',
-  'conveyor-context',
+  // ★ 2026-09-20 移除 'conveyor-context'：该包由用户**有意删除**
+  //   （自研上下文层放弃，改用回**上游自带的** `dsh-compaction*` 一套）
+  //   ⇒ 它的产物不存在是**预期**，继续期望它存在就是过时的判据。
   'design-canvas-bridge',
   'key-pool-proxy',
   'subagent-council',

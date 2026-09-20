@@ -45,9 +45,18 @@ const GATES = [
   },
   {
     id: 'profile',
-    what: 'profile 装配（--dump-config）：exit 0 / stderr 空 / 582 行 / pet 0 / dup 0',
+    // ★ 2026-09-20 基线 582 → 575：582 是**含 `@dsh-brain/conveyor-context` 时**的行数，
+    //   而该包由用户**有意删除**（自研的上下文层被放弃，改用回**上游自带的**上下文管理）
+    //   ⇒ 582 不可达 ⇒ **是判据过时，不是配置错**。
+    //   575 的正当性由实质判据佐证：exit 0 / stderr 空 / pet 0 / dup 0 /
+    //   conveyor 引用 0 处 / **compaction 在链上**（上游上下文管理仍在）。
+    //   ⚠️ **口径**：本门的行数 = `stdout.split('\n').length - 1`（见下方核对代码），
+    //   **不是"非空行"**（那个数是 565）。改这个数字必须用**门自己的口径** —— 我先前按
+    //   非空行写成 565，门随即报 `行数 575 ≠ 期望 565`；靶场会话的 `exp-base` 变体实测 575，
+    //   也正是同一口径。**别拿自己另数的一遍当基线。**
+    what: 'profile 装配（--dump-config）：exit 0 / stderr 空 / 575 行 / pet 0 / dup 0',
     cmd: ['node', 'node_modules/@deepseek-ai/dsh/lib/bin.js', 'web', '--dump-config'],
-    expect: { lines: 582, forbid: ['duplicate loader entry id'], forbidCount: { pet: 0 } },
+    expect: { lines: 575, forbid: ['duplicate loader entry id'], forbidCount: { pet: 0 } },
   },
   {
     id: 'registry',
