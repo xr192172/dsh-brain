@@ -96,11 +96,14 @@ if (inBundles) J.dsh.profile.bundles = J.dsh.profile.bundles.filter((b) => b !==
 fs.writeFileSync(MANIFEST, JSON.stringify(J, null, 2) + '\n', 'utf8')
 console.log('② 已摘掉 dependencies + bundles 两处')
 
-// ③ 立刻验证
-console.log('③ 验证 --dump-config …')
+// ③ 立刻验证（★ 用**正确语法** `--profile <name>`，且验证的就是**被改的那个 profile**）
+//    ⚠️ 早先这里写死 `['…bin.js', 'web', '--dump-config']` —— 两个错：
+//      · 语法错（`dsh` 要 `--profile <name>`；`web` 能过只是因为它是**默认** profile）
+//      · **验错了对象**：对 candidate 施加改动却验证 web ⇒ **假绿**
+console.log(`③ 验证 --profile ${argProfile} --dump-config …`)
 let out = '', err = '', code = 0
 try {
-  out = execFileSync(process.execPath, ['node_modules/@deepseek-ai/dsh/lib/bin.js', 'web', '--dump-config'], {
+  out = execFileSync(process.execPath, ['node_modules/@deepseek-ai/dsh/lib/bin.js', '--profile', argProfile, '--dump-config'], {
     cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   })
 } catch (e) {

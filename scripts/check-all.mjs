@@ -55,7 +55,12 @@ const GATES = [
     //   非空行写成 565，门随即报 `行数 575 ≠ 期望 565`；靶场会话的 `exp-base` 变体实测 575，
     //   也正是同一口径。**别拿自己另数的一遍当基线。**
     what: 'profile 装配（--dump-config）：exit 0 / stderr 空 / 575 行 / pet 0 / dup 0',
-    cmd: ['node', 'node_modules/@deepseek-ai/dsh/lib/bin.js', 'web', '--dump-config'],
+    // ★ 2026-09-20 修语法：原来写 `['…bin.js', 'web', '--dump-config']` ——
+    //   **那不是有效语法**（`dsh` 要的是 `--profile <name>`）。它对 `web` 之所以"能过"，
+    //   是因为 **`web` 正好是默认 profile** ⇒ **门一直在测"默认 profile"，而不是显式测 web**。
+    //   证据：`bin.js candidate --dump-config` → `error: --profile <name> is required`。
+    //   ⇒ 若哪天默认 profile 变了，这道门会**静默测错对象**（假绿）。
+    cmd: ['node', 'node_modules/@deepseek-ai/dsh/lib/bin.js', '--profile', 'web', '--dump-config'],
     expect: { lines: 575, forbid: ['duplicate loader entry id'], forbidCount: { pet: 0 } },
   },
   {
