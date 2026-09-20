@@ -549,22 +549,26 @@ if (has('--pair')) {
     console.log('== --dry-run：只验前置，不跑题 ==')
     console.log(`  ① 正向：两臂模型相同 ⇒ 判据放行（${armSessions.A.model} == ${armSessions.B.model}）`)
     // ② **负向自证**：故意把 B 臂切到另一个模型，回读后必须**不同**（否则这条判据就是摆设）
+    //    ★ 载荷形状是**实测**出来的：`{sessionId, model, provider}` 才生效；
+    //      只给 `{model}` 或 `{modelId}` 会返回 **HTTP 200 + body 里 ok:false**（陷阱：HTTP 状态骗人）。
     const others = await rpc('session.models', { sessionId: armSessions.B.sid })
-    const cand = (others.json?.result?.value?.groups ?? [])
-      .flatMap((g) => g.models ?? [])
-      .map((m) => m.id)
-      .find((id) => id && id !== String(armSessions.B.model).split('/')[1])
-    if (!cand) {
+    const groups = others.json?.result?.value?.groups ?? []
+    const pick = groups
+      .flatMap((g) => (g.models ?? []).map((m) => ({ provider: g.id, model: m.id })))
+      .find((c) => c.model && c.model !== String(armSessions.B.model).split('/')[1])
+    if (!pick) {
       console.log('  ② 负向自证：**读不到可切换的其它模型** ⇒ 本项不可自证（如实标注，不当"已验"）')
     } else {
-      const sel = await rpc('session.selectModel', { sessionId: armSessions.B.sid, model: cand })
+      const sel = await rpc('session.selectModel', { sessionId: armSessions.B.sid, model: pick.model, provider: pick.provider })
       const afterB = await sessionModel(armSessions.B.sid)
+      const differs = !!afterB && afterB !== armSessions.A.model
       console.log(
-        `  ② 负向自证：把 B 切到 ${cand}（HTTP ${sel.status}）→ 回读 B=${afterB}` +
-          ` ⇒ 与 A(${armSessions.A.model}) ${afterB && afterB !== armSessions.A.model ? '**不同** ⇒ 判据会拦住 ✓' : '仍相同 ⇒ **判据无效** ✗'}`,
+        `  ② 负向自证：把 B 切到 ${pick.provider}/${pick.model}（HTTP ${sel.status}${sel.json?.result?.ok === false ? ' ok=false' : ''}）` +
+          ` → 回读 B=${afterB} ⇒ ${differs ? '**与 A 不同 ⇒ 判据会拦住 ✓**' : '仍与 A 相同 ⇒ **判据无效** ✗'}`,
       )
       // 切回来，别留副作用（若失败如实打印）
-      const back = await rpc('session.selectModel', { sessionId: armSessions.B.sid, model: String(armSessions.B.model).split('/')[1] })
+      const backP = String(armSessions.B.model).split('/')
+      const back = await rpc('session.selectModel', { sessionId: armSessions.B.sid, model: backP[1], provider: backP[0] })
       console.log(`  ③ 复原 B 的模型（HTTP ${back.status}）→ 回读 ${await sessionModel(armSessions.B.sid)}`)
     }
     pair.dryRun = true
