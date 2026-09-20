@@ -36,13 +36,18 @@
 | U3 | `agent-loop`：`isOwned(message)` 不保护 `message.source` ⇒ **长期 flake 真凶** | **上游 bug** | ✅ 代码仍在（见 §2.5） | ✅ 可报（与 U1 同类，**证据更强**） |
 | D1 | `web-app`：`localWebUrl` 把**实例端口**写进 system prompt → 换代必 cache miss | 上游**设计缺口** | ✅ 代码仍在（设计讨论） | ◯ 可作 feature request |
 | D2 | `--dump-config` 不校验插件 config（假绿） | 上游 **UX 缺口** | ✅ 行为已本地实测 | ◯ 可作 feature request |
+| **U4** | shell 工具在**非重定向 stderr** 时崩：`StandardErrorEncoding is only supported when standard error is redirected`（回执 §B2） | **上游 bug** | ✅ 代码仍在（`dsh-pwsh-local/lib/index.js:159`） | ✅ 可报（**绕法已实测 100% 有效**） |
+| **?** | 204 条 `Error: unknown tool "<x>": only \`run_code\` is callable directly` | ⚠ **归属待查**（工具面 vs 运行时不一致） | 未核验 | ⏸ 先查是不是我们的工具面配置 |
 | O1 | switchboard 启动健康漏判（保险失效） | **我们自己的** | — | ✗ 不可报 |
 | O2 | 6 个插件 `Config = z.object` 不容忍缺 config | **我们自己的**（根因在 cordis 设计，见 §4） | — | ✗ 不可报（设计讨论另说） |
 | O3 | `dsh-compaction-basic` 500 行补丁 | **我们自己的特性**（兜底后端） | — | ✗ 不可报 |
 | O4 | `patch-profile-deps` / 移除桌宠 | **我们的配置选择** | — | ✗ 不可报 |
 
-**结论：真正「干净、可报、且确认上游仍存在」的只有 1 项（U1）。**
+**结论：真正「干净、可报、且确认上游仍存在」的有 2 项（**U1** 与 **U4**）。**
 其余或需复核、或是设计讨论、或是我们自己的。
+
+> ★ **U4 与 U1/U3 的关键差别**：U4 我们有**绕法**（改调用方写法即可，不动上游包），
+> 所以按铁律 10「不追上游版本 / 不改 `@deepseek-ai/*`」**我们不 patch，只上报**。
 
 ---
 
@@ -184,6 +189,85 @@ function isOwned(message) {
 **建议修法**：`return message?.source?.kind === "plugin" && message.source.plugin === SOURCE;`
 （对"不是自己的消息"本来也该返回 false —— 不该假设 `source` 存在。）
 
+### 2.6 ✅ U4 shell 工具在「非重定向 stderr」时崩（回执 §B2）
+
+**症状**（用户可见）：shell 工具返回
+
+```
+[stderr]
+ResourceUnavailable: 程序'node.exe'运行失败： StandardErrorEncoding is only supported
+when standard error is redirected.在 行:1 字符:129
++ … UTF8Encoding]::new($false); node scripts/test-handover-drain.mjs 2>&1
+[exit code: 1]
+```
+
+命令**根本没跑**（node 进程没起来），但结果里 `isError === false` ⇒ 又会被算成"工具失败"（见 §2.7）。
+
+**根因**（`@deepseek-ai/dsh-pwsh-local/lib/index.js:159`，本机 `~/.dsh/profiles/node_modules/` 实测）：
+
+```js
+const ENCODING_PREAMBLE = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                        + "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ";
+```
+
+这段被**前置到每一条 shell 命令**。Windows PowerShell 5.1 起原生子进程时，会因
+`$OutputEncoding` 非默认而给 `ProcessStartInfo.StandardErrorEncoding` 赋值；
+一旦 stderr **未被 .NET 层重定向**（命令里写了 `2>&1`，PS 走"合并到成功流"路径），
+.NET 就抛 `InvalidOperationException` ⇒ PS 包装成 `ResourceUnavailable` 报出来。
+（同一常量还被 `dsh-terminal-bash/lib/index.js` 从该包 import，影响面不止一处。）
+
+**实测相关性（全量 4629 条 shell 结果，2026-09-21 扫）—— 100%，无反例**：
+
+| 命令是否含 `2>&1` / `2>` | 调用数 | 崩溃数 |
+|---|---|---|
+| 含 | 1100 | **13** |
+| 不含 | 3529 | **0** |
+
+**★ 我们的绕法（不 patch 上游，符合铁律 10）**：
+**shell 命令里不要写 `2>&1`** —— 工具自己会捕获 stderr 并原样放进结果的 `[stderr]` 段
+（实测 3529 条不带重定向的调用里 **270 条**仍正常拿到了 `[stderr]` 载荷，信息不丢）。
+⇒ 靶场/我们自己的脚本一律**去掉 `2>&1`**，把"合并流"改成"读结果里的 `[stderr]` 段"。
+
+**建议修法**（供上报用）：把 `ENCODING_PREAMBLE` 里的 `$OutputEncoding = …` 去掉
+（只留 `[Console]::OutputEncoding`），或仅在确实重定向 stderr 时才设置它。
+
+> **我们能给出的独有价值**：一条干净的**两分表（13/1100 vs 0/3529）**，
+> 直接把成因钉在"命令里带 `2>&1`"这个触发条件上 —— 这是上游单实例部署下很容易漏掉的边界。
+
+---
+
+### 2.7 附：`tool/result.isError` 不可当"工具失败率"（回执 §B1，**不是上游 bug**）
+
+**量化**（`~/.dsh/sessions` 全量 9775 条 `tool/result`）：
+
+| 项 | 全量 | 2026-09-20（回执证据日） |
+|---|---|---|
+| 按结构信号判出的真失败 | 1329 | 53 |
+| 其中 `isError === false` | **1253（94.3%）** | **48（91%）** |
+| shell(`pwsh`) 的结构性失败 | 1248 | — |
+| 其中 `isError === true` | **0** | 0 |
+
+⇒ 回执说的"`isError` 恒 false"**只在 shell 工具上成立且完全成立**（1248 : 0）。
+`isError` 在 `write`/`edit`/`run_code` 上其实是工作的 —— 它测的是
+"harness 有没有接受这次调用"，**不是**"工具跑了但失败"。
+`isError=true` 的 175 条 pwsh 结果全是 harness 层（中断 21 条 + `unknown tool` 78 条）。
+
+**归属**：**我们自己的指标口径问题**，不是上游 bug ⇒ **不可报**。
+判据已落地在 `scripts/lib-tool-failure.mjs`（结构信号 R1~R5，两方向自证 19/0）。
+
+---
+
+### 2.8 ⚠ 待查：204 条 `Error: unknown tool "<x>": only \`run_code\` is callable directly`
+
+扫全量会话发现 **204 条**这类结果，横跨 15 个工具（`pwsh` 78 / `run_code` 56 / `read` 39 /
+`glob` 11 / `grep` 4 / `memory_recall` 3 …）。形态是**运行时拒绝直连调用**，
+但工具面（`request/header.tools`）里这些工具是列给模型的 ⇒ 模型撞墙、白烧一轮。
+
+**归属未定**：可能是① 我们的工具面配置多放了工具；② 上游运行时限制没同步到工具面。
+**在查清之前不报上游**（拿我们自己的配置问题去报 bug 是最典型的噪音）。
+
+---
+
 ## 3. 如果决定上报：建议的报告形状
 
 按上游 `.agents/notes/bug-fix/` 的既有约定写（他们自己就是这么记缺陷的）：
@@ -203,8 +287,9 @@ function isOwned(message) {
 但**我们有真实运行日志与复现现场** —— 这恰好是他们做不到的那部分。
 （例：U1 我们能给出「交接/中断边界」这个触发前提；U2 我们能给出带 BOM 的真实 gen 日志。）
 
-**排序建议**：只报 U1（确认、干净、有现场）。U2 复核后再定。
-D1/D2 用讨论帖而非 bug 帖 —— 混在一起会稀释信号。
+**排序建议**：报 **U1** 与 **U4**（都确认、干净、有现场；U4 还带 100% 相关的两分表）。
+U2 复核后再定。D1/D2 用讨论帖而非 bug 帖 —— 混在一起会稀释信号。
+§2.7/§2.8 是我们自己的 / 归属未定，**不进上报包**。
 
 ---
 
@@ -244,6 +329,7 @@ loader 传 `undefined` ⇒ 抛 `ValidationError` ⇒ **整棵插件树装配失�
 | `scripts/patch-app-boot-bom.mjs` | U2（待复核） |
 | `scripts/patch-agent-loop-hardening.mjs` | **U3**（`isOwned` 保护 + 非 LLM 错误留堆栈） |
 | `scripts/patch-web-app-public-url.mjs` | D1 |
+| `scripts/lib-tool-failure.mjs`（`--self-test`） | **§2.7** 工具失败判据（替掉 `isError`）+ 两方向自证 |
 | `scripts/check-config-tolerance.mjs` / `probe-config-resolveconfig.mjs` | O2 |
 | `patches/@deepseek-ai+dsh-compaction-basic+0.1.1-rc.2.patch` | O3 |
 | `packages/switchboard/src/boot-health.ts` | O1 |
