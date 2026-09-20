@@ -610,8 +610,8 @@ async function ensureProfile(profile) {
     return { profile, gen, switched: false, warning: 'control-plane-busy' }
   }
   console.log(`  [臂切换] 换代 → profile=${profile}（非 fast）…`)
-  const kick = await fetch(`${CTRL}/?cmd=handover&profile=${encodeURIComponent(profile)}`).then((r) => r.json())
   const t0 = Date.now()
+  const kick = await fetch(`${CTRL}/?cmd=handover&profile=${encodeURIComponent(profile)}`).then((r) => r.json())
   let s1 = s0
   for (;;) {
     await new Promise((r) => setTimeout(r, 2000))
@@ -619,6 +619,7 @@ async function ensureProfile(profile) {
     if (s1.stage === 'idle' && s1.result) break
     if (Date.now() - t0 > 120_000) break
   }
+  const t1 = Date.now()
   const gen1 = s1?.lease?.activeGen?.gen ?? null
   const fp1 = pluginFingerprint(gen1)
   const ok = exp && exp.must.every((re) => re.test(fp1.raw)) && exp.mustNot.every((re) => !re.test(fp1.raw))
@@ -630,7 +631,7 @@ async function ensureProfile(profile) {
       `     期望 must=${exp.must.map(String).join(' , ')} mustNot=${exp.mustNot.map(String).join(' , ')}`,
     )
   }
-  return { profile, gen: gen1, switched: true, fingerprint: fp1.counts, matches: !!ok, kick: kick.note ?? null }
+  return { profile, gen: gen1, switched: true, fingerprint: fp1.counts, matches: !!ok, kick: kick.note ?? null, t0, t1 }
 }
 
 /** 读某代 boot.log 的**最后一次 BOOT** 段里各插件标记出现次数（指纹 = "实际装了什么"）。 */
@@ -710,6 +711,10 @@ function agg(runs, pick) {
 }
 const fmtAgg = (a) => (a ? `${a.mean.toFixed(0)} [${a.min.toFixed(0)}–${a.max.toFixed(0)}]` : '-')
 
+// 臂自证用的工具名单（可重复传）：`--expectTool design_canvas_index --forbidTool self_evolve`
+const EXPECT_TOOLS = argv.reduce((acc, a, i) => (a === '--expectTool' ? [...acc, argv[i + 1]] : acc), []).filter(Boolean)
+const FORBID_TOOLS = argv.reduce((acc, a, i) => (a === '--forbidTool' ? [...acc, argv[i + 1]] : acc), []).filter(Boolean)
+
 // ── 成对 CLI：--pair --task X --armA council --armB code [--repeat k] ───────
 if (has('--pair')) {
   const armA = argOf('--armA') ?? 'council'
@@ -736,11 +741,22 @@ if (has('--pair')) {
   for (const [label, preset] of ARM_LIST) pair.arms[label] = { preset, runs: [] }
   pair.dsh = dshFacts()
   console.log(`  本次跑在：build=${pair.dsh.build}  profile=${pair.dsh.profile}`)
+  // ★ 臂 = **profile 变体**（同一 build，只少/多装配某个包）⇒ "能力开/关"能真正分离。
+  const profByLabel = { A: argOf('--profileA') ?? null, B: argOf('--profileB') ?? null }
+  const ignoreWindows = [] // 我们自己切臂造成的换代窗口：不算"污染"，但留痕
+  if (profByLabel.A || profByLabel.B)
+    console.log(`  臂 profile：A=${profByLabel.A ?? '(当前)'}  B=${profByLabel.B ?? '(当前)'}（每次跑前换代切臂并按插件指纹验证）`)
 
   // ★★ **先建好两臂的会话、读出模型、确认两臂同模型再开跑**（2026-09-20 用户指出：
   //   我们要测的是 **DSH 这一层**，不是模型能力 ⇒ 模型是被控制的常量，必须**回读**证明它没变）。
   const armSessions = {}
   for (const [label, preset] of ARM_LIST) {
+    const prof = profByLabel[label]
+    if (prof) {
+      const sw = await ensureProfile(prof)
+      if (sw.switched && sw.t0) ignoreWindows.push([sw.t0, sw.t1])
+      pair.arms[label].profileSwitch = { profile: prof, gen: sw.gen, switched: sw.switched, matches: sw.matches ?? null, fingerprint: sw.fingerprint }
+    }
     const sid0 = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
     const sel = await rpc('agentPreset.select', { sessionId: sid0, agentPreset: preset })
     const rb = await sessionStats(sid0)
@@ -800,9 +816,15 @@ if (has('--pair')) {
   let aborted = false
   for (let i = 0; i < REPEAT && !aborted; i++) {
     for (const [label, preset] of ARM_LIST) {
-      // 第 1 轮复用上面已建好（并已核对过 preset/模型）的会话；后续轮次各建新的空会话
-      const sidUse = i === 0 ? armSessions[label].sid : path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+      // 第 1 轮复用上面已建好（并已核对过 preset/模型）的会话；后续轮次**先切臂再建新会话**
+      let sidUse = i === 0 ? armSessions[label].sid : null
       if (i > 0) {
+        const prof = profByLabel[label]
+        if (prof) {
+          const sw = await ensureProfile(prof)
+          if (sw.switched && sw.t0) ignoreWindows.push([sw.t0, sw.t1])
+        }
+        sidUse = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
         const sel = await rpc('agentPreset.select', { sessionId: sidUse, agentPreset: preset })
         const rb = await sessionStats(sidUse)
         const model = await sessionModel(sidUse)
@@ -812,8 +834,15 @@ if (has('--pair')) {
           break
         }
       }
-      const r = await runArm({ task, sid: sidUse, arm: preset, label: `[${label}/${preset} 第 ${i + 1}/${REPEAT} 次]` })
-      pair.arms[label].runs.push({ preset, session: sidUse, ...r.stages })
+      const r = await runArm({
+        task,
+        sid: sidUse,
+        arm: preset,
+        label: `[${label}/${preset}${profByLabel[label] ? '@' + profByLabel[label] : ''} 第 ${i + 1}/${REPEAT} 次]`,
+        profile: profByLabel[label] ?? null,
+        ignoreWindows,
+      })
+      pair.arms[label].runs.push({ preset, session: sidUse, profile: profByLabel[label] ?? null, ...r.stages })
       if (r.stages.cleanAfterRestore === false) {
         console.error('⇒ 工作区没回到干净状态 ⇒ **中断整批**（否则后续跑会连环失败）')
         aborted = true
