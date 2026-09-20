@@ -326,7 +326,10 @@ async function runArm({ task, sid, arm = null, label = '' }) {
 
   // ② 交给 Agent
   const before = await sessionStats(sid)
-  console.log(`${tag}② 把题面发给会话 ${sid}（cwd=${before?.cwd ?? '?'} preset=${before?.agentPreset ?? '?'}）…`)
+  // ★ 记账：**模型**与**这次的 DSH build/profile** —— 没有这两项，"差异来自我们哪一层"就无从证明
+  report.stages.model = await sessionModel(sid)
+  report.stages.dsh = dshFacts()
+  console.log(`${tag}② 把题面发给会话 ${sid}（cwd=${before?.cwd ?? '?'} preset=${before?.agentPreset ?? '?'} model=${report.stages.model ?? '?'}）…`)
   report.stages.before = before
   const sent = await rpc('session.prompt', { sessionId: sid, mode: 'steer', content: [{ type: 'text', text: taskPrompt(task) }] })
   report.stages.promptStatus = sent.status
@@ -417,6 +420,31 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   return report
 }
 
+/**
+ * 该会话当前用的模型（`provider/model`）。**这是"我们不是在测模型"的硬证据**：
+ * 两臂必须读回同一个模型，不一致就直接弃跑（2026-09-20 用户指出：测的应是 DSH 这一层，不是模型能力）。
+ */
+async function sessionModel(sid) {
+  const r = await rpc('session.models', { sessionId: sid })
+  const c = r.json?.result?.value?.current
+  return c ? `${c.provider}/${c.model}` : null
+}
+
+/** 这次跑所在**哪个 build / profile**（"不同时期不同版本"是靠它记账的）。 */
+function dshFacts() {
+  let build = null
+  try {
+    build = fs
+      .readdirSync(path.join(REPO, 'packages/switchboard/out'))
+      .filter((x) => /^b\d+$/.test(x))
+      .sort()
+      .pop()
+  } catch {
+    /* ignore */
+  }
+  return { build: build ?? '(未知)', profile: process.env.WEB_PROFILE ?? '(未设；gen 默认 web)' }
+}
+
 // ── 重复 k 次（`pass^k`）：同题同臂跑 k 次，看**方差**（k=1 时单次差异可能吞掉真实差别）──
 const REPEAT = Math.max(1, Number(argOf('--repeat') ?? 1))
 if (!Number.isFinite(REPEAT) || REPEAT > 10) {
@@ -487,18 +515,88 @@ if (has('--pair')) {
     ['B', armB],
   ]
   for (const [label, preset] of ARM_LIST) pair.arms[label] = { preset, runs: [] }
+  pair.dsh = dshFacts()
+  console.log(`  本次跑在：build=${pair.dsh.build}  profile=${pair.dsh.profile}`)
+
+  // ★★ **先建好两臂的会话、读出模型、确认两臂同模型再开跑**（2026-09-20 用户指出：
+  //   我们要测的是 **DSH 这一层**，不是模型能力 ⇒ 模型是被控制的常量，必须**回读**证明它没变）。
+  const armSessions = {}
+  for (const [label, preset] of ARM_LIST) {
+    const sid0 = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+    const sel = await rpc('agentPreset.select', { sessionId: sid0, agentPreset: preset })
+    const rb = await sessionStats(sid0)
+    const model = await sessionModel(sid0)
+    armSessions[label] = { sid: sid0, preset, readback: rb?.agentPreset, model }
+    console.log(
+      `  ${label}: ${sid0}  preset=${preset}（回读 ${rb?.agentPreset ?? '?'} ${rb?.agentPreset === preset ? '✓' : '✗'}）  模型=${model ?? '?'}`,
+    )
+    if (rb?.agentPreset !== preset) {
+      console.error(`${label} 臂 preset 未生效 ⇒ 弃跑（HTTP 200 不算证据）`)
+      process.exit(1)
+    }
+  }
+  pair.models = { A: armSessions.A.model, B: armSessions.B.model }
+  if (armSessions.A.model && armSessions.B.model && armSessions.A.model !== armSessions.B.model) {
+    console.error(
+      `两臂模型不同（A=${armSessions.A.model} / B=${armSessions.B.model}）⇒ 那是在测**模型**，不是测我们这一层 ⇒ 弃跑。`,
+    )
+    process.exit(2)
+  }
+  console.log(`  ✓ 两臂同模型（${armSessions.A.model ?? '未读到'}）—— 差异只可能来自"我们改的那一层"\n`)
+
+  // ── `--dry-run`：只验"两臂同模型"这条前置判据（含**负向自证**），不跑题 ─────────────
+  if (has('--dry-run')) {
+    console.log('== --dry-run：只验前置，不跑题 ==')
+    console.log(`  ① 正向：两臂模型相同 ⇒ 判据放行（${armSessions.A.model} == ${armSessions.B.model}）`)
+    // ② **负向自证**：故意把 B 臂切到另一个模型，回读后必须**不同**（否则这条判据就是摆设）
+    const others = await rpc('session.models', { sessionId: armSessions.B.sid })
+    const cand = (others.json?.result?.value?.groups ?? [])
+      .flatMap((g) => g.models ?? [])
+      .map((m) => m.id)
+      .find((id) => id && id !== String(armSessions.B.model).split('/')[1])
+    if (!cand) {
+      console.log('  ② 负向自证：**读不到可切换的其它模型** ⇒ 本项不可自证（如实标注，不当"已验"）')
+    } else {
+      const sel = await rpc('session.selectModel', { sessionId: armSessions.B.sid, model: cand })
+      const afterB = await sessionModel(armSessions.B.sid)
+      console.log(
+        `  ② 负向自证：把 B 切到 ${cand}（HTTP ${sel.status}）→ 回读 B=${afterB}` +
+          ` ⇒ 与 A(${armSessions.A.model}) ${afterB && afterB !== armSessions.A.model ? '**不同** ⇒ 判据会拦住 ✓' : '仍相同 ⇒ **判据无效** ✗'}`,
+      )
+      // 切回来，别留副作用（若失败如实打印）
+      const back = await rpc('session.selectModel', { sessionId: armSessions.B.sid, model: String(armSessions.B.model).split('/')[1] })
+      console.log(`  ③ 复原 B 的模型（HTTP ${back.status}）→ 回读 ${await sessionModel(armSessions.B.sid)}`)
+    }
+    pair.dryRun = true
+    fs.writeFileSync(path.join(REPO, 'out', `eval-pair-dryrun-${Date.now()}.json`), JSON.stringify(pair, null, 2), 'utf8')
+    process.exit(0)
+  }
+
   // ★ **交替跑**（A1,B1,A2,B2…）而不是"A 全跑完再跑 B"：让两臂经历**同样**的时间背景
   //   （别的进程负载、我自己的编辑、缓存状态都会随时间漂移），这是成对比较的基本要求。
   let aborted = false
   for (let i = 0; i < REPEAT && !aborted; i++) {
     for (const [label, preset] of ARM_LIST) {
-      const runs = await runArmRepeated(task, preset, 1, `[${label}/${preset} 第 ${i + 1}/${REPEAT} 次]`)
-      pair.arms[label].runs.push(...runs)
-      if (runs.some((r) => r.cleanAfterRestore === false)) {
+      // 第 1 轮复用上面已建好（并已核对过 preset/模型）的会话；后续轮次各建新的空会话
+      const sidUse = i === 0 ? armSessions[label].sid : path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+      if (i > 0) {
+        const sel = await rpc('agentPreset.select', { sessionId: sidUse, agentPreset: preset })
+        const rb = await sessionStats(sidUse)
+        const model = await sessionModel(sidUse)
+        if (rb?.agentPreset !== preset || (model && model !== armSessions[label].model)) {
+          console.error(`${label} 第 ${i + 1} 轮：preset/模型与首轮不一致（preset=${rb?.agentPreset} model=${model}）⇒ 中断整批`)
+          aborted = true
+          break
+        }
+      }
+      const r = await runArm({ task, sid: sidUse, arm: preset, label: `[${label}/${preset} 第 ${i + 1}/${REPEAT} 次]` })
+      pair.arms[label].runs.push({ preset, session: sidUse, ...r.stages })
+      if (r.stages.cleanAfterRestore === false) {
         console.error('⇒ 工作区没回到干净状态 ⇒ **中断整批**（否则后续跑会连环失败）')
         aborted = true
         break
       }
+      console.log('')
     }
   }
 
