@@ -370,7 +370,49 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   return report
 }
 
-// ── 成对 CLI：--pair --task X --armA council --armB code ───────────────────
+// ── 重复 k 次（`pass^k`）：同题同臂跑 k 次，看**方差**（k=1 时单次差异可能吞掉真实差别）──
+const REPEAT = Math.max(1, Number(argOf('--repeat') ?? 1))
+if (!Number.isFinite(REPEAT) || REPEAT > 10) {
+  console.error('--repeat 取值 1..10')
+  process.exit(1)
+}
+
+/** 跑同一 (task, preset) k 次：每次都用**新建空会话** + preset 回读验证；返回每次的 stages。 */
+async function runArmRepeated(task, preset, k, label) {
+  const runs = []
+  for (let i = 1; i <= k; i++) {
+    const tag = k > 1 ? `${label} 第 ${i}/${k} 次` : label
+    const sidArm = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+    if (!sidArm || !sidArm.startsWith('session-')) {
+      console.error(`${tag}: 建会话失败 ⇒ 中断`)
+      break
+    }
+    const sel = await rpc('agentPreset.select', { sessionId: sidArm, agentPreset: preset })
+    // ★ **回读才算数**：`agentPreset.select` 用错字段会 HTTP 200 但什么也不发生（实测）
+    const rb = await sessionStats(sidArm)
+    const ok = rb?.agentPreset === preset
+    console.log(`${tag}: 会话 ${sidArm}  preset→HTTP ${sel.status}  回读=${rb?.agentPreset ?? '?'}  ${ok ? '✓' : '✗'}`)
+    if (!ok) {
+      runs.push({ preset, session: sidArm, error: 'preset-not-applied', readback: rb?.agentPreset ?? null })
+      continue
+    }
+    const r = await runArm({ task, sid: sidArm, arm: preset, label: `[${preset}#${i}]` })
+    runs.push({ preset, session: sidArm, ...r.stages })
+    console.log('')
+  }
+  return runs
+}
+
+/** 一组数值的 mean/min/max（n 为有效样本数）。 */
+function agg(runs, pick) {
+  const vals = runs.map(pick).filter((v) => typeof v === 'number' && Number.isFinite(v))
+  if (!vals.length) return null
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length
+  return { n: vals.length, mean, min: Math.min(...vals), max: Math.max(...vals), vals }
+}
+const fmtAgg = (a) => (a ? `${a.mean.toFixed(0)} [${a.min.toFixed(0)}–${a.max.toFixed(0)}]` : '-')
+
+// ── 成对 CLI：--pair --task X --armA council --armB code [--repeat k] ───────
 if (has('--pair')) {
   const armA = argOf('--armA') ?? 'council'
   const armB = argOf('--armB') ?? 'code'
@@ -379,78 +421,104 @@ if (has('--pair')) {
     console.error('有**已跟踪文件被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' + wt.modifiedTracked.join('\n'))
     process.exit(1)
   }
-  console.log(`成对实验：${task.id}\n  A = ${armA}（现行）   B = ${armB}（挑战者）\n  两臂严格串行、各用**新建空会话**、同 seed / 同预算\n`)
+  console.log(
+    `成对实验：${task.id}\n  A = ${armA}（现行）   B = ${armB}（挑战者）   重复 k=${REPEAT}\n` +
+      `  两臂交替串行、每次各用**新建空会话**、同 seed / 同预算\n`,
+  )
 
-  const pair = { task: task.id, at: new Date().toISOString(), arms: {} }
-  for (const [label, preset] of [
+  const pair = { task: task.id, at: new Date().toISOString(), repeat: REPEAT, arms: {} }
+  const ARM_LIST = [
     ['A', armA],
     ['B', armB],
-  ]) {
-    const sidArm = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
-    if (!sidArm || !sidArm.startsWith('session-')) {
-      console.error(`${label} 臂：建会话失败 ⇒ 终止`)
-      process.exit(1)
+  ]
+  for (const [label, preset] of ARM_LIST) pair.arms[label] = { preset, runs: [] }
+  // ★ **交替跑**（A1,B1,A2,B2…）而不是"A 全跑完再跑 B"：让两臂经历**同样**的时间背景
+  //   （别的进程负载、我自己的编辑、缓存状态都会随时间漂移），这是成对比较的基本要求。
+  for (let i = 0; i < REPEAT; i++) {
+    for (const [label, preset] of ARM_LIST) {
+      const runs = await runArmRepeated(task, preset, 1, `[${label}/${preset} 第 ${i + 1}/${REPEAT} 次]`)
+      pair.arms[label].runs.push(...runs)
     }
-    const sel = await rpc('agentPreset.select', { sessionId: sidArm, agentPreset: preset })
-    // ★ **回读才算数**：`agentPreset.select` 用错字段会 HTTP 200 但什么也不发生（实测）
-    const rb = await sessionStats(sidArm)
-    const ok = rb?.agentPreset === preset
-    console.log(`${label} 臂：会话 ${sidArm}  切 preset=${preset} → HTTP ${sel.status}  回读=${rb?.agentPreset ?? '?'}  ${ok ? '✓' : '✗ 未生效'}`)
-    if (!ok) {
-      pair.arms[label] = { preset, session: sidArm, error: 'preset-not-applied', readback: rb?.agentPreset ?? null }
-      console.error(`${label} 臂 preset 未生效 ⇒ 该臂不可用（不做 delta）`)
-      continue
-    }
-    console.log('')
-    const r = await runArm({ task, sid: sidArm, arm: preset, label: `[${label}/${preset}]` })
-    pair.arms[label] = { preset, session: sidArm, ...r.stages }
-    console.log('')
   }
 
-  const A = pair.arms.A ?? {}
-  const B = pair.arms.B ?? {}
-  const usable = (x) => x?.verdict && !x?.error
+  const A = pair.arms.A
+  const B = pair.arms.B
+  const fixedCount = (x) => x.runs.filter((r) => r.verdict === 'FIXED').length
+  const g = (x, key) => agg(x.runs, (r) => r[key])
+  const gTraj = (x, key) => agg(x.runs, (r) => r.trajectory?.[key])
   const rows = [
-    ['oracle（地板）', A.oracleAfter?.pass, B.oracleAfter?.pass, '两臂都必须绿'],
-    ['regression（地板）', A.regression?.pass, B.regression?.pass, '两臂都必须绿'],
-    ['toolCalls（主判据）', A.trajectory?.toolCalls, B.trajectory?.toolCalls, '越少越好'],
-    ['outputTokens（主判据）', A.tokenDelta, B.tokenDelta, '越少越好'],
-    ['uncachedInput（主判据）', A.uncachedInputDelta, B.uncachedInputDelta, '越少越好'],
-    ['steps', A.stepDelta, B.stepDelta, '辅助'],
-    ['wallMs', A.wallMs, B.wallMs, '越少越好'],
-    ['dangerous（安全列）', A.trajectory?.dangerous?.length, B.trajectory?.dangerous?.length, '越少越好，非 0 即显著'],
-    ['verdict', A.verdict, B.verdict, '地板'],
+    ['FIXED 次数（地板）', `${fixedCount(A)}/${A.runs.length}`, `${fixedCount(B)}/${B.runs.length}`, '两臂都要尽量高'],
+    ['toolCalls', fmtAgg(gTraj(A, 'toolCalls')), fmtAgg(gTraj(B, 'toolCalls')), '越少越好'],
+    ['outputTokens', fmtAgg(g(A, 'tokenDelta')), fmtAgg(g(B, 'tokenDelta')), '越少越好'],
+    ['uncachedInput', fmtAgg(g(A, 'uncachedInputDelta')), fmtAgg(g(B, 'uncachedInputDelta')), '越少越好'],
+    ['steps', fmtAgg(g(A, 'stepDelta')), fmtAgg(g(B, 'stepDelta')), '辅助'],
+    ['wallMs', fmtAgg(g(A, 'wallMs')), fmtAgg(g(B, 'wallMs')), '越少越好'],
+    ['dangerous', fmtAgg(agg(A.runs, (r) => r.trajectory?.dangerous?.length)), fmtAgg(agg(B.runs, (r) => r.trajectory?.dangerous?.length)), '越少越好，非 0 即显著'],
   ]
-  console.log('─'.repeat(78))
-  console.log(`成对 delta（A=${armA}  vs  B=${armB}）`)
-  console.log(`  ${'指标'.padEnd(24)} ${'A'.padStart(10)} ${'B'.padStart(10)} ${'Δ(B−A)'.padStart(12)}  说明`)
+  console.log('─'.repeat(84))
+  console.log(`成对 delta（A=${armA}  vs  B=${armB}）  单元格 = mean [min–max]，n=${REPEAT}`)
+  console.log(`  ${'指标'.padEnd(24)} ${'A'.padStart(20)} ${'B'.padStart(20)}  说明`)
   for (const [name, a, b, note] of rows) {
-    const num = typeof a === 'number' && typeof b === 'number'
-    console.log(
-      `  ${String(name).padEnd(24)} ${String(a ?? '-').padStart(10)} ${String(b ?? '-').padStart(10)} ` +
-        `${(num ? String(b - a) : '-').padStart(12)}  ${note}`,
-    )
+    console.log(`  ${String(name).padEnd(24)} ${String(a).padStart(20)} ${String(b).padStart(20)}  ${note}`)
   }
-  const bothFixed = usable(A) && usable(B) && A.verdict === 'FIXED' && B.verdict === 'FIXED'
+  // 均值差（只对两臂 n 相同的数值列）
   console.log('')
-  console.log(bothFixed ? '⇒ 两臂都通过地板（可看成本/路径差异）' : '⇒ **有臂没过地板** ⇒ 成本/路径的差异先别解读，先查那一臂')
-  pair.bothFixed = bothFixed
+  console.log('  均值差（B−A，正=挑战者更贵）：')
+  for (const [label, pick] of [
+    ['toolCalls', (r) => r.trajectory?.toolCalls],
+    ['outputTokens', (r) => r.tokenDelta],
+    ['uncachedInput', (r) => r.uncachedInputDelta],
+    ['wallMs', (r) => r.wallMs],
+    ['dangerous', (r) => r.trajectory?.dangerous?.length],
+  ]) {
+    const a = agg(A.runs, pick)
+    const b = agg(B.runs, pick)
+    if (!a || !b) continue
+    console.log(`    ${label.padEnd(16)} ${(b.mean - a.mean).toFixed(0).padStart(8)}   （A ${a.mean.toFixed(0)} → B ${b.mean.toFixed(0)}）`)
+  }
+  const bothAllFixed = fixedCount(A) === A.runs.length && fixedCount(B) === B.runs.length
+  console.log('')
+  console.log(bothAllFixed ? '⇒ 两臂每次都过地板（差异看成本/路径）' : '⇒ **有跑没过地板** ⇒ 先看那几跑，别急着解读均值')
+  pair.bothAllFixed = bothAllFixed
   const out = path.join(REPO, 'out', `eval-pair-${task.id}-${Date.now()}.json`)
   fs.writeFileSync(out, JSON.stringify(pair, null, 2), 'utf8')
   console.log(`报告 → ${path.relative(REPO, out)}`)
-  process.exit(bothFixed ? 0 : 2)
+  process.exit(bothAllFixed ? 0 : 2)
 }
 
-// ── 单臂 CLI ───────────────────────────────────────────────────────────────
+// ── 单臂 CLI（`--repeat k` 时就是 pass^k）─────────────────────────────────
 const wtRun = worktreeState()
 if (!wtRun.clean) {
   console.error('有**已跟踪文件被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' + wtRun.modifiedTracked.join('\n'))
   process.exit(1)
 }
-const report = await runArm({ task, sid })
-const out = path.join(REPO, 'out', `eval-run-${task.id}-${Date.now()}.json`)
-fs.writeFileSync(out, JSON.stringify(report, null, 2), 'utf8')
-console.log(`\n报告 → ${path.relative(REPO, out)}`)
-console.log('')
-console.log(`结论：**${report.stages.verdict ?? report.stages.error ?? '?'}**（outcome=${report.stages.outcome ?? '-'}，预算内=${report.stages.budgetOk ?? '-'}）`)
-process.exit(report.stages.verdict === 'FIXED' ? 0 : 2)
+const armSingle = argOf('--arm') ?? null
+if (armSingle) {
+  const sel0 = await rpc('agentPreset.select', { sessionId: sid, agentPreset: armSingle })
+  const rb0 = await sessionStats(sid)
+  console.log(`单臂 ${armSingle}：会话 ${sid} preset→HTTP ${sel0.status} 回读=${rb0?.agentPreset ?? '?'} ${rb0?.agentPreset === armSingle ? '✓' : '✗'}`)
+  if (rb0?.agentPreset !== armSingle) {
+    console.error('preset 未生效 ⇒ 弃跑（HTTP 200 不算证据）')
+    process.exit(1)
+  }
+}
+const runs = await runArmRepeated(task, armSingle, REPEAT, `[${armSingle ?? 'session'}]`)
+const fixedN = runs.filter((r) => r.verdict === 'FIXED').length
+console.log('─'.repeat(70))
+console.log(`pass^k（同题同臂重复 ${REPEAT} 次，单用新建空会话）`)
+console.log(`  FIXED ${fixedN}/${runs.length}`)
+for (const [k, pick] of [
+  ['toolCalls', (r) => r.trajectory?.toolCalls],
+  ['outputTokens', (r) => r.tokenDelta],
+  ['uncachedInput', (r) => r.uncachedInputDelta],
+  ['steps', (r) => r.stepDelta],
+  ['wallMs', (r) => r.wallMs],
+  ['dangerous', (r) => r.trajectory?.dangerous?.length],
+]) {
+  const a = agg(runs, pick)
+  if (a) console.log(`  ${k.padEnd(16)} mean ${a.mean.toFixed(0).padStart(7)}   [${a.min}–${a.max}]   n=${a.n}   样本=${JSON.stringify(a.vals)}`)
+}
+const out = path.join(REPO, 'out', `eval-run-${task.id}-x${REPEAT}-${Date.now()}.json`)
+fs.writeFileSync(out, JSON.stringify({ task: task.id, arm: armSingle, repeat: REPEAT, runs }, null, 2), 'utf8')
+console.log(`报告 → ${path.relative(REPO, out)}`)
+process.exit(fixedN === runs.length ? 0 : 2)
