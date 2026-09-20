@@ -1,4 +1,4 @@
-# 接手指南（**回执** + 下一项）—— 2026-09-20 13:40
+# 接手指南（**回执** + 下一项）—— 2026-09-20 13:42（13:42 复核：推送已完成、栈健康）
 
 > **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。
 > 上一轮的交接文档就是本文件；本轮把「做完了什么 + 现在什么状态 + 下一项」重写在顶部，旧长尾留档在 §6。
@@ -53,12 +53,15 @@
   冻结任务集（首批 3 题 = 把修过的回归反向打回去，oracle 就是我们已有的门）；
   校验器证明"打上 seed 后 oracle **必须变红**"，否则是**假题**（字节级 sha256 还原；3 题有效 / 0 题有问题）。
 
-### 1.5 提交与推送状态
+### 1.5 提交与推送状态 —— ✅ **已推送完成**（2026-09-20 13:42 复核）
 
-本地 5 个新提交（`fix(switchboard)` / `test(drain)` / `docs(arch)+feat(eval)` / `docs(memory)` / `docs(handover)`），
-连同早前积累的，**共 40 个提交待推送**。⚠️ **推送卡住了**：git 配的代理 `127.0.0.1:7890` **没在跑**，
-直连 GitHub 超时，工作层代理拒绝 CONNECT。
-⇒ **请启动你的代理客户端**（监听 7890 的那个），然后 `git push origin master`（或让我再推一次）。
+- **远端 `origin/master` = `89a7d8c`，与本地 HEAD 一致** ⇒ **全部 41 个提交已在远端**。
+  依据是 `git ls-remote origin refs/heads/master` —— **直接问服务器**，不看本地 remote-tracking 引用。
+- 原先的阻塞（代理 `127.0.0.1:7890` 未启动）**已解除**：13:42 实测 7890 在监听。
+- ⚠️ **坑（记下来）**：本环境下 `git push` 可能报
+  `fatal: could not read Username for 'https://github.com': terminal prompts disabled`
+  —— 那是**推行需要认证而终端提示被禁用**，**不代表内容没上去**。
+  **判断"推没推上去"的唯一可信方式是 `git ls-remote`**，不是 `git push` 的输出、也不是本地 `origin/master`。
 
 ---
 
@@ -73,6 +76,15 @@ node scripts/verify-drain-after-swap.mjs          # R0 会告诉你：栈在不�
 - 栈由**用户终端**启动（Agent 侧起的进程会被回收）：`node scripts/relaunch-switchboard.mjs`。
 - ⚠️ 现在跑着的**控制面**是 13:14 那个进程（**旧 build**）⇒ `state.jsonl` 里暂时看不到 `canSeeSessions`
   字段（那行由控制面拼）；gen 侧 `boot.log` / `resume.jsonl` 已经能看到 ✓。重启一次即对齐，**不急**。
+
+**13:42 复核结果（本轮回执）**：
+
+| 项 | 读数 |
+|---|---|
+| 控制面 | `stage=idle` / `locked=false` / `activeGen=gen-3086` / **`freezeSeq=1315`**（真值，不再是 0）/ `lastFencingSeq=5833` |
+| 前门 | `http://127.0.0.1:3080/` → **200** |
+| `verify-drain-after-swap.mjs` | **R0a/R0b/R0c + R1–R7 全绿**；最近一次 freeze `13:30:00 gen-3085`：`quiesced=true canSeeAgents=true running=1→cancel=1 stillBusy=[] flushFailed=[] 14ms`；`seal: keep-old` |
+⇒ **栈活着，drain 修复在真机上确实生效。**
 
 ---
 
