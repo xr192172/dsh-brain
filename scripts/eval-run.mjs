@@ -368,8 +368,18 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   const after = sh(oracle[0], oracle.slice(1))
   const reg = sh(regression[0], regression.slice(1))
   report.stages.diffStat = sh('git', ['diff', '--stat']).stdout.trim()
-  report.stages.oracleAfter = { status: after.status, pass: after.status === 0 }
-  report.stages.regression = { status: reg.status, pass: reg.status === 0 }
+  // ★ 2026-09-20 加：**把判据自己的输出留档**。此前只记 status，出现过"regression 红但无从知道哪条门红"，
+  //   只能靠复现猜（而猜了半天没复现出来）。判据的产出必须可回看，否则等于没有证据。
+  report.stages.oracleAfter = {
+    status: after.status,
+    pass: after.status === 0,
+    tail: `${after.stdout ?? ''}${after.stderr ?? ''}`.slice(-1500),
+  }
+  report.stages.regression = {
+    status: reg.status,
+    pass: reg.status === 0,
+    tail: `${reg.stdout ?? ''}${reg.stderr ?? ''}`.slice(-2000),
+  }
   // ★ `git diff` 为空 **不等于**"它什么都没做"（正解常是改回 HEAD）⇒ 必须看轨迹
   report.stages.trajectory = analyzeTrajectory(sid)
   report.stages.verdict = outcome === 'settled' && after.status === 0 && reg.status === 0 ? 'FIXED' : 'NOT-FIXED'
