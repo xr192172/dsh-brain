@@ -273,61 +273,135 @@ prepareSwitch: async (graceMs) => {
 在那之前，你付的是保险费却拿不到理赔；在那之后，它才开始净为正。**
 
 ---
+## 8. ★★ 换代的写入竞态：**freeze 从来没让人停过写**（2026-09-15 实测，2026-09-16 修复）
 
-## 8. ★★ 换代的写入竞态：hard-switch 会让**两代并发写同一份会话**（2026-09-15 实测）
+> **本节 2026-09-16 00:40 重写**。初版（2026-09-15 深夜）把成因写成
+> 「`hard-switch` 省去静态冻结 ⇒ 两代并发写」。**那是错的** —— 现场日志显示
+> `freeze a lastSeq=0`（旧代**有响应**，没走强切）。真因更基础、也更容易复现：
+> **`freeze` 本身不停写**，硬切只是其中最坏的一种情形。
+> 错判的代价很具体：如果按初版去修（只改硬切分支），**常规换代每次都仍然会重叠**。
 
-### 症状
+### 8.1 症状
 
-会话日志出现 **seq 回退 + 区间重叠** ⇒ `corrupt session log: seq gap in committed region`。
+会话日志出现 **seq 回退 + 区间重叠** ⇒ 读取时 `seq gap in committed region` ⇒ 该会话历史打不开。
 
-**实测证据**（`session-3d8ea18d`，elv，`createdAt` 14:15:56）：
+### 8.2 现场重建（`session-3d8ea18d`，cwd `D:\project_develop\elv`）
+
+按**物理行顺序**从 zstd 里解出来（`out/probe-hsw-race.mjs` 的产物）：
 
 ```
-seq=623 tool/call     tool_apply                       ← 这一轮调它触发了蓝绿发布
-seq=624 tool/result
-seq=625..627 step/end, step/start, step/end
-seq=628 turn/end      reason={"kind":"interrupted"}     ← 换代打断该回合
-seq=629 session/end-seed                                ← 旧代"封存结束"
-seq=627 assistant/chunk    ← ★★ seq **回退**：629 之后又回到 627
-seq=628 assistant/chunk
-seq=629 assistant/chunk
-seq=630 assistant/chunk …
-seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户的消息）
+#58..#61  seq=623..626  tool/call(tool_apply) → tool/result → step/end → step/start   t=22:30:37.462~
+#62..#64  seq=627..629  step/end, turn/end(interrupted), session/end-seed             closers 复用 626 的 t；end-seed t=22:30:45.424
+#65..#78  seq=627..912  assistant/chunk…assistant/message…turn/end(completed)          t=22:30:45.503 ~ 47.642
+#79..#    seq=630..     下一轮（turn 3）的 agent/inbox/spliced…                        t=22:42:50
 ```
 
-⇒ 旧代「封存结束」之后**又回头**写正在流式输出的 chunk，**同时**新代把用户消息写进同一区间。
+同时段控制面流水（`~/.dsh/switchboard/state.jsonl`，本地时间）：
 
-### 机制（我们自己的协议）
+```
+22:30:37.474  defer: 请活跃代 gen-3086 先收尾本轮 (grace=20000ms)
+22:30:37.479  defer done: ok=true agent=true turnInFlight=false waitedTurnEnd=false reason=idle   ← ★ 谎报空闲
+22:30:37.489  spawned gen-3087
+22:30:39.006  freeze a lastSeq=0                                                                  ← ★ 冻结"成功"，但读数是 0
+22:30:39.007  resume-session=session-02a1a38b… (via-gen)                                          ← ★ resume 指向了另一个会话
+22:30:39.012  flip to gen-3087
+22:30:41.304  retire gen-3087（旧代 gen-3086 的 pid 直到 22:31:11 才退出）
+```
 
-- fencing 机制**存在且完整**：`handover-protocol.ts` 的 `freezeSeq`（旧代冻结时已落盘的全局最大 seq，
-  新代只能从 ≥freezeSeq 之后 append）+ `writerToken`（每次授写唯一 UUID）。
-- **但 `coordinator.ts:298-308` 有一条兜底**：
+⇒ **22:30:37 这次换代是常规路径**（defer + freeze 都"成功"）。重叠发生在旧代还在写、
+新代已经开始服务**同一份会话**的窗口里。
 
-  > `freeze 活跃代无响应 → 走强切（省去静态冻结，直接 promote）`
+### 8.3 机制：`seq` 就是 `log.length`，而"载入一个会话"= 用磁盘前缀重建计数器
 
-  记录里写作 `via … (hard-switch, no-freeze)`。
+`dsh-session` 里：
 
-- ⇒ **硬切时旧代并不知道自己该停写**（它主线程被占 —— 例如正在流式输出），会继续 append；
-  新代同时从 `freezeSeq` 之后写 ⇒ **两代并发追加同一文件** ⇒ 回退/重叠。
+```js
+get seq() { return this.log.length }          // dsh-session/lib/index.js:1406
+// 从磁盘载入（resume / 懒加载）→ 用存储事件当种子 → 立刻补一条 end-seed
+if (seed !== void 0 && this.log.at(-1)?.type !== 'session/end-seed') this.append('session/end-seed', {})
+```
 
-### ★ 操作纪律（立刻可用的缓解）
+`dsh-session/lib/types/repair.js` 在载入时还会合成"收尾事件"补掉悬空的回合：
 
-`?cmd=restart` = **fast 模式**，而 fast **跳过的第一步正是 defer**「先请当前活跃代收尾本轮
-（注入挂起提示 + 等 `turn/end` 或 grace 兜底）」。
+```js
+let seq = last.seq + 1                        // 从磁盘最后的 seq 往后排
+closers.push({ type: 'step/end',  seq: seq++, time })                                  // time = last.time
+closers.push({ type: 'turn/end',  seq: seq++, time, data: { turn, reason: { kind: 'interrupted' } } })
+```
 
-> **⇒ 在"可能还有回合在跑"时，用 `?cmd=handover`（非 fast）；`restart` 只在确认空闲时用。**
-> ⚠️ 注意：`?cmd=status` 的 `stage==='idle'` 只表示**换代状态机**空闲，
-> **不代表会话没有回合在跑**。
+**关键推论**：旧代的内存计数器**永远领先于已落盘的日志前缀**（它写着但还没 flush）。
+因此任何**第二个加载同一会话**的实例（新代懒加载、或同进程内另一个 Session 实例）
+都会从旧代**即将要写**的那个 seq 开始排号 ⇒ **不是小概率竞态，是必然重叠**。
+现场完全对得上：closers 的 `time` 是 626 的时间戳（正是"复用 last.time"），
+`end-seed` 落在 629（磁盘前缀 628 + 1）——而旧代那一轮从 **627** 一路写到 **912**。
 
-（2026-09-15 晚我连发了几次 `restart` —— 其中若有回合在跑，就是这个竞态的放大器。记于此。）
+### 8.4 于是真正要问的是：**谁让旧代一直有写权？** 四个答案，都在我们自己的代码里
 
-### 末闭合：hard-switch 应当**先确保旧代停写**再 promote（未实施）
+| # | 机制 | 实测事实 | 后果 |
+|---|---|---|---|
+| 1 | `drain.ts` 的 `evaluateStatic` | 判据是 `armed && lastSeq >= 0` —— **没有任何"停"动作**；注释里那句"在下一次边界不再发起新请求"从未实现 | freeze 恒返回 `static:true`，旧代照写 |
+| 2 | `lastSeq`（`computeCaughtUpSeq`） | 依赖 `sessionPersistence.listSessions` + `projectionCache.coldSnapshot`，拿不到就归 0。**171 条 freeze 记录，全部 `lastSeq=0`** | 租约 `freezeSeq=0`、追平门槛形同虚设 |
+| 3 | defer 的 `turnInFlight` | 靠 `ctx.on('turn/start'\|'turn/end')`。**204 次 defer，`waitedTurnEnd=true` 出现 0 次**；22:30 那次明确有回合在跑却报 `reason=idle` ⇒ **监听从未触发** | "先请活跃代收尾本轮"从来没生效过 |
+| 4 | `retainMs`（默认 30s） | flip 后旧代继续活着，它**正在跑的那一轮**会写到自然结束（实测 flip 后 8.6s 才写完） | 重叠窗口 = 30s（且新代随时可服务该会话） |
 
-候选修法：
+补充事实：`resumeId` 的挑法把**前门嗅探**放在最前，而前门嗅探到的是最后一次请求过前门的会话
+——那次它指向 `session-02a1a38b`（一个**没在跑**的会话），于是新代 attach 错了人，
+真正的活跃会话 `3d8ea18d` 反倒没人管，等浏览器重新连上时被新代懒加载 ⇒ 撞上旧代的写。
 
-1. 硬切时**先 SIGKILL 旧代**再 promote（最强，但要确认不会误杀共享进程）；
-2. 或 promote 前**短暂等待 / 确认旧代不再 append**；
-3. 或给新代一个 `graceSeq` 窗口，**只追加不重复区间**。
+### 8.5 修的两侧（2026-09-16）
 
-> ⚠️ 这是最安全攸关的一段代码（换代本身），**不在深夜临时改**。
-> 下一步：读 `coordinator.ts` 的 hard-switch 分支 + `drain.ts`，定一个小而安全的修法。
+**A. gen 侧：`freeze` 变成"真的停"（`packages/switchboard/src/drain.ts` 重写）**
+
+- 直读 `agents.list()` 里每个 agent 的**真实阶段**（`agent.phase.kind`），不再听跨插件事件；
+- 对**正在跑回合**的 agent 调 `cancel({kind:'hook',reason:'handover/freeze'})`，然后 `whenIdle()` **有界等待**；
+- **维护型活动（压缩）等结束、不 cancel**（半途中断可能留下悬空 compaction 标记）；
+- 落盘改用官方 **`sessions.flush(session)`**（可 await），逐会话记录失败；
+- `lastSeq` = live 会话 `seq-1` 的**最大值**（真实读数），并上报**全部** live 会话 + `primarySessionId`
+  （= 开工时**有回合在跑**那个 agent 的会话）；
+- 新判据 `quiesced`：**回合全停 + 落盘无失败 + 能看到 agent**。**看不到 agent 时一律 false**
+  ——"看不见"不是"没在跑"的证据（这是最容易长出来的假绿）。
+- `prepareSwitch` 同样改用真实阶段：现在**真的会**对在跑的回合注入"请收尾"并等它结束。
+
+**B. 控制面侧：交出前门之前必须封口（`coordinator.ts`）**
+
+- `resumeId` 顺序改为 `primarySessionId`（冻结时在跑的那个）→ 前门嗅探 → seq 最大者；
+- 新增 `sealPlan(quiesced)`：
+  - `quiesced=true` ⇒ 旧代确认停写 ⇒ 保留 30s 优雅退役（**回滚网仍在**）；
+  - `quiesced=false`（强切 / drain 超时 / 落盘失败 / 看不到 agent）⇒ **在 `finally` 放锁之前
+    强杀旧代并等 PID 消失**。锁期间前门对 WS 升级与非 GET 一律 503 ⇒ 浏览器无法在旧代还活着时
+    把同一份会话加载到新代上。杀不干净就**落盘 `unfenced-old-gen.txt` + 大字告警**，绝不静默。
+- `waitCatchUp` 支持自定义超时；freeze 后的追平改为 **1.5s 有界观测项**（旧实现拿恒 0 的读数当门槛，
+  既是假绿、又会把每次换代拖成 40s）。
+
+**代价与取舍（写清楚，别事后惊讶）**：`quiesced=false` 时旧代被强杀 ⇒ 这一段**没有非破坏回滚**
+（`rollbackFlip` 指不回一个已死的代）。这是有意的：回滚丢的是几十秒可用性，
+重叠丢的是**该会话的全部历史**（永久、且事后难判）。`quiesced=true` 的常规路径不受影响。
+
+### 8.6 判据：怎么知道它修好了
+
+- 单测/接线门：`node scripts/test-handover-drain.mjs`（36 项，已并入 `check:all`）——
+  红方向（卡住的回合 / maintenance / flush 失败 / 看不到 agent 都不许报"已停写"）、
+  绿方向（真停住必须报 true）、以及**封口顺序的两方向自证**（去掉强杀、把强杀挪到解锁之后，都必须报红）。
+  另含**上游形状断言**：`agent.phase/cancel/whenIdle`、`session.seq===log.length`、
+  `sessions.flush` 一旦被上游改掉就报红（否则 drain 会**静默退化**成每次都强杀）。
+- 真机验收（**每次换代后**看一眼）：
+  1. `state.jsonl` 里该次交接应有 `freeze a lastSeq=<非0> quiesced=true (canSeeAgents=true running=N→cancel=N …)`
+     —— 若 `quiesced=false` 或 `canSeeAgents=false`，说明 gen 侧接线没上，**必须查**；
+  2. `~/.dsh/switchboard/gen-<最新>/resume.jsonl` 里有 `{"phase":"drain",...}`；
+  3. `node scripts/check-session-integrity.mjs --limit 12` 无新增 seq gap；
+  4. 换代窗口内**不应**在会话日志里看到"同一 seq 出现两次"或"seq 回退"
+     （复扫工具：`node out/probe-hsw-race.mjs <会话目录> …`，只看"回退点数/重复 seq"两节）。
+
+### 8.7 仍未闭合（**别当成已修**）
+
+- **真机换代还没跑过**：本节的修复已构建（`packages/switchboard/lib`）+ 全门通过，
+  但**没有在活的 switchboard 上做过一次换代**。"gen 侧接线在真机可用"目前只有三条间接证据
+  交叉支持（既有生产证据 `resume.jsonl` 里 `agents:true`、上游形状门、假件单测），
+  **不等于**已实测。⇒ 下次空档换代时按 §8.6 的 1–4 逐条看。
+- `readCaughtUpSeq`（`computeCaughtUpSeq`）依旧可能返回 0（服务缺失即归零），
+  于是 staging 的 ready / 首段追平门槛仍然是**惰性的**。它不在这条损坏路上（已加有界观测），
+  但要修就得先搞清 `sessionPersistence.listSessions` / `coldSnapshot.asOfSeq` 为什么拿不到。
+- **回滚路径的重叠风险**：`quiesced=false` 时若 flip 后 verify 失败并回滚，
+  旧代（未停写）与新代（已经被 flip 服务过一小会儿）仍可能碰同一个会话。
+  窗口小得多，但没有被消除。
+- **`session-3d8ea18d` 本身的 seq gap 仍在**（截断会丢 59%）。见 `topics/current-status.md`。
