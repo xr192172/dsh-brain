@@ -1,0 +1,22 @@
+{
+  "name": "@dsh-brain/skill-tree",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "description": "能力库的数据层：把 ai-base/agent-shell/internal/memory 的 SkillNode + 生命周期移植到 TS。设计依据 docs/revised-architecture-2026-09-20.md §7.3（能力库不需要设计，SkillTree 已经是了；缺的只是执行方式）与 .workbuddy/memory/topics/self-evolution-design.md §13。本包**只做数据层**：类型 + 生命周期 + Absorb（新建/合并/融合的账本），**刻意不含执行器** —— 执行器要可替换（注入 → spawn provider 委派），见 docs/skill-tree-port-plan.md。",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
