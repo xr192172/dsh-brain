@@ -13,7 +13,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const OLD = 'computeHash'
@@ -28,11 +28,12 @@ const read = (f) => fs.readFileSync(path.join(HERE, f), 'utf8')
 const stripStrings = (s) => s.replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/`(?:[^`\\]|\\.)*`/g, '``')
 const countIdent = (s, id) => (stripStrings(s).match(new RegExp(`\\b${id}\\b`, 'g')) ?? []).length
 
-// ① 行为不变
-const r = spawnSync('node', ['index.js', '--selftest'], { cwd: HERE, encoding: 'utf8' })
-const got = (r.stdout ?? '').trim()
+// ① 行为不变（★ 用 **in-process 调用**，不起子进程、不用管道 stdio ——
+//    否则在 workspace-write 沙箱里会被 EPERM 拦，做题的 agent 就跑不动这个 oracle，只能去申请提权 ⇒ 卡死）
+const mod = await import(pathToFileURL(path.join(HERE, 'index.js')).href)
+const got = mod.selftestLines().join('\n').trim()
 if (got !== BASELINE) {
-  problems.push(`① 行为变了：selftest 输出与基线不一致\n     期望:\n${BASELINE.split('\n').map((l) => '       ' + l).join('\n')}\n     实际:\n${got.split('\n').map((l) => '       ' + l).join('\n')}${r.stderr ? '\n     stderr: ' + r.stderr.slice(0, 300) : ''}`)
+  problems.push(`① 行为变了：selftest 输出与基线不一致\n     期望:\n${BASELINE.split('\n').map((l) => '       ' + l).join('\n')}\n     实际:\n${got.split('\n').map((l) => '       ' + l).join('\n')}`)
 } else ok.push('① 行为不变（selftest 输出逐字等于基线）')
 
 // ② 已改名
