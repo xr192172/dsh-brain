@@ -89,7 +89,30 @@ function checkShape(t) {
  * 中途任何一步抛错 ⇒ 回滚已改的文件（best-effort）并抛出，绝不留半改状态。
  */
 function prepare(task) {
-  if (fs.existsSync(MANIFEST)) throw new Error(`已有未还原的 seed：${MANIFEST}（先跑 --restore）`)
+  // ★ 幂等：若已有清单，但**它记的文件都已经回到改前字节**（上次已经还原干净，只是清单没删掉），
+  //   就直接清掉清单继续；否则才报错让人介入。
+  //   为什么需要：2026-09-20 实测出现过"清单残留 ⇒ 后续 `--prepare` 连环失败"（实验台整批白跑）。
+  if (fs.existsSync(MANIFEST)) {
+    let stale = true
+    try {
+      const man = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'))
+      for (const f of man.files ?? []) {
+        const abs = path.join(REPO, f.file)
+        if (!fs.existsSync(abs) || sha(fs.readFileSync(abs)) !== f.sha256) {
+          stale = false
+          break
+        }
+      }
+    } catch {
+      stale = false
+    }
+    if (stale) {
+      fs.rmSync(MANIFEST)
+      say('  · 清掉一份**已还原干净**的残留清单（幂等处理）')
+    } else {
+      throw new Error(`已有未还原的 seed：${MANIFEST}（先跑 --restore）`)
+    }
+  }
   const files = []
   fs.mkdirSync(BACKUP_DIR, { recursive: true })
   try {
@@ -101,7 +124,16 @@ function prepare(task) {
       if (next === text) throw new Error(`seed 未产生变化：${e.file}`)
       const backup = path.join(BACKUP_DIR, `${sha(before)}-${path.basename(e.file)}`)
       fs.writeFileSync(backup, before) // ★ 备份的是**改前**字节
-      fs.writeFileSync(abs, next, 'utf8')
+      // ★ Windows 上文件可能被瞬时占用（EPERM/EBUSY）⇒ 重试几次，别让实验因为一次瞬时锁挂掉
+      for (let i = 0; ; i++) {
+        try {
+          fs.writeFileSync(abs, next, 'utf8')
+          break
+        } catch (e) {
+          if (i >= 4) throw new Error(`写入失败(${e && e.code}): ${abs} —— 可能是被别的进程占用`)
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250) // 同步睡 250ms（prepare 是同步函数）
+        }
+      }
       files.push({ file: e.file, sha256: sha(before), backup, after: sha(fs.readFileSync(abs)) })
     }
   } catch (err) {
