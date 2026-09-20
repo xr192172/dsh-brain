@@ -781,6 +781,13 @@ function dshFacts() {
  * 该插件标记**该有的有、该没有的没有**（读"效果"，不读我们的意图）。
  */
 const CTRL = process.env.DSH_CTRL ?? 'http://127.0.0.1:31800'
+/** 各 profile 的**工具面**家族要求（就绪闸用）：空数组 = 只查工具条数下限。 */
+const PROFILE_TOOL_MUST = {
+  web: ['mcp__design-canvas__*'],
+  'web-nodc': [],
+  'web-notev': ['mcp__design-canvas__*'],
+}
+
 const PROFILE_EXPECT = {
   web: { must: [/\[tool-evolution\] apply running/, /\[design-canvas-bridge\] config:/], mustNot: [] },
   'web-notev': { must: [/\[design-canvas-bridge\] config:/], mustNot: [/\[tool-evolution\] apply running/] },
@@ -792,7 +799,7 @@ const PROFILE_EXPECT = {
  * 必须等到**工具面正常**再开跑。判据用"真读一次工具面"，不用"boot 无错"。
  * 代价：一次极短 prompt（几秒 + 少量 token），换来"臂跑在完整 gen 上"。
  */
-async function waitArmReady(minTools = 20, tries = 8) {
+async function waitArmReady(minTools = 20, tries = 8, must = []) {
   for (let i = 1; i <= tries; i++) {
     const sid = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
     if (!sid || !sid.startsWith('session-')) {
@@ -804,7 +811,11 @@ async function waitArmReady(minTools = 20, tries = 8) {
       await new Promise((r) => setTimeout(r, 2000))
       const a = analyzeTrajectory(sid)
       const n = a?.metrics?.toolSetSize ?? 0
-      if (n >= minTools) return { ready: true, toolSetSize: n, probeSession: sid, tries: i }
+      const set = a?.metrics?.toolSet ?? []
+      const mt = (p, nm) => (p.endsWith('*') ? nm.startsWith(p.slice(0, -1)) : nm === p)
+      const miss = must.filter((p) => !set.some((nm) => mt(p, nm)))
+      if (n >= minTools && miss.length === 0) return { ready: true, toolSetSize: n, missing: [], probeSession: sid, tries: i }
+      if (n >= minTools && miss.length) console.log('  [就绪闸] 工具数够(' + n + ')但缺家族 ' + miss.join(',') + ' ⇒ 再等')
     }
     console.log(`  [就绪闸] 第 ${i} 次探测：工具面仍不足 ${minTools} 个 ⇒ 等 5s 再试`)
     await new Promise((r) => setTimeout(r, 5000))
@@ -985,19 +996,19 @@ if (has('--pair')) {
   // ★★ **先建好两臂的会话、读出模型、确认两臂同模型再开跑**（2026-09-20 用户指出：
   //   我们要测的是 **DSH 这一层**，不是模型能力 ⇒ 模型是被控制的常量，必须**回读**证明它没变）。
   const armSessions = {}
-  // ★ 开跑前的就绪闸（否则可能跑在"插件还没注册完工具"的 gen 上 —— 实测踩过：工具面只有 4 个）
-  {
-    const rd = await waitArmReady()
-    pair.readyGate = rd
-    if (rd.ready) console.log(`  [就绪闸] ✓ 工具面 ${rd.toolSetSize} 个（探测 ${rd.tries} 次）`)
-    else console.error('  [就绪闸] ✗ 一直没就绪 ⇒ 这次跑的结果不可信（工具面不足）')
-  }
   for (const [label, preset] of ARM_LIST) {
     const prof = profByLabel[label]
     if (prof) {
       const sw = await ensureProfile(prof)
       if (sw.switched && sw.t0) ignoreWindows.push([sw.t0, sw.t1])
       pair.arms[label].profileSwitch = { profile: prof, gen: sw.gen, switched: sw.switched, matches: sw.matches ?? null, fingerprint: sw.fingerprint }
+    }
+    // ★ 该臂的就绪闸：按**这个 profile 的家族要求**探一次工具面（web 必须看得见 design-canvas）
+    {
+      const rd = await waitArmReady(20, 6, PROFILE_TOOL_MUST[prof] ?? [])
+      pair.arms[label].readyGate = rd
+      if (!rd.ready) console.error('  [就绪闸] ' + label + ' 臂（' + prof + '）没就绪 ⇒ 该臂结果不可信')
+      else console.log('  [就绪闸] ' + label + ' 臂（' + prof + '）✓ 工具面 ' + rd.toolSetSize + ' 个')
     }
     const sid0 = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
     const sel = await rpc('agentPreset.select', { sessionId: sid0, agentPreset: preset })
@@ -1012,6 +1023,7 @@ if (has('--pair')) {
       process.exit(1)
     }
   }
+  pair.profileToolMust = { A: PROFILE_TOOL_MUST[profByLabel.A] ?? [], B: PROFILE_TOOL_MUST[profByLabel.B] ?? [] }
   pair.models = { A: armSessions.A.model, B: armSessions.B.model }
   if (armSessions.A.model && armSessions.B.model && armSessions.A.model !== armSessions.B.model) {
     console.error(
