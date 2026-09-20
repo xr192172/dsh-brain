@@ -28,6 +28,7 @@ import {
   hasReadySignal,
   lastBootSegment,
 } from '../packages/switchboard/lib/boot-health.js'
+import { removeIfExists } from './lib-safe-fs.mjs'
 
 const OUT = 'D:/project_develop/dsh-brain/out/test-boot-health.txt'
 const log = []
@@ -271,7 +272,8 @@ say('== 5. lastBootSegment：历史失败不得误判本次 ==')
   check('切成最后一段', seg.startsWith('===== BOOT gen=gen-3095'))
   check('★ 不含历史失败文本', !seg.includes('历史启动的失败'))
   check('最后一段判为健康（历史失败未污染）', findFatalBootErrors(seg).length === 0 && hasReadySignal(seg))
-  fs.unlinkSync(tmp)
+  // ★ 删之前先判存在：宿主注入的 node-safe-delete-shim 在删不存在的路径时会 fail-closed 崩脚本（回执 B4）
+  removeIfExists(tmp)
 }
 
 {

@@ -21,6 +21,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { removeIfExists } from './lib-safe-fs.mjs'
 
 const REPO = 'D:/project_develop/dsh-brain'
 const LIB = path.join(REPO, 'packages/capability-bridge/lib/index.js')
@@ -173,7 +174,7 @@ console.log('== ⑧ 无 agent 的调用（直接/测试调用）不该炸 ==')
   eq('无 agent ⇒ 原样返回', JSON.stringify(r), JSON.stringify(downstream))
 }
 
-fs.rmSync(TMP, { recursive: true, force: true })
+removeIfExists(TMP)
 
 console.log('\n=========================================')
 console.log(`结果：${pass} passed, ${fail} failed`)

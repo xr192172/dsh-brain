@@ -20,6 +20,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { removeIfExists } from './lib-safe-fs.mjs'
 
 const REPO = 'D:/project_develop/dsh-brain'
 const GATE = path.join(REPO, 'scripts/check-plugin-hygiene.mjs')
@@ -272,7 +273,7 @@ console.log('== ⑦ 安全：未触碰真实 profile / ~/.dsh ==')
   eq('真实 profile manifest 未变', after.prof, before.prof)
 }
 
-fs.rmSync(FIX, { recursive: true, force: true })
+removeIfExists(FIX)
 
 console.log('\n=========================================')
 console.log(`结果：${pass} passed, ${fail} failed`)

@@ -16,6 +16,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { applyAnchors } from './patch-anchors.mjs'
+import { removeIfExists } from './lib-safe-fs.mjs'
 
 const TMP = 'D:/project_develop/dsh-brain/out/patch-anchor-fixtures'
 const REPO = 'D:/project_develop/dsh-brain'
@@ -45,7 +46,8 @@ function fx(name, content) {
 function ffWrite(p, c) { fs.writeFileSync(p, c, 'utf8') }
 const read = (p) => fs.readFileSync(p, 'utf8')
 
-fs.rmSync(TMP, { recursive: true, force: true })
+// ★ 删之前先判存在：宿主注入的 node-safe-delete-shim 在删不存在的路径时会 fail-closed 崩脚本（回执 B4）
+removeIfExists(TMP)
 
 console.log('== 三态判定 ==')
 

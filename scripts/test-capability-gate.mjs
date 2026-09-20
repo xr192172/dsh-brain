@@ -19,6 +19,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { removeIfExists } from './lib-safe-fs.mjs'
 
 const REPO = 'D:/project_develop/dsh-brain'
 const FIX = path.join(REPO, 'out/gate-fixtures')
@@ -119,7 +120,7 @@ function cap(id, pkgFile, over = {}) {
 
 function makeHome(name, caps) {
   const home = path.join(FIX, `home-${name}`)
-  fs.rmSync(home, { recursive: true, force: true })
+  removeIfExists(home)
   fs.mkdirSync(path.join(home, 'capabilities'), { recursive: true })
   fs.writeFileSync(
     path.join(home, 'capabilities', 'registry.json'),

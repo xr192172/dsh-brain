@@ -36,6 +36,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { mcpSourceById, scanMcpSource } from './capability-sources.mjs'
+import { atomicWriteJson, readJsonTolerant, formatReadFailure } from './capability-store.mjs'
 
 const REPO = 'D:/project_develop/dsh-brain'
 const HOME = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'

@@ -20,6 +20,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { atomicWriteJson } from './capability-store.mjs'
 
 const DC = 'D:/project_develop/design-canvas'
 const OUT = 'D:/project_develop/dsh-brain/out/dc-capability-map.txt'
@@ -121,9 +122,7 @@ if (fix && entry) {
     `工具面：${live.toolCount} 工具 / ${live.laneCount} 条能力线（${live.lanes.join(', ')}）；目录由 TOOL_DEFS 派生，未归线 ${live.drift.registeredNotInLanes.length} 个`,
   ]
   db.updatedAt = new Date().toISOString()
-  const tmp = `${REGISTRY}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2) + '\n', 'utf8')
-  fs.renameSync(tmp, REGISTRY)
+  atomicWriteJson(REGISTRY, db) // tmp + fsync + rename，失败不留残 tmp（回执 B3）
   console.log(`  ✅ 已回填 tooling 块（${live.mode}）`)
 }
 

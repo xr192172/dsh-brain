@@ -9,6 +9,7 @@
  */
 import fs from 'node:fs'
 import { verifyBootHealth, lastBootSegment, findFatalBootErrors, hasReadySignal } from '../packages/switchboard/lib/boot-health.js'
+import { removeIfExists } from './lib-safe-fs.mjs'
 
 const REAL = 'C:/Users/Admin/.dsh/switchboard/gen-3083/boot.log'
 const TMP = 'D:/project_develop/dsh-brain/out/.tmp-real-3083.log'
@@ -46,7 +47,8 @@ const rB = await verifyBootHealth({ readSegment: () => lastBootSegment(REAL) }, 
 console.log('  ⇒ 新判据 verdict           :', rB.verdict, `（等待 ${rB.waitedMs}ms，早退=${rB.waitedMs < 6000}）`)
 console.log('  ⇒ 原因                     :', rB.fatal.join('、'))
 
-fs.unlinkSync(TMP)
+// ★ 删之前先判存在（回执 B4：shim 在删不存在的路径时会 fail-closed 崩脚本）
+removeIfExists(TMP)
 
 const okA = rA.verdict !== 'healthy'
 const okB = rB.verdict === 'fatal' && rB.fatal.some((s) => s.includes('插件树加载失败'))

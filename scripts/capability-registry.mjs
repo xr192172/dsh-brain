@@ -35,6 +35,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { MCP_SOURCES, scanMcpSource } from './capability-sources.mjs'
+import { atomicWriteJson, readJsonTolerant, formatReadFailure } from './capability-store.mjs'
 
 const HOME = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'
 const DIR = path.join(HOME, 'capabilities')
