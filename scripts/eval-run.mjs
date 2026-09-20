@@ -420,6 +420,9 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   }
   console.log(`${tag}   ✓ 有信号：oracle 现在红`)
 
+  // 跑前工作区快照（能力题还原要用它：把跑出来的改动退回去；see ⑤）
+  const preRunState = worktreeState()
+
   // ② 交给 Agent
   const before = await sessionStats(sid)
   // ★ 记账：**模型**与**这次的 DSH build/profile** —— 没有这两项，"差异来自我们哪一层"就无从证明
@@ -536,7 +539,36 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   }
 
   // ⑤ 还原
-  restoreAll()
+  // ★ 能力题（空 seed）没有 manifest ⇒ 用"跑前快照"把跑出来的改动退回去：
+  //   已跟踪文件 `git checkout --`；**跑期间新出现的未跟踪文件**删除（逐个打印，且**只**在仓库内）。
+  //   为什么必须做：否则 agent 的改动会留在工作区，下一次跑会被守卫拒绝（实验不可重复）。
+  if (Array.isArray(task.seed?.edits) && task.seed.edits.length === 0) {
+    const now = worktreeState()
+    const un = (st) => new Set(st.untracked.map((l) => l.slice(3).trim()))
+    const preUn = un(preRunState ?? { untracked: [] })
+    const newUntracked = now.untracked.map((l) => l.slice(3).trim()).filter((f) => !preUn.has(f))
+    const preMod = new Set((preRunState?.modifiedTracked ?? []).map((l) => l.slice(3).trim()))
+    const newModified = now.modifiedTracked.map((l) => l.slice(3).trim()).filter((f) => !preMod.has(f))
+    for (const f of newModified) sh('git', ['checkout', '--', f])
+    const removed = []
+    for (const f of newUntracked) {
+      const abs = path.join(REPO, f)
+      if (!abs.startsWith(REPO)) continue
+      try {
+        fs.rmSync(abs, { force: true, recursive: true })
+        removed.push(f)
+      } catch (e) {
+        console.error(`${tag}✗ 删不掉跑期间新建的文件：${f}（${e?.code ?? e?.message}）`)
+      }
+    }
+    report.stages.reverted = { files: newModified, removedUntracked: removed }
+    console.log(
+      `${tag}⑤ 能力题还原：git checkout ${newModified.length} 个文件` +
+        (removed.length ? `；删除跑期间新建的 ${removed.length} 个文件（${removed.slice(0, 3).join(', ')}${removed.length > 3 ? ' …' : ''}）` : ''),
+    )
+  } else {
+    restoreAll()
+  }
   report.stages.statusAfterRestore = sh('git', ['status', '--porcelain']).stdout.trim()
   report.stages.cleanAfterRestore = assertClean('还原后')
 

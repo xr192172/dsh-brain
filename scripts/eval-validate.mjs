@@ -68,7 +68,16 @@ function loadTasks() {
 function checkShape(t) {
   const bad = []
   for (const k of ['id', 'invariant', 'seed', 'oracle', 'regression', 'budget']) if (!t[k]) bad.push(`缺字段 ${k}`)
-  if (!Array.isArray(t?.seed?.edits) || t.seed.edits.length === 0) bad.push('seed.edits 为空')
+  if (!Array.isArray(t?.seed?.edits)) bad.push('seed.edits 必须是数组')
+  // ★ 2026-09-20：支持**空 seed 题**（`kind: 'capability-task'`）——
+  //   这类题不是"把已提交的修复打回去"，而是"去做一件还没做的事"（能力题）。
+  //   它的有效性判据不是"打 seed 后变红"，而是"**在 HEAD 上跑 oracle 必须红**"（见校验循环）。
+  //   ⚠️ 空 seed 也顺手堵死了"`git checkout` 秒解"这条捷径（HEAD 里没有答案）。
+  const isEmptySeed = Array.isArray(t?.seed?.edits) && t.seed.edits.length === 0
+  if (isEmptySeed) {
+    if (t.kind !== 'capability-task') bad.push('seed.edits 为空 ⇒ 必须是 kind="capability-task"（能力题）')
+    if (t.oracle?.expectSeeded !== 'fail') bad.push('空 seed 题必须写 oracle.expectSeeded="fail"（HEAD 上就该是红的）')
+  }
   if (!Array.isArray(t?.oracle?.cmd) || t.oracle.cmd.length === 0) bad.push('oracle.cmd 为空')
   if (!Array.isArray(t?.regression?.cmd) || t.regression.cmd.length === 0) bad.push('regression.cmd 为空')
   for (const e of t?.seed?.edits ?? []) {
@@ -225,6 +234,13 @@ if (argOf('--prepare')) {
     for (const b of bad) say('  · ' + b)
     process.exit(1)
   }
+  if (Array.isArray(t?.seed?.edits) && t.seed.edits.length === 0) {
+    // 能力题：**没有 seed 可打** —— 明确说清（而不是"静默什么都没做"）
+    say(`已 prepare ${t.id}：**本题无 seed（能力题）**，无需打坏；直接去做即可。`)
+    say(`  有效性已在 HEAD 上验过：oracle 现在是红的（${t.oracle.cmd.join(' ')}）`)
+    say(`\n题面（交给 Agent 的不变量描述）：\n  ${t.invariant}`)
+    process.exit(0)
+  }
   const files = prepare(t)
   say(`已 prepare ${t.id}：改了 ${files.length} 个文件；还原用 node scripts/eval-validate.mjs --restore`)
   for (const f of files) say(`  ${f.file}  ${f.sha256}(原) → ${f.after}(现)`)
@@ -246,7 +262,32 @@ for (const t of tasks) {
     continue
   }
   const rec = { id: t.id, ok: false, cleanOracle: null, cleanRegression: null, seededOracle: null, restored: null }
+  const isEmptySeed = Array.isArray(t?.seed?.edits) && t.seed.edits.length === 0
   try {
+    // ★ 能力题（空 seed）：没有"打坏"这一步 ⇒ 有效性判据换成
+    //   "**在 HEAD 上跑 oracle 必须红**（= 这件事还没做）" + "regression 绿（仓库本身是好的）"。
+    if (isEmptySeed) {
+      const o = run(t.oracle.cmd)
+      rec.seededOracle = o.status !== 0
+      const reg = run(t.regression.cmd)
+      rec.cleanRegression = reg.status === 0
+      if (!rec.seededOracle) {
+        say(`  ✗ **假题（能力题）**：在 HEAD 上 oracle 就是绿的 ⇒ 这件事本来就做完了，题没有信号`)
+        failed++
+        results.push(rec)
+        continue
+      }
+      if (!rec.cleanRegression) {
+        say(`  ✗ 前提不成立：regression 在 HEAD 上就是红的（先把仓库修好再收题）`)
+        failed++
+        results.push(rec)
+        continue
+      }
+      say(`  ✓ 能力题：HEAD 上 oracle 红（${t.oracle.cmd.join(' ')}）+ regression 绿 ⇒ 有信号`)
+      rec.ok = true
+      results.push(rec)
+      continue
+    }
     // ① 干净态：oracle 绿（regression 绿是前提，跑一次 oracle 就够说明这题"本来就过"）
     const o1 = run(t.oracle.cmd)
     rec.cleanOracle = o1.status === 0
@@ -267,19 +308,23 @@ for (const t of tasks) {
     }
     say(`  ✓ 有信号：seed 让 oracle 由绿转红（${t.oracle.cmd.join(' ')}）`)
   } finally {
-    // ③ 还原 + 校验
-    const r = restore()
-    rec.restored = r.ok
-    const o3 = run(t.oracle.cmd)
-    rec.cleanRegression = o3.status === 0
-    if (!r.ok || !rec.cleanRegression) {
-      say(`  ✗ 还原/复绿异常：restored=${r.ok} oracleAfterRestore=${rec.cleanRegression}`)
-      failed++
+    // ③ 还原 + 校验（★ 能力题没有 seed ⇒ 没有"还原"这一步，别把它的"oracle 仍红"当成异常）
+    if (isEmptySeed) {
+      results.push(rec)
     } else {
-      rec.ok = true
-      say(`  ✓ 还原并复绿（sha256 校验通过）`)
+      const r = restore()
+      rec.restored = r.ok
+      const o3 = run(t.oracle.cmd)
+      rec.cleanRegression = o3.status === 0
+      if (!r.ok || !rec.cleanRegression) {
+        say(`  ✗ 还原/复绿异常：restored=${r.ok} oracleAfterRestore=${rec.cleanRegression}`)
+        failed++
+      } else {
+        rec.ok = true
+        say(`  ✓ 还原并复绿（sha256 校验通过）`)
+      }
+      results.push(rec)
     }
-    results.push(rec)
   }
 }
 

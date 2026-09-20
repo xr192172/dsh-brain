@@ -49,18 +49,21 @@ for (const [name, pass] of checks2) {
   else problems.push(`② 未完成：${name}`)
 }
 
-// ③ 旧名标识符零残留（唯一允许：math.js 里 legacyAlias 的局部变量）
-const cMath = countIdent(math, OLD)
+// ③ 旧名标识符的**去处**必须精确（★ 这一条 2026-09-20 修过一次：
+//    原先写"math.js 里旧名必须只剩 1 处"，但**同名局部变量的声明与其使用处共 2 处**，
+//    且描述该局部变量的注释**本来就该保持原样** ⇒ 那条判据是**假红**。现在改成逐项断言，不留歧义。
 const cStore = countIdent(store, OLD)
 const cIndex = countIdent(index, OLD)
-if (cMath === 1 && cStore === 0 && cIndex === 0) {
-  ok.push('③ 旧名标识符零残留（仅 math.js 里 legacyAlias 的局部变量保留）')
-} else {
-  problems.push(
-    `③ 旧名标识符残留不对：math.js=${cMath}（期望 1，即 legacyAlias 的局部变量）、store.js=${cStore}（期望 0）、index.js=${cIndex}（期望 0）` +
-      `\n     —— 注释里的旧名也算残留（注释不是字符串，会被查到）`,
-  )
-}
+const keepLocalDecl = /const\s+computeHash\s*=\s*'legacy'/.test(math)
+const keepLocalUse = /return\s+computeHash\s*\+/.test(math)
+const headerUpdated = /^\/\/[^\n]*`digestOf`/.test(math) && !/^\/\/[^\n]*`computeHash`/.test(math)
+const problems3 = []
+if (cStore !== 0) problems3.push(`store.js 仍有旧名标识符 ${cStore} 处（期望 0 —— 注释也要跟改）`)
+if (cIndex !== 0) problems3.push(`index.js 仍有旧名标识符 ${cIndex} 处（期望 0 —— 注释也要跟改）`)
+if (!keepLocalDecl || !keepLocalUse) problems3.push('math.js 里 legacyAlias 的**同名局部变量**被改掉了（它必须原样保留）')
+if (!headerUpdated) problems3.push('math.js 文件头注释没跟改（应把 `computeHash` 改成 `digestOf`）')
+if (problems3.length) for (const p of problems3) problems.push(`③ ${p}`)
+else ok.push('③ 旧名的去处精确：另两文件零残留、同名局部变量保留、文件头注释已跟改')
 
 // ④ 字符串常量必须原样保留
 if (math.includes(`KEY_NAMESPACE = ${NS}`)) ok.push('④ 字符串常量 computeHash-v1 原样保留')
