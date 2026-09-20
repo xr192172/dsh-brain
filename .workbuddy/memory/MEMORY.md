@@ -39,6 +39,13 @@
 13. **构建不再依赖全局 `tsc`**：`packages/switchboard/scripts/build.mjs` 现在优先用仓库内
     `node_modules/typescript`（Agent shell 里没有全局 `tsc`，报错长得像配置问题）⇒ 直接
     `cd packages/switchboard && node scripts/build.mjs` 即可。
+14. **★ 推送走 `GIT_TERMINAL_PROMPT=0 git push origin master`**（2026-09-20 实测）：
+    裸 `git push` 会报 `could not read Username … terminal prompts disabled`（**不代表内容没上去**）；
+    显式禁用终端提示后，凭据助手（`credential.helper=manager`）会走它的缓存凭据 ⇒ 成功。
+    **判断"推没推上去"的唯一可信方式是 `git ls-remote origin refs/heads/master`**
+    （直接问服务器）—— 不是 push 的输出，也不是本地 `origin/master`（会骗人）。
+15. **`timeout` 在本机 shell 是 Windows 的 `TIMEOUT.EXE`**（不是 GNU 的）⇒ 报"无效语法"。
+    别用它包裹命令；要限时就用 Bash 工具自带的 timeout。
 
 ## 铁律（违反会立刻坏事）
 

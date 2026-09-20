@@ -160,9 +160,9 @@ const done = (code) => {
   process.exit(code)
 }
 
-const dirty = sh('git', ['status', '--porcelain']).stdout.trim()
-if (dirty) {
-  console.error('工作区不干净，拒绝跑（seed/还原以 HEAD 为基准）：\n' + dirty)
+const wtRun = worktreeState()
+if (!wtRun.clean) {
+  console.error('有**已跟踪文件被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' + wtRun.modifiedTracked.join('\n'))
   process.exit(1)
 }
 
