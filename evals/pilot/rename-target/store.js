@@ -1,10 +1,10 @@
-// 存储层：用 computeHash 为条目生成稳定 id（注释里的名字也应跟着改名）
-import { computeHash, KEY_NAMESPACE } from './math.js'
+// 存储层：用 digestOf 为条目生成稳定 id（注释里的名字也应跟着改名）
+import { digestOf, KEY_NAMESPACE } from './math.js'
 
 const entries = new Map()
 
 export function put(key, value) {
-  const id = computeHash(key + '|' + value)
+  const id = digestOf(key + '|' + value)
   entries.set(id, { key, value, ns: KEY_NAMESPACE })
   return id
 }

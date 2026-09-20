@@ -87,6 +87,7 @@
 |---|---|---|
 | **接手指南（下一项）** | `topics/next-task-handover.md` | **新会话接手先读这个**（顶部=回执结构） |
 | **★ 新议题：工具完善** | `topics/tool-refinement-handover.md` | **派给另一会话全权执行**（判据阶梯 L2~L4；作用域待用户确认） |
+| **★ 新议题：架构线** | `topics/architecture-handover.md` | **第三条线**（三角色 + 三段流水线；依赖工具完善的 L2~L4，但数据层可先行） |
 | **当前状态 / 下一步** | `topics/current-status.md` | 接手前看进度：到哪了、未闭合项 |
 | 运行时与启动 | `topics/runtime-and-launch.md` | 端口/启动器/凭据/会话存储格式/关键配置 |
 | profile 与 gen 一致性 | `topics/profile-and-gen-integrity.md` | 改配置、加插件、换代后能力变了、离线验收 |
@@ -113,4 +114,5 @@
 
 > **★ 新会话接手 → 先读 `topics/next-task-handover.md`**（自包含；顶部即本轮回执）。
 > 下一项、未闭合项、操作纪律、验证命令**全在那里**。本文件只放**每次都要遵守**的东西。
-> **另有新议题**：`topics/tool-refinement-handover.md`（工具完善 · 判据阶梯 L2~L4）—— 派给另一会话全权执行。
+> **另有新议题**：`topics/tool-refinement-handover.md`（工具完善 · 判据阶梯 L2~L4）与
+> `topics/architecture-handover.md`（**架构线**：三角色 + 三段流水线）—— 各派一个会话全权执行。

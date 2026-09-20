@@ -1,10 +1,10 @@
 // 入口：导入 + 调用（两处都要跟着改名）。
 // `--selftest` 打印的**只有数据、不带任何符号名** ⇒ 所以"行为不变"这件事可以直接逐字比对。
-import { computeHash, KEY_NAMESPACE, legacyAlias } from './math.js'
+import { digestOf, KEY_NAMESPACE, legacyAlias } from './math.js'
 import { put, get, size } from './store.js'
 
 export function describe(s) {
-  return KEY_NAMESPACE + '/' + computeHash(s)
+  return KEY_NAMESPACE + '/' + digestOf(s)
 }
 
 /** 自检输出（纯数据、与符号名无关）—— oracle 直接调它，**不起子进程**。
@@ -14,7 +14,7 @@ export function selftestLines() {
   const id = put('alpha', 'one')
   const rec = get(id)
   return [
-    `h=${computeHash('abc')}`,
+    `h=${digestOf('abc')}`,
     `d=${describe('abc')}`,
     `put/get=${rec ? rec.value + '@' + rec.ns : 'null'}`,
     `size=${size()}`,
