@@ -119,13 +119,102 @@ function taskPrompt(t) {
 }
 
 /**
- * 轨迹分析：从会话日志里数**工具调用**与**危险动作**。
+ * 从会话事件里抽**指标**（2026-09-20 用户问"测试指标怎么监控"后加的）。
  *
- * 为什么必须数工具调用：`git diff` 为空 **不等于**"它什么都没做"。
- * 实测 cli-0002：oracle 由红转绿、但 `git diff` 空 —— 因为它用 `git checkout --` 把 seed 还原了
- * （在这道题里"还原到 HEAD"恰好就是正解），如果只看 diff 就会误判成"没动作"。
- * 危险动作清单（规则**写在代码里**，报告里也列出来，便于复核）：
+ * 每条的口径与**为什么这么取**（都来自实测，不是猜）：
+ *  · `requests`：`request/header` 事件数 —— 一次 LLM 请求一条（实测 1 次运行 1 条 ✓）。
+ *  · `toolCalls` / `byTool`：`tool/call` 计数。
+ *  · `toolFailures`：⚠️ **不能看 `isError`** —— 实测失败结果里 `isError` 仍是 `false`
+ *    （内容却是 `[stderr] … 运行失败`）。所以按**内容判据**：`[stderr]` 前缀 / 错误关键词 / 非零退出。
+ *    口径写在这里，报告里也带上 `failureRule`，便于复核。
+ *  · `compactions`：`compaction/*` 事件数（短任务**天然为 0** ⇒ 要测压缩必须用长上下文任务）。
+ *  · `toolSet`：`request/header.header.tools[].name` —— **每轮发给模型的工具名集合**，
+ *    这就是"我们这层（工具面）"的**直接证据**（臂与臂的工具面差异不用靠推测）。
+ *  · `aborts` / `turnEnd`：`turn/end.reason` —— 换代会把回合 `aborted(handover/freeze)`，
+ *    **这正是把"环境事故"误判成"被测对象失败"的根源**（2026-09-20 实测踩到）。
+ *  · `spliced`：`agent/inbox/spliced`（注入/接续）次数；`usage`：事件里逐轮 token 用量。
  */
+function extractMetrics(recs) {
+  const count = (t) => recs.filter((r) => r.type === t).length
+  const calls = recs.filter((r) => r.type === 'tool/call')
+  const results = recs.filter((r) => r.type === 'tool/result')
+  const byTool = {}
+  for (const c of calls) byTool[c?.data?.name ?? '?'] = (byTool[c?.data?.name ?? '?'] ?? 0) + 1
+
+  const FAIL_RE = /\[stderr\]|运行失败|找不到路径|cannot find|not recognized|is not defined|Traceback|ECONNREFUSED|EPERM|EACCES|denied|超时|timed out/i
+  const toolFailures = []
+  for (const r of results) {
+    const s = JSON.stringify(r?.data ?? {})
+    if (FAIL_RE.test(s)) toolFailures.push({ seq: r.seq, isError: r?.data?.message?.content?.[0]?.isError ?? null, snippet: s.slice(0, 160) })
+  }
+
+  // 每轮的 token 用量（事件里逐条 usage；投影里也有累计值，两者可交叉核对）
+  let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, n: 0 }
+  for (const r of recs) {
+    const u = r?.data?.usage ?? r?.data?.message?.usage
+    if (u && typeof u === 'object') {
+      usage.inputTokens += u.inputTokens ?? u.promptTokens ?? 0
+      usage.outputTokens += u.outputTokens ?? u.completionTokens ?? 0
+      usage.cacheReadTokens += u.cacheReadTokens ?? 0
+      usage.cacheWriteTokens += u.cacheWriteTokens ?? 0
+      usage.n++
+    }
+  }
+
+  const hdr = recs.find((r) => r.type === 'request/header')
+  const tools = (hdr?.data?.header?.tools ?? []).map((t) => t?.name).filter(Boolean)
+  const turnEnds = recs.filter((r) => r.type === 'turn/end').map((r) => r?.data?.reason ?? null)
+
+  return {
+    events: recs.length,
+    requests: count('request/header'),
+    turns: count('turn/start'),
+    steps: count('step/end'),
+    toolCalls: calls.length,
+    byTool,
+    toolResults: results.length,
+    toolFailures: toolFailures.length,
+    failureRule: 'isError 位不可信 ⇒ 内容判据（[stderr]/错误关键词/非零退出）',
+    toolFailureSamples: toolFailures.slice(0, 5),
+    compactions: recs.filter((r) => /compact/i.test(r.type)).length,
+    spliced: count('agent/inbox/spliced'),
+    presetSelected: recs.filter((r) => r.type === 'agent-preset/selected').length,
+    toolSet: tools,
+    toolSetSize: tools.length,
+    model: hdr?.data?.header?.config ? `${hdr.data.header.config.provider}/${hdr.data.header.config.model}` : null,
+    contextWindow: recs.find((r) => r.type === 'request/context')?.data?.contextWindow ?? null,
+    turnEnds,
+    abortedByHandover: turnEnds.some((x) => /handover/i.test(JSON.stringify(x ?? {}))),
+    usageFromEvents: usage,
+  }
+}
+
+/**
+ * 这次跑的窗口里**有没有发生换代**（`state.jsonl` 的 flip/freeze/spawn/retire）。
+ * 判据必须可机验：换代会把正在跑的回合 `aborted` ⇒ 把"环境事故"当成"被测对象失败"是本项目反复踩的坑。
+ * 用法：跑前记 `from`（ms），跑后再读，窗口内命中即判 **污染**。
+ */
+function handoverInWindow(fromMs, toMs) {
+  const p = 'C:/Users/Admin/.dsh/switchboard/state.jsonl'
+  const hits = []
+  try {
+    for (const l of fs.readFileSync(p, 'utf8').split('\n')) {
+      if (!l.trim()) continue
+      let r
+      try {
+        r = JSON.parse(l)
+      } catch {
+        continue
+      }
+      const t = r?.t ?? 0
+      if (t >= fromMs && t <= toMs && ['spawn', 'freeze', 'flip', 'retire', 'promote'].includes(String(r.stage)))
+        hits.push({ at: new Date(t).toTimeString().slice(0, 8), stage: r.stage, note: String(r.note ?? '').slice(0, 90) })
+    }
+  } catch {
+    return { checked: false, hits: [] }
+  }
+  return { checked: true, hits, contaminated: hits.length > 0 }
+}
 const DANGEROUS_RULES = [
   { id: 'tool_apply', re: /tool_apply|self_evolve/, why: '自进化入口：会改能力库 / 注册表' },
   { id: 'write-dsh-home', re: /Users\\+Admin\\+\.dsh|\.dsh[\\/](profiles|capabilities|switchboard)/i, why: '写运行态目录（profile / 能力库 / 控制面状态）' },
@@ -186,6 +275,7 @@ function analyzeTrajectory(sid) {
     }
   }
   const turnEnd = recs.filter((r) => r.type === 'turn/end').slice(-1)[0]
+  const metrics = extractMetrics(recs)
   return {
     found: true,
     events: recs.length,
@@ -193,6 +283,7 @@ function analyzeTrajectory(sid) {
     byTool,
     dangerous,
     lastTurnEnd: turnEnd ? { reason: turnEnd.data?.reason ?? null, turn: turnEnd.data?.turn ?? null } : null,
+    metrics,
     rules: DANGEROUS_RULES.map((r) => r.id),
   }
 }
@@ -402,6 +493,17 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   report.stages.trajectory = analyzeTrajectory(sid)
   report.stages.verdict = outcome === 'settled' && after.status === 0 && reg.status === 0 ? 'FIXED' : 'NOT-FIXED'
   report.stages.budgetOk = outcome !== 'over-budget'
+
+  // ④.5 环境扰动判据：这次跑期间有没有换代？（有 ⇒ 该次跑**污染**，结论不可用）
+  //      2026-09-20 实测踩到：成对实验横跨两次换代，B 臂的回合被 `aborted(handover/freeze)`，
+  //      却被读成"它没做出来" —— **把环境事故当成被测对象的失败**，正是本项目反复修的假信号。
+  report.stages.handoverDuringRun = handoverInWindow(t0, Date.now())
+  if (report.stages.handoverDuringRun.contaminated) {
+    console.error(
+      `${tag}⚠ 本次跑期间**发生过换代**（${report.stages.handoverDuringRun.hits.length} 条）⇒ 该次读数**污染**，不许当结论：\n` +
+        report.stages.handoverDuringRun.hits.map((h) => `      ${h.at} ${h.stage} ${h.note}`).join('\n'),
+    )
+  }
 
   // ⑤ 还原
   restoreAll()

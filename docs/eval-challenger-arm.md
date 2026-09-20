@@ -280,3 +280,22 @@ node scripts/eval-run.mjs --pair --task cli-0003 --armA council --armB minimal -
 - ✅ 已完成：模型回读 + 两臂同模型硬判据 + `--dry-run` 两方向自证 + `dsh{build,profile}` 记账。
 - ⬜ 待做（§3.D 新第 1 项）：**profile 变体臂** —— 第一对建议做 **"压缩开 vs 压缩关"**（上下文压缩是
   dsh-brain 四大能力之一，且**预期会显著改变长任务的成本与成败**，最容易看出差异）。
+
+### 10.2 ★ 重要更正：§10 那对实验**被换代污染**（2026-09-20 17:2x 查明）
+
+查 `state.jsonl` 后确认：那对实验的窗口（16:26:2x–16:36:33）里**发生了两次换代**：
+
+```
+16:31:56 spawn gen-3083      → 16:32:37 abort b-catchup-failed   （一次失败的换代）
+16:37:28 spawn gen-3084      → 16:37:30 freeze → flip → retire（一次成功的换代）
+```
+
+而 **B 臂（minimal）会话的 `turn/end` 正是 `{kind:'aborted', reason:{kind:'hook',reason:'handover/freeze'}}`**
+—— 它的回合是被**换代掐断**的，不是"它做不出来"。
+
+⇒ 结论修正：
+- **B 臂"没做出来"这一列作废**（要重跑，且要在**无换代**的窗口里跑）；
+- A 臂"`regression` 红但不复现"的**未定真因也由此解释**（换代期间 `check:all` 被运行态扰动）；
+- ⇒ 这又是一次 **"把环境事故当成被测对象的失败"**。已修：跑窗口内命中换代即标 **污染**
+  （`handoverDuringRun`，见 `docs/eval-metrics.md` §2/§3），**污染读数不许当结论**。
+- 成本列（toolCalls/tokens/墙钟）虽受 abort 影响，但方向仍是"minimal 更贵"（它烧了 53 次调用/525 秒才被掐断）。
