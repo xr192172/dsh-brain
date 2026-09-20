@@ -164,6 +164,32 @@ function extractMetrics(recs) {
     }
   }
 
+  // ★ 单次调用耗时（tool/call → tool/result 的 time 差）+ 等审批次数。
+  //   实测教训：B 臂 1037s 的调用总耗时里，**1033s 是一次"等审批"**（agent 申请提权、审批悬着）
+  //   ⇒ 不单列这个，整臂墙钟就会被一次挂住/等待主导，读起来像"这个臂又慢又笨"。
+  const pending = new Map()
+  const durs = []
+  for (const r of recs) {
+    if (r.type === 'tool/call') {
+      pending.set(r?.data?.callId ?? 'seq' + r.seq, { name: r?.data?.name ?? '?', t0: r.time ?? 0 })
+    } else if (r.type === 'tool/result') {
+      const id = r?.data?.message?.source?.callId
+      const hit = pending.get(id)
+      if (hit) {
+        durs.push({ name: hit.name, ms: (r.time ?? 0) - hit.t0 })
+        pending.delete(id)
+      }
+    }
+  }
+  const slowestCalls = durs
+    .slice()
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, 3)
+    .map((c) => ({ tool: c.name, ms: c.ms }))
+  const callsTotalMs = durs.reduce((a, c) => a + c.ms, 0)
+  // "等审批/被拒" 的痕迹（工具结果里出现 approval/提权/escalat 之类）
+  const approvalWaitHits = results.filter((r) => /approval|escalat|提权|审批/i.test(JSON.stringify(r?.data ?? {}))).length
+
   const hdr = recs.find((r) => r.type === 'request/header')
   const tools = (hdr?.data?.header?.tools ?? []).map((t) => t?.name).filter(Boolean)
   const turnEnds = recs.filter((r) => r.type === 'turn/end').map((r) => r?.data?.reason ?? null)
@@ -179,6 +205,10 @@ function extractMetrics(recs) {
     toolFailures: toolFailures.length,
     failureRule: 'isError 位不可信 ⇒ 内容判据（[stderr]/错误关键词/非零退出）',
     toolFailureSamples: toolFailures.slice(0, 5),
+    callsWithDuration: durs.length,
+    callsTotalMs,
+    slowestCalls,
+    approvalWaitHits,
     compactions: recs.filter((r) => /compact/i.test(r.type)).length,
     spliced: count('agent/inbox/spliced'),
     presetSelected: recs.filter((r) => r.type === 'agent-preset/selected').length,

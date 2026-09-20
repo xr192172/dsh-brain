@@ -133,3 +133,54 @@ at file:///…/scripts/test-boot-health.mjs:274:6
 - **A 用 `refactor_pipeline`（专用流水线）62 秒收工**，B 用 `rename_symbols` + 大量 `read` 撞了 **15 分钟上限**
   ⇒ **专用工具 vs 通用工具的差距体现在"时间"这一维**（B 的 token 反而更少）；
 - ⚠️ 但两臂的工具面**都**含 design-canvas 工具 ⇒ **这些数字不能当"能力开/关"的结论**。
+
+---
+
+## 6. "为什么 B 的 token 反而更少" / "B 为什么撞上限" —— 用**每次调用的真实耗时**回答
+
+（2026-09-20 用户的两个问题。答案都不是"工具轻/重"，也不是"预解析没做好"。）
+
+| 观测 | A（`web`） | B（`web-nodc`） |
+|---|---|---|
+| 工具调用次数 | 16 | 23 |
+| **这些调用的总耗时** | **2.2 秒**（最慢 0.5s，全是 MCP 调用） | **1037 秒** |
+| **最慢一次调用** | 0.5s（`explore_code`） | ★ **1033.5s（一次 shell 调用，占 99.6%）** |
+| 等审批痕迹 | 0 | 1 |
+
+### 6.1 B 撞上限的真因：**一次调用在"等审批"**，不是能力差
+
+那次卡住的调用（从会话日志逐字取，工具名略去）：
+
+```
+command: node evals/pilot/rename-target/check.mjs; "exit=$LASTEXITCODE"
+sandbox_permissions: "danger-full-access"
+justification: "The oracle itself spawns `node index.js --selftest` with piped stdio to capture its output,
+                which the workspace-write sandbox blocks with EPERM, so criterion ① cannot be evaluated
+                without lifting the named-pipe restriction."
+结果: "Error: approval for escalating to \"danger-full-access\" was cancelled"
+```
+
+⇒ 它在**等一个审批**（提权到 full-access），审批一直没被点 ⇒ 卡到被取消 ⇒ 一次调用吃掉 1033 秒。
+
+**它为什么要提权？因为我的 oracle 当时用 `spawnSync` 起子进程 + 管道 stdio，而那在 `workspace-write`
+沙箱里被 EPERM 拦** ⇒ 做题的 agent 自己**跑不动 oracle**（判据 ① 无法评估），只能申请提权。
+**这是我题的缺陷，不是能力差异**（A 臂没去跑 oracle，所以没撞上）。
+**已修**：自检抽成 `selftestLines()`，oracle 改为 **in-process 调用**（`spawnSync` 出现次数 = 0 ✓），
+并复验了两方向（正确解法绿 / 粗暴替换红 / regression 15/15 ✓）。
+
+### 6.2 "B 的 token 更少" 这个读数**不能解读**
+
+两条理由：
+1. **被截断**：B 那次撞了 15 分钟上限 ⇒ 它的 `outputTokens` 是 **censored（截到上限为止）**，
+   而 A 的 12000 是"把一件事做完"的完整成本 ⇒ **两个数不同量纲**；
+2. **它有一半时间不在生成**：1033/1037 秒在等审批 ⇒ 生成量自然少。
+
+⇒ 你提的两个假设（① 专用流水线是给大项目用的、小靶子上"太重" ② `rename_symbols` 这种基础能力刚好够用）
+**这一跑验不了**（B 没公平地跑完）。要验必须：**让 B 也 settled**（或先把 oracle 改成沙箱友好 —— 后者已做 ✓），
+然后比"**做完同一件事**"的成本。
+
+### 6.3 指标已补（否则这类陷阱会继续骗人）
+
+`extractMetrics` 新增：`callsTotalMs`（调用总耗时）、`slowestCalls`（最慢 3 次）、`approvalWaitHits`（等审批痕迹）。
+对那次会话复算：`最慢3次=[{shell,1033543ms},{shell,550ms},{shell,491ms}]`、`等审批痕迹=1`
+⇒ **一眼看出"一次调用占了 99.6% 的时间"**，不会再被读成"这个臂又慢又笨"。
