@@ -144,6 +144,12 @@ node scripts/eval-run.mjs --task cli-0003 --session <专门的空会话>
   diffStat / verdict / budgetOk`（都在 `out/eval-run-*.json`）。
 - **产出**：一张 3 题的单臂基线表（这就是后面一切比较的**对照**，没有它后面都没意义）。
 
+**✅ §3.A 已完成（2026-09-20 14:45，子会话执行）**：**3/3 FIXED**，全部预算内、危险动作 0；
+成表在 **`docs/eval-baseline-single-arm.md`**（含三题的墙钟/steps/tokens/toolCalls 分布）。
+★ **重要发现：这批题已饱和**（三题都是"恢复一行不变量"，一次全过）⇒ **两臂的成功率将无区分度**，
+§3.B 的**主判据必须换成"成本与路径"**（`toolCalls` 7/17/20、tokens 1910–2667、墙钟 70–126s，
+同 preset 内就有 1.7–3× 波动），成功率只当"地板"。详见该文档 §最重要的一条发现。
+
 ### 3.B 主任务：加**挑战者臂**，产出「现行 vs 挑战者」成对 delta
 
 **目标**：让 `eval-run` 能跑**两条臂**（现行 / 挑战者）并对同一批题给出 delta：
@@ -151,6 +157,13 @@ node scripts/eval-run.mjs --task cli-0003 --session <专门的空会话>
 
 **⚠️ Step 0（必须先做的设计决定，别跳过）**：**"挑战者"到底指什么？**
 这是**尚未定义**的（不是我没写，是真的还没定）。可选形态：
+
+**✅ Step 0 已完成（2026-09-20 14:45，子会话执行）→ `docs/eval-challenger-arm.md`**：
+定义 = **只换 preset**（同模型/同仓库/同题面/同预算）；首版 **A=`council`（现行）vs B=`code`（PTC/Code Mode）**；
+机制**实测确认**：`agentPreset.select {sessionId, agentPreset:'<id>'}` ✅ 生效，
+而 `{preset:…}` / `{name:…}` 是 **HTTP 200 的静默 no-op** ⇒ **必须回读 `session.list.<sid>.agentPreset` 才算数**；
+主判据 = `toolCalls`/`tokens`/`wallMs`/`dangerous`，成功率当地板；两臂**严格串行 + 各用新建空会话**。
+实现计划：给 `eval-run.mjs` 加 `--pair --task X --armA council --armB code`（**别另写脚本**）。
 - 换**模型**（`llm.providers` / `session.selectModel` —— 前门有这两个 RPC）；
 - 换 **agent preset**（`agentPreset.list` / `select`；我们已有 `council` 与 `code-council` 两个）；
 - 换**生长基质**（改 P0 内容：能力库 / persona / 技能）—— 最贴项目初衷（工具自进化），也最难隔离。
