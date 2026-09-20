@@ -1,4 +1,4 @@
-# 接手指南（**回执** + 下一项）—— 2026-09-20 13:52（回执复核：推送已完成、栈健康、§3 已修订）
+# 接手指南（**回执** + 下一项）—— 2026-09-20 14:28（回执：单臂基线真跑通；下一项见 §3.B）
 
 > **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。
 > 上一轮的交接文档就是本文件；本轮把「做完了什么 + 现在什么状态 + 下一项」重写在顶部，旧长尾留档在 §6。
@@ -8,8 +8,9 @@
 ## 0. 一句话
 
 **换代写入竞态（两代并发写同一份会话）已修、已在真机上验收通过（含"回合运行中换代"这条主路径），
-并在验收过程中抓到并修掉了我自己修复里的两个假信号。**
-下一步 = **M1-step-2：把冻结任务集当题面交给 Agent，产出「现行 vs 挑战者」的 delta 报告**。
+并在验收过程中抓到并修掉了我自己修复里的两个假信号。M1-step-2 的「单臂基线」也已真跑通（cli-0001 = FIXED）。**
+下一步 = **给 `eval-run` 加「挑战者臂」、产出「现行 vs 挑战者」的成对 delta 报告**（§3.B；
+先做 §3.A 把 3 题单臂基线补齐）。
 
 ---
 
@@ -53,15 +54,40 @@
   冻结任务集（首批 3 题 = 把修过的回归反向打回去，oracle 就是我们已有的门）；
   校验器证明"打上 seed 后 oracle **必须变红**"，否则是**假题**（字节级 sha256 还原；3 题有效 / 0 题有问题）。
 
-### 1.5 提交与推送状态 —— ✅ **已推送完成**（2026-09-20 13:42 复核）
+### 1.6 ★ M1-step-2 的**真跑路径第一次跑通**（2026-09-20 14:24，cli-0001）
 
-- **远端 `origin/master` = `89a7d8c`，与本地 HEAD 一致** ⇒ **全部 41 个提交已在远端**。
-  依据是 `git ls-remote origin refs/heads/master` —— **直接问服务器**，不看本地 remote-tracking 引用。
-- 原先的阻塞（代理 `127.0.0.1:7890` 未启动）**已解除**：13:42 实测 7890 在监听。
-- ⚠️ **坑（记下来）**：本环境下裸 `git push` 可能报
+`node scripts/eval-run.mjs --task cli-0001 --session <专门的空会话>` ⇒ **FIXED / 预算内**。
+
+| 项 | 读数 |
+|---|---|
+| ① 题目有信号 | `seededOracle.hasSignal = true`（seed 打上 ⇒ oracle **变红** ⇒ 不是假题） |
+| ② 发题面 | `outcome=settled`，`wallMs=126398`（126s），`steps 0→10`，`turns 0→1` |
+| ③ 记账 | `outputTokens 2667` / `uncachedInputTokens 48979` |
+| ④ 判据 | `oracleAfter.pass=true`（红→绿）+ `regression.pass=true`（check:all 全绿） |
+| ⑤ 它改了什么 | `packages/switchboard/src/index.ts \| 2 +-`（**只 1 文件 1 行**，正是那道不变量） |
+| ⑥ 还原 | 已 byte 级还原；`git status` 干净；`HEAD` 未变；**无 commit / 无 push / 无越界改动** |
+| 结论 | `verdict = FIXED`，`budgetOk = true` |
+
+报告：`out/eval-run-cli-0001-injected-message-identity-1789885471541.json`
+
+**会话是用 `session.create`（空载荷即通）现建的专门空会话**
+——顺带证实返回值里 `agentPreset: "council"`，即**方案 B 的 preset 在生效**。
+（`session.create` / `session.fork` / `session.list` / `session.prompt` 等都是前门 RPC，
+见 `scripts/session-drive.mjs` 的 `describe|list|prompt` 用法。）
+
+> ★ **这次真跑的价值不只是"跑通"**：它证明了 `eval-run` 的**三条判据同时可机验**
+> —— 题目有信号（红）、修好（绿）、没弄坏别的（regression 绿）。
+> 也就是 **M1 的判据地基从此有了"活体"证据**，不再只是离线校验。
+
+### 1.5 提交与推送状态 —— ✅ 已推送完成
+
+- **远端 `origin/master` = 本地 HEAD**（14:19 复核；依据 `git ls-remote origin refs/heads/master`
+  —— **直接问服务器**，不看本地 remote-tracking 引用），未推送提交数 = 0。
+- 原先的阻塞（代理 `127.0.0.1:7890` 未启动）**已解除**：实测 7890 在监听。
+- ⚠️ **坑（记下来）**：本环境下裸 `git push` 会报
   `fatal: could not read Username for 'https://github.com': terminal prompts disabled`
   —— 那是**推行需要认证而终端提示被禁用**，**不代表内容没上去**。
-- ✅ **可用的推送方式**（13:43 实测成功）：
+- ✅ **可用的推送方式**（实测成功）：
 
   ```bash
   GIT_TERMINAL_PROMPT=0 git push origin master
@@ -98,46 +124,72 @@ node scripts/verify-drain-after-swap.mjs          # R0 会告诉你：栈在不�
 
 ---
 
-## 3. 下一项：M1-step-2 —— **第一版已建，剩"真跑一次"**（13:46 更新）
+## 3. 下一项（**派给另一个会话**）：M1-step-2 收尾 —— 挑战者臂 + 成对 delta
 
-> ⚠️ **本节 13:46 已修订**：原先写「要新建 `scripts/eval-run.mjs`」—— **该文件已存在**，
-> 由并行会话在 13:46 建好（其提交 `56e04f5` 当时**漏加了文件本身**，随后被 `git add -A` 收入并推送）。
-> 现状：**已跟踪、已在远端**（`git ls-files` / `git ls-tree origin/master` 均确认）。
+> 2026-09-20 14:24 更新：**单臂基线已跑通 1/3 题**（cli-0001 = FIXED，见 §1.6）。
+> 下面把"剩下的那一半"拆成 A（立刻可做）与 B（主任务）。
 
-**目标**（不变）：把 `evals/pilot/tasks.jsonl` 的题面交给 Agent（只读沙箱/分叉会话），收轨迹，
-再跑 oracle + `regression`，产出「现行 vs 挑战者」的 **delta 报告**。
+### 3.A 先做完：3 题单臂基线（**零设计，纯执行，先跑**）
 
-**已有**：
-- 任务集 3 题（`--list` 实测）：`cli-0001-injected-message-identity` /
-  `cli-0002-seal-before-unlock` / `cli-0003-prepareswitch-real-phase`
-  —— **三题就是我们修过的三个回归**，oracle 分别是
-  `test-injected-message-shape.mjs`、`test-handover-drain.mjs`、`test-handover-drain.mjs`。
-- `scripts/eval-run.mjs`：`--list` / `--plan`（只打印计划、不动东西）/ `--task <前缀> --session <sid>`（真跑）。
-  判据全可机验：seed ⇒ oracle 变红（复用 `eval-validate` 同段代码）→ 发题面 → 轮询到 `running=false`
-  （**超预算即失败**）→ oracle 由红转绿 + `regression`（check:all）绿；记账 steps/tokens/墙钟 + `git diff --stat`。
-- `--prepare/--restore` 字节级备份 + sha256（`eval-validate.mjs`）。
+```bash
+node scripts/session-drive.mjs list                      # 找一个空会话；或
+node scripts/eval-run.mjs --plan --task cli-0002         # 先看计划
+node scripts/eval-run.mjs --task cli-0002 --session <专门的空会话>
+node scripts/eval-run.mjs --task cli-0003 --session <专门的空会话>
+```
 
-**⬜ 剩下的一步**：
-- **`--plan` 已验；真跑那条路径还没跑过一次**（`eval-run.mjs` 头注里作者自己标了）。
-  ⇒ 建议先 `--plan` 复核 → 挑 `cli-0001` 在**专门的分叉会话**上真跑一次 → 看 delta 报告是否成型。
+- 会话可以现建：`session.create`（**空载荷即通**，走前门 RPC）。
+  ⚠️ **别拿在用的会话试** —— 题面会发进去、会消耗 token、会往那份会话写记录。
+- 每题记下：`hasSignal / outcome / steps / outputTokens / wallMs / oracleAfter / regression /
+  diffStat / verdict / budgetOk`（都在 `out/eval-run-*.json`）。
+- **产出**：一张 3 题的单臂基线表（这就是后面一切比较的**对照**，没有它后面都没意义）。
 
-**复用点**（别重造）：
-- 起挑战者：`packages/switchboard/src/spawner.ts`；只读沙箱：profile 已有 `sandbox: read-only`
-  （`out/profile-dump.txt:114`）与 `dsh-fs-sandbox` / `dsh-sandbox-windows-acl`。
+### 3.B 主任务：加**挑战者臂**，产出「现行 vs 挑战者」成对 delta
+
+**目标**：让 `eval-run` 能跑**两条臂**（现行 / 挑战者）并对同一批题给出 delta：
+成功率 / 工具调用数 / token / 墙钟 / **危险动作**。
+
+**⚠️ Step 0（必须先做的设计决定，别跳过）**：**"挑战者"到底指什么？**
+这是**尚未定义**的（不是我没写，是真的还没定）。可选形态：
+- 换**模型**（`llm.providers` / `session.selectModel` —— 前门有这两个 RPC）；
+- 换 **agent preset**（`agentPreset.list` / `select`；我们已有 `council` 与 `code-council` 两个）；
+- 换**生长基质**（改 P0 内容：能力库 / persona / 技能）—— 最贴项目初衷（工具自进化），也最难隔离。
+⇒ **请先把这个定义写进文档再动手**，否则做出来的 delta 没有意义（两条臂不可比）。
+
+**已有可复用**（别重造）：
+- 起挑战者：`packages/switchboard/src/spawner.ts`；
+  只读沙箱：profile 已有 `sandbox: read-only`（`out/profile-dump.txt:114`）+ `dsh-fs-sandbox` / `dsh-sandbox-windows-acl`。
 - 把结论接成闸：`tool_apply(verify=…)` + `VERIFY_ALLOW`（**M2 就是它**，已存在）。
-- 驱动会话：`scripts/session-drive.mjs prompt <id> "<text>"`（走前门 RPC，已实测可用）。
+- 驱动会话：`scripts/session-drive.mjs prompt <id> "<text>"`；建会话：`session.create`；
+  分叉：`session.fork`；列会话：`session.list`。
+- 单臂驱动与判据：**直接扩** `scripts/eval-run.mjs`（别另写一个）。
 
-**注意**（累积）：
-- 单臂基线也要先记账：先量"现行自己在预算内能不能修好这题"，否则没有对照。
-- 沙箱/工作区必须隔离：Agent 会改文件；实验起点必须可重置（否则两次不可比）。
-- 别把期望答案放进 Agent 能读的地方（判据要在它够不到的位置）。
-- **真跑会往你指定的会话里写记录、消耗 token** ⇒ 必须显式传 `--session`，别拿在用的会话试。
+**必须守住的实验卫生**（否则 delta 不可信）：
+- **同一起点**：两臂都从**同一 HEAD + 干净工作区**出发；打 seed / 还原走 `eval-validate.mjs --prepare|--restore`
+  （字节级 + sha256）。跑完必须 `git status` 干净。
+- **隔离**：Agent 会改文件 ⇒ 两臂**不得共用工作区**（或严格串行 + 每次还原）。
+- **别把期望答案放进 Agent 够得到的地方**（判据要在它够不到的位置）。
+- **记账要成对**：两臂同一题、同一预算；只报单臂数字没有意义。
+- **危险动作要记**（它调 `tool_apply` / 改 profile / 杀进程都算）——这是"值不值得换"的关键一列。
+
+**验收**：一条命令能跑完两臂并打印成对 delta 表；对 `cli-0001`（已知 FIXED）两臂都跑得通；
+报告里能看到上面五列。
+
+### 3.C 排队中（**不要现在做**，登记以免忘）
+
+- **`lease.freezeSeq` 没有读者**（§4.4）—— fencing 仍未真正落地。当前靠 `seal`（未停写 ⇒ 杀旧代）等效兜住，
+  所以**不是紧急**；但要记着它是"设计里的机制从未被消费"这一类（见 §5 纪律 1）。
+- **回滚路径的重叠窗口**（§4.2）；**`session-3d8ea18d`**（§4.3）；**幂等/重复副作用立案**（§4.5）。
+- **M2**（把实验结论接进 `verifyCmd` 闸）**依赖 §3.B 的结论** ⇒ 现在做不了。
+- **M3**（拆服务）是**触发式**，**别提前做**。
 
 ---
 
 ## 4. 仍未闭合（诚实清单）
 
-1. **M1-step-2 未做**（§3）；`pass^k` 可靠性、公开靶场地板也都还没做。
+1. **M1-step-2 未完成**：单臂基线 1/3 题已跑通（cli-0001 FIXED）；
+   **剩下 2 题未跑**（§3.A）；**挑战者臂与成对 delta 未做**（§3.B，且"挑战者"的定义是待定的设计决定）。
+   `pass^k` 可靠性、公开靶场地板也都还没做。
 2. **回滚路径的重叠窗口**：`quiesced=false` 且 flip 后 verify 失败、走到 `rollbackFlip` 时，
    旧代（未停写）与新代（已服务过一小会儿）仍可能碰同一会话。窗口小但未消除。
    候选：把 verify 全部前移到 flip 之前，flip 与"杀旧代"原子化（动最安全攸关的顺序）。
@@ -182,7 +234,7 @@ node scripts\verify-drain-after-swap.mjs
 ### 6.3 里程碑状态
 - M0 ✅ 真机验收通过（含回合运行中换代）。
 - M1-step-1 ✅ 判据地基（`evals/` + `eval-validate.mjs`）。
-- M1-step-2 ⬜ 跑 Agent 那一半（§3）。
+- M1-step-2 🟡 **单臂基线已真跑通**（cli-0001 FIXED，14:24）；剩 2 题 + 挑战者臂（§3）。
 - M2 ⬜ 把实验结论接进 `verifyCmd` 闸（接口已存在）。
 - M3 ⬜ **触发式**：custody 拆分（写权收授 + 前门搬家）—— 触发条件：替换频率高到
   "每次都要跑实验/停机"不能接受。**别提前做**。
