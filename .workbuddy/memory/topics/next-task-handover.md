@@ -1,137 +1,151 @@
-# 接手指南：下一项 —— **真机验收 drain 修复**，然后接 M1（实验/判据）
+# 接手指南（**回执** + 下一项）—— 2026-09-20 13:40
 
-> **给新会话读的**。自包含：读完它 + 它列出的文件就能接着干，不必回溯前面的对话。
-> 写于 2026-09-20 12:30（上一项 = hard-switch 写入竞态，已修完待验收；M1 已开工）。
+> **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。
+> 上一轮的交接文档就是本文件；本轮把「做完了什么 + 现在什么状态 + 下一项」重写在顶部，旧长尾留档在 §6。
 
 ---
 
 ## 0. 一句话
 
-1. **上一项已修完并全门通过**：换代写入竞态的**真因**被更正为「`freeze` 从来没让人停过写」，
-   已在 `drain.ts` / `coordinator.ts` / `index.ts` 修好（`docs/handover-vs-restart.md` §8，已重写）。
-2. **本次（09-20）新增**：真机验收脚本、上游漂移体检、两服务架构评审、M1 的实验地基（见 §4）。
-3. **下一项 = 真机验收**（§1），验收通过后按 §4 继续 M1。
+**换代写入竞态（两代并发写同一份会话）已修、已在真机上验收通过（含"回合运行中换代"这条主路径），
+并在验收过程中抓到并修掉了我自己修复里的两个假信号。**
+下一步 = **M1-step-2：把冻结任务集当题面交给 Agent，产出「现行 vs 挑战者」的 delta 报告**。
 
 ---
 
-## 1. 首要：真机验收（~~未做~~ → **M0 已通过 2026-09-20 13:15**）
+## 1. 本次回执（2026-09-20，可整段贴回）
 
-**已通过的**（用户终端启动 + 一次非 fast 换代）：`verify-drain-after-swap.mjs` = **11 ok / 0 FAIL**，
-流水 `freeze a lastSeq=-1 quiesced=true (canSeeAgents=true running=0→cancel=0 …)` + `seal: keep-old`，
-全程 4.5s；gen 侧 `resume.jsonl` 有 `{"phase":"drain"}`、boot.log 有 drain 行。
+### 1.1 修好了什么（M0 真机验收 **通过**）
 
-**仍未验的两个分支（不许当已通过）**：
-1. `running>0 ⇒ cancel 回合并等 whenIdle` —— 那次是**空闲**发起的（`running=0→cancel=0`）；
-2. "真 `lastSeq` 非 0" —— 那次**没有任何 live 会话**（`max(∅) = -1`，是诚实值）。
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 空闲换代 | `verify-drain-after-swap.mjs` = **11 ok / 0 FAIL** | 流水 `freeze a … quiesced=true (canSeeAgents=true …)` + `seal: keep-old`；4.5s 落定 |
+| **回合运行中换代**（主路径） | **全绿** | `drain quiesced=true lastSeq=1315 canSeeAgents=true canSeeSessions=true running=1→cancelled=1 stillBusy=[] flushFailed=[] sessions=1 (14ms)`；会话日志以 `turn/end {kind:aborted, reason:{kind:hook, reason:handover/freeze}}` + `end-seed` 收尾；`lastSeq` 恰好等于那条 `turn/end` 的 seq |
+| 封口路径（旧代不肯停写） | 真机上跑过一次 | 13:24 流水：`seal: KILL-OLD` → `retire(seal) 强杀旧代` → `seal ok：旧代已确认消失`（**先杀旧代、后放前门锁**） |
+| 离线门 | `test-handover-drain.mjs` **48 项**（并进 `check:all`） | 该红的红 / 该绿的不绿 / 封口顺序两方向自证 / 上游形状断言 |
+| 全门 | `node scripts/check-all.mjs` = **15/15** | — |
 
-⇒ **要在回合运行中发一次换代**才能覆盖这两条：在 GUI 里（或 `node scripts/session-drive.mjs prompt <id> "…"`）
-发一条**不调用工具**的长回答请求，然后立刻 `curl.exe "http://127.0.0.1:31800/?cmd=handover"`，
-再看流水应出现 `running=1→cancel=1` 与**非负的 lastSeq**。
+### 1.2 ★ 真机验收顺手抓到我自己的两个 bug（本轮最有价值的部分）
 
-### 步骤（一条命令，以后要重跑时）
+1. **假红**：`stillBusy` 读的是"建 agent 列表那一刻"的 phase **快照** ⇒ 明明 cancel 成功了
+   （会话日志里已有 `turn/end aborted(hook)`）却报 `quiesced=false`，进而触发 `KILL-OLD`。
+   ⇒ 改成**实时** `DrainAgent.readPhase()`；门加 A8。
+2. **假绿**：`ctx.sessions` **没有 inject**（真机上是 `undefined`）⇒ `sessions=0` / `lastSeq=-1` /
+   **`flush` 一次都没跑过**；而**空闲场景照样报 `quiesced=true`** —— 即 13:15 那次"通过"其实是**空过**。
+   ⇒ 与 agents 同款改走 `ctx.inject(['sessions'])`；新增 `sessionsObservable`（**看不到会话服务 ⇒ 必须报未停写**）；
+   `liveMaxSeq` 改成接收服务对象。门加 A7 + B5。**门 41 → 48 项**。
 
-为什么必须：门是"假件 + 源码"级的，**没有在活的 switchboard 上跑过一次换代**。
-`gen 侧接线在真机可用` 目前只有三条间接证据（既有生产证据 `resume.jsonl` 里 `agents:true`、
-上游形状门、假件单测），不等于实测。
+### 1.3 顺手清掉的技术债：ready/追平门槛的最后一块假绿
 
+`preseed.computeCaughtUpSeq()` 依赖 `sessionPersistence.listSessions()` —— **这个方法在上游不存在**
+（服务名是真的、方法不是）⇒ `ids=[]` ⇒ 恒返回 0（**171 条 freeze 的 `lastSeq` 全是 0** 的真正原因）。
+⇒ 改成 `liveMaxSeq(sessionsRef.current)`（只回答**能真答**的问题）；控制面的 ready 门槛同时从
+"比 seq" 换成**结构性就绪** `waitReady()`，`waitCatchUp` 降级为 **1.5s 有界观测**（不得当门槛）。
+
+### 1.4 另外三件（讨论产物，不是代码）
+
+- `docs/upstream-drift-2026-09-20.md` + `npm run check:upstream`：上游 0.1.1-rc.2 → latest **0.1.5-rc.2**
+  （alpha 0.1.6-alpha.2）。**竞态根机制未变**（上游没修）；但 0.1.5 给 persistence 加了**存储层单写者所有权**。
+  我们的三个补丁靶子都还在、上游都没修 ⇒ 仍需要；BOM 从 3 处涨到 4 处。
+- `docs/two-service-custody-review.md`：主脑/子脑拆服务的评审 —— 能替掉"部署"层、**替不掉"判据"层**；
+  对称代持 = 2-回路（踩无环原则）；§8 给出"同时开 2 号进程做实验"的三条件（写权互斥 / 副作用隔离 / 判据非环）。
+- `docs/agent-eval-arenas.md` + `evals/` + `npm run eval:validate`：M1 的**判据地基** ——
+  冻结任务集（首批 3 题 = 把修过的回归反向打回去，oracle 就是我们已有的门）；
+  校验器证明"打上 seed 后 oracle **必须变红**"，否则是**假题**（字节级 sha256 还原；3 题有效 / 0 题有问题）。
+
+### 1.5 提交与推送状态
+
+本地 4 个新提交（`fix(switchboard)` / `test(drain)` / `docs(arch)+feat(eval)` / `docs(memory)`），
+**共 39 个提交未推送**。⚠️ **推送卡住了**：git 配的代理 `127.0.0.1:7890` **没在跑**，
+直连 GitHub 超时，工作层代理拒绝 CONNECT。
+⇒ **请启动你的代理客户端**（监听 7890 的那个），然后 `git push origin master`（或让我再推一次）。
+
+---
+
+## 2. 当前系统状态（怎么确认它还活着）
 
 ```bash
-# 0) 启动/重启 switchboard —— **必须在用户终端跑**（Agent 侧即使 detached 也会被回收，2026-09-20 实测）
-cd D:\project_develop\dsh-brain
-node scripts\relaunch-switchboard.mjs                  # 分离式；日志 → out\switchboard-run.log
-node scripts/check-session-integrity.mjs --all          # 换代前：坏帧契约会让整代起不来
-curl.exe "http://127.0.0.1:31800/?cmd=handover"         # 非 fast；空档时发（PowerShell 里 curl 是别名，写 curl.exe）
-node scripts/verify-drain-after-swap.mjs                # 或 npm run verify:drain
+curl.exe "http://127.0.0.1:31800/?cmd=status"     # 控制面（PowerShell 里必须写 curl.exe）
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3080/   # 前门，应 200
+node scripts/verify-drain-after-swap.mjs          # R0 会告诉你：栈在不在、换没换代、跑的是哪版
 ```
 
-`scripts/verify-drain-after-swap.mjs`（= `npm run verify:drain`）把验收做成了判据表：R1 有 `quiesced=` 读数 / R2 `quiesced=true` / R3 `canSeeAgents=true` / R4 `stillBusy=[] flushFailed=[]` /
-R5 `seal: keep-old` / R6 catchup 观测项 / R7 `resume-session` / R8 旧代 `resume.jsonl` 有 `phase:"drain"` /
-R9 会话体健 / **R9b 没有新增 seq gap（本 bug 的直接指纹，靠 `out/drain-acceptance-baseline.json` 基线对比）**。
-它自带 `--selftest`：真·修复前日志必须红（7 FAIL）、合成修复后必须全绿 —— 判据自身两方向自证过。
-**注意**：它**不在** `check:all` 里（换代前本来就该红；与 `verify:p4` 同理）。
-
-输出为 `FAIL 0`（且 `R9b` 不是红）即验收通过；红在哪一条，就按下面的嫌疑表查。
-
-### 验收失败时的第一嫌疑（按顺序）
-
-1. `canSeeAgents=false` ⇒ `ctx.inject(['agents'])` 或 `agents.list()` 不可用 ⇒ 看
-   `toDrainAgents()`（`packages/switchboard/src/index.ts`）与 `drain.ts` 的 `agentPhase`。
-2. `quiesced=false` 且 `stillBusy` 非空 ⇒ `cancel()` 没能让回合停下，或 `phase` 读错位
-   （上游形状变了 → 门 §C 会先报红）。
-3. `flushFailed` 非空 ⇒ `SessionStore.flush` 抛错（多半是会话已不在 live 列表里）。
+- 栈由**用户终端**启动（Agent 侧起的进程会被回收）：`node scripts/relaunch-switchboard.mjs`。
+- ⚠️ 现在跑着的**控制面**是 13:14 那个进程（**旧 build**）⇒ `state.jsonl` 里暂时看不到 `canSeeSessions`
+  字段（那行由控制面拼）；gen 侧 `boot.log` / `resume.jsonl` 已经能看到 ✓。重启一次即对齐，**不急**。
 
 ---
 
-## 2. 这次改了什么 / 别踩回去
+## 3. 下一项：M1-step-2 —— 跑 Agent 的那一半
 
-| 文件 | 改动要点 |
-|---|---|
-| `packages/switchboard/src/drain.ts` | **重写**：`drainForHandover()` 真停（cancel 回合 + 有界 `whenIdle` + 官方 flush + 真 `lastSeq` + `primarySessionId` + `quiesced`）；`agentPhase()`；`sealPlan()` |
-| `packages/switchboard/src/index.ts` | freeze 走 drain；`prepareSwitch` 改用**真实 phase**（旧的跨插件 `turn/start` 监听是死代码，已删）；reply 带 `quiesced/primarySessionId/drain` |
-| `packages/switchboard/src/coordinator.ts` | 记录真读数；`resumeId` 优先 `primarySessionId`；`sealPlan` ⇒ **释放前门锁之前**强杀未停写的旧代（失败落盘 `unfenced-old-gen.txt`）；`waitCatchUp` 支持超时（freeze 后追平 → 1.5s 观测项） |
-| `packages/switchboard/src/handover-protocol.ts` | `FreezeReply` 增 `quiesced?` / `primarySessionId?` / `drain?` |
-| `packages/switchboard/scripts/build.mjs` | 不再依赖全局 `tsc`（用仓库内 `node_modules/typescript`） |
-| `scripts/test-handover-drain.mjs` | **新门**（36 项）：红/绿双向 + 封口顺序**两方向自证** + 上游形状断言 |
-| `scripts/check-all.mjs` | 收进新门（15 道） |
+**目标**：把 `evals/pilot/tasks.jsonl` 的题面交给 Agent（跑在**只读沙箱/分叉会话**里），收轨迹，
+再跑 oracle + `regression`，产出「现行 vs 挑战者」的 **delta 报告**（成功率 / 工具调用数 / token /
+延迟 / **危险动作**）。
 
-**构建**：`cd packages/switchboard && node scripts/build.mjs`（会翻 `lib` junction，并重写 `bin.cjs`）。
-**运行中进程不受影响** ⇒ 改完要先构建，再换代/重启才生效。
+**已有**：任务集 + 有效性校验（step-1）；`--prepare/--restore` 已给这一步备好（打 seed + 字节级还原）。
+**要新建**：`scripts/eval-run.mjs`（驱动 + 收轨迹 + 出报告）。
 
----
+**复用点**（别重造）：
+- 起挑战者：`packages/switchboard/src/spawner.ts`；只读沙箱：profile 已有 `sandbox: read-only`
+  （`out/profile-dump.txt:114`）与 `dsh-fs-sandbox` / `dsh-sandbox-windows-acl`。
+- 把结论接成闸：`tool_apply(verify=…)` + `VERIFY_ALLOW`（**M2 就是它**，今天已存在）。
+- 驱动会话：`scripts/session-drive.mjs prompt <id> "<text>"`（走前门 RPC，已实测可用）。
 
-## 3. 纪律与坑（本次新增的两条）
-
-1. **判"某机制有没有在工作"不许读注释、不许读代码意图** —— 去历史记录里**数"判据为真的次数"**。
-   本案就是靠「`waitedTurnEnd=true` 计数 = 0 / `lastSeq=0` 计数 = 171」破的。**从未为真的判据 = 假绿。**
-2. **"看不到" ≠ "没有"**：服务缺失 / 列表为空 / 读数拿不到，一律**不得**当作正向判据
-   （`drain` 的 `agentsObservable` 就是这个原则的落地）。
-3. `npm run check:all` 在 Agent 的 shell 里**会被安全策略拦**（wsl.exe 在黑名单）⇒ 直接用
-   `node scripts/check-all.mjs`（等价）。
-4. `tsc` 不在 Agent 的 PATH 上 —— 已修进 `build.mjs`，不要再写依赖全局 `tsc` 的脚本。
+**注意**（本轮踩过的）：
+- 单臂基线也要先记账：先量"现行自己在预算内能不能修好这题"，否则没有对照。
+- 沙箱/工作区必须隔离：Agent 会改文件；实验起点必须可重置（否则两次不可比）。
+- 别把期望答案放进 Agent 能读的地方（判据要在它够不到的位置）。
 
 ---
 
-## 4. 验收之后的候选（按建议优先级）
+## 4. 仍未闭合（诚实清单）
 
-> **口径已定（2026-09-20）**：下一步不是拆服务，而是补**判据那一半**。
-> 完整论证：`docs/oss-prior-art-and-next-steps.md`（含 M0–M3 里程碑 + 开源先例）；
-> 靶场调研：`docs/agent-eval-arenas.md`（公开榜怎么测、用什么数据、2026 的四条教训）。
+1. **M1-step-2 未做**（§3）；`pass^k` 可靠性、公开靶场地板也都还没做。
+2. **回滚路径的重叠窗口**：`quiesced=false` 且 flip 后 verify 失败、走到 `rollbackFlip` 时，
+   旧代（未停写）与新代（已服务过一小会儿）仍可能碰同一会话。窗口小但未消除。
+   候选：把 verify 全部前移到 flip 之前，flip 与"杀旧代"原子化（动最安全攸关的顺序）。
+3. **`session-3d8ea18d` 的 seq gap**（截断会丢 59%）—— 等用户决定。
+4. `lease.freezeSeq` 现在有真值了，但**没有任何读者**（fencing 仍未真正落地）。
+5. **"重复副作用/幂等"** 建议单独立案（durable execution 的教训：`checkpoint ≠ durable`）。
+6. 测试残留：`session-853b751c-…` 的历史里有两条测试请求（蜂群/珊瑚礁说明文）+ 两次 aborted 回合。
 
-### M1-step-1 ✅ 已开工（本轮）= 实验的**判据地基**
+---
 
-- `evals/README.md` —— 任务集格式 + 两条不许破的规则（**判据必须在 Agent 够不到的地方**；
-  **每题必须证明有信号**）。
-- `evals/pilot/tasks.jsonl` —— 首批 3 题，全部是**把我们的回归反向打回去**：
-  `cli-0001` 注入消息缺 id/source（oracle = `test-injected-message-shape.mjs`）、
-  `cli-0002` 封口顺序（oracle = `test-handover-drain.mjs`）、
-  `cli-0003` defer 直读真实 phase（同门）。
-- `scripts/eval-validate.mjs`（`npm run eval:validate`）—— **有效性校验**：
-  ①干净态绿 ②打 seed 后 oracle **必须红**（否则是**假题**）③字节级 sha256 还原 + 复绿。
-  实测 **3 题有效 / 0 题有问题**；它**不在** `check:all` 里（会临时改工作区文件，理由写在 check-all 注释里）。
-  `--prepare <id>` / `--restore` 给下一半（跑 Agent）复用。
+## 5. 纪律与坑（累积，**必读**）
 
-### M1-step-2 ⬜ 未做 = 跑 Agent 的那一半
+1. **判"某机制有没有在工作"，不许读注释、不许读代码意图** ⇒ 去历史记录里**数"判据为真的次数"**。
+   （本轮之前那次破案靠的就是「`waitedTurnEnd=true` 计数 = 0 / `lastSeq=0` 计数 = 171」。）
+2. **"看不到" ≠ "没有"**：服务缺失 / 列表为空 / 读数拿不到，一律不得当正向判据
+   （`agentsObservable` / `sessionsObservable` 就是这个原则的落地）。
+3. **判据读旧数据（快照）或读注释都是假信号源**：文本断言先 `stripComments()`；阶段/状态一律**实时读**。
+4. **Agent 侧启动不了长期服务**（`detached+unref` 也不行，实测）⇒ switchboard 必须用户终端启动。
+5. `npm run <script>` 在本机 shell 会被安全策略拦 ⇒ 直接 `node scripts/<x>.mjs`。
+6. 构建：`cd packages/switchboard && node scripts/build.mjs`（用仓库内 tsc；会翻 `lib` junction）。
+   **改完必须构建 + 换代/重启才生效**。
+7. 换代前跑 `node scripts/check-session-integrity.mjs --all`；换代用**非 fast**（除非刻意测 fast 路径）。
+8. 改 `~/.dsh` 下的文件先备份；`.ps1` 必须带 BOM（`node scripts/check-bom.mjs --fix`）。
 
-把 `task.invariant` 当题面交给**只读沙箱/分叉会话**里的挑战者 → 收轨迹 → 跑 oracle + `regression`
-→ 产出**现行 vs 挑战者的 delta 报告**（成功率 / 工具调用数 / token / 延迟 / **dangerousActions**）。
-依赖运行时起来（M0），所以先在 step-1 把"题目真的有效"这半边钉住。
-★ 复用点：`tool_apply(verify=…)` + `VERIFY_ALLOW` 就是现成的验收闸（M2）。
+---
 
-### M3（触发式，别提前做）
+## 6. 旧长尾（留档）
 
-custody 拆分（写权收授 + 前门搬家）——**触发条件**：替换频率高到"每次都要跑实验/停机"不能接受。
-设计口径见 `docs/two-service-custody-review.md`（含 §8 的"同时开 2 号进程"三条件：
-写权互斥 / 副作用隔离 / 判据非环）。
+### 6.1 已通过的验收步骤（原清单，M0 已完成）
+```bash
+cd D:\project_develop\dsh-brain
+node scripts\relaunch-switchboard.mjs          # 用户终端；日志 → out\switchboard-run.log
+node scripts\check-session-integrity.mjs --all
+curl.exe "http://127.0.0.1:31800/?cmd=handover"
+node scripts\verify-drain-after-swap.mjs
+```
 
-### 另外两项技术债（不阻塞）
+### 6.2 逐文件改动说明
+见 §1.1；"为什么这么改"的完整记录在 `docs/handover-vs-restart.md` §8（**已按真因重写**）
+与 `docs/oss-prior-art-and-next-steps.md`（里程碑 M0–M3 + 开源先例）。
 
-1. **让 ready / 追平门槛不再惰性**（或正式废弃它）：
-   `computeCaughtUpSeq`（`src/preseed.ts`）依赖 `sessionPersistence.listSessions` +
-   `projectionCache.coldSnapshot(id).asOfSeq`，实测恒 0。现状：已降级成 1.5s 观测项。
-   要真修先搞清这两个服务在 gen 里为什么取不到（`--dump-config` + 在 gen 里打印 `Object.keys(ctx)`）。
-2. **回滚路径的重叠窗口**：`quiesced=false` 时若 flip 后 verify 失败并回滚，两代仍可能碰同一会话。
-   备选修法：verify 全部前移到 flip 之前，flip 与"杀旧代"变成原子的一步（动最安全攸关的顺序，需真机数据打底）。
-
-**其他未闭合**：`session-3d8ea18d` 的 seq gap（截断丢 59%，需用户决定）；
-`lease.freezeSeq` 现在有真值了但**没有任何读者**（fencing 仍未落地）；
-"重复副作用/幂等"建议单独立案（durable execution 的教训：`checkpoint ≠ durable`）。
+### 6.3 里程碑状态
+- M0 ✅ 真机验收通过（含回合运行中换代）。
+- M1-step-1 ✅ 判据地基（`evals/` + `eval-validate.mjs`）。
+- M1-step-2 ⬜ 跑 Agent 那一半（§3）。
+- M2 ⬜ 把实验结论接进 `verifyCmd` 闸（接口已存在）。
+- M3 ⬜ **触发式**：custody 拆分（写权收授 + 前门搬家）—— 触发条件：替换频率高到
+  "每次都要跑实验/停机"不能接受。**别提前做**。
