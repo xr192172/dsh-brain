@@ -1,4 +1,4 @@
-# 接手指南（**回执** + 下一项）—— 2026-09-20 14:28（回执：单臂基线真跑通；下一项见 §3.B）
+# 接手指南（**回执** + 下一项）—— 2026-09-20 14:52（补齐：单臂 3/3 + Step 0 已定；下一项 §3.B）
 
 > **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。
 > 上一轮的交接文档就是本文件；本轮把「做完了什么 + 现在什么状态 + 下一项」重写在顶部，旧长尾留档在 §6。
@@ -7,10 +7,10 @@
 
 ## 0. 一句话
 
-**换代写入竞态（两代并发写同一份会话）已修、已在真机上验收通过（含"回合运行中换代"这条主路径），
-并在验收过程中抓到并修掉了我自己修复里的两个假信号。M1-step-2 的「单臂基线」也已真跑通（cli-0001 = FIXED）。**
-下一步 = **给 `eval-run` 加「挑战者臂」、产出「现行 vs 挑战者」的成对 delta 报告**（§3.B；
-先做 §3.A 把 3 题单臂基线补齐）。
+**换代写入竞态已修 + 真机验收通过（含"回合运行中换代"主路径），并在验收中抓到并修掉了我自己修复里的两个假信号。
+M1-step-2 的「单臂基线」已跑完 3/3 题（全 FIXED，见 `docs/eval-baseline-single-arm.md`），
+「挑战者臂」的定义也已定下（见 `docs/eval-challenger-arm.md`）。**
+下一步 = **§3.B：给 `eval-run` 加挑战者臂、产出成对 delta**（★ 主判据已改为"成本与路径" —— 三题已饱和，成功率没有区分度）。
 
 ---
 
@@ -155,8 +155,10 @@ node scripts/eval-run.mjs --task cli-0003 --session <专门的空会话>
 **目标**：让 `eval-run` 能跑**两条臂**（现行 / 挑战者）并对同一批题给出 delta：
 成功率 / 工具调用数 / token / 墙钟 / **危险动作**。
 
-**⚠️ Step 0（必须先做的设计决定，别跳过）**：**"挑战者"到底指什么？**
-这是**尚未定义**的（不是我没写，是真的还没定）。可选形态：
+**⚠️ Step 0（必须先做的设计决定）**：**"挑战者"到底指什么？**
+可选形态：换**模型**（`llm.providers` / `session.selectModel`）／换 **agent preset**
+（`agentPreset.list` / `select`）／换**生长基质**（改 P0：能力库 / persona / 技能，最贴项目初衷也最难隔离）。
+⇒ 不先定这个，delta 没有意义（两臂不可比）。
 
 **✅ Step 0 已完成（2026-09-20 14:45，子会话执行）→ `docs/eval-challenger-arm.md`**：
 定义 = **只换 preset**（同模型/同仓库/同题面/同预算）；首版 **A=`council`（现行）vs B=`code`（PTC/Code Mode）**；
@@ -164,10 +166,6 @@ node scripts/eval-run.mjs --task cli-0003 --session <专门的空会话>
 而 `{preset:…}` / `{name:…}` 是 **HTTP 200 的静默 no-op** ⇒ **必须回读 `session.list.<sid>.agentPreset` 才算数**；
 主判据 = `toolCalls`/`tokens`/`wallMs`/`dangerous`，成功率当地板；两臂**严格串行 + 各用新建空会话**。
 实现计划：给 `eval-run.mjs` 加 `--pair --task X --armA council --armB code`（**别另写脚本**）。
-- 换**模型**（`llm.providers` / `session.selectModel` —— 前门有这两个 RPC）；
-- 换 **agent preset**（`agentPreset.list` / `select`；我们已有 `council` 与 `code-council` 两个）；
-- 换**生长基质**（改 P0 内容：能力库 / persona / 技能）—— 最贴项目初衷（工具自进化），也最难隔离。
-⇒ **请先把这个定义写进文档再动手**，否则做出来的 delta 没有意义（两条臂不可比）。
 
 **已有可复用**（别重造）：
 - 起挑战者：`packages/switchboard/src/spawner.ts`；
@@ -200,8 +198,10 @@ node scripts/eval-run.mjs --task cli-0003 --session <专门的空会话>
 
 ## 4. 仍未闭合（诚实清单）
 
-1. **M1-step-2 未完成**：单臂基线 1/3 题已跑通（cli-0001 FIXED）；
-   **剩下 2 题未跑**（§3.A）；**挑战者臂与成对 delta 未做**（§3.B，且"挑战者"的定义是待定的设计决定）。
+1. **M1-step-2 未完成**：单臂基线 **3/3 已跑完**（全 FIXED，`docs/eval-baseline-single-arm.md`）；
+   Step 0（挑战者定义）**已完成**（`docs/eval-challenger-arm.md`）；
+   **剩 §3.B 的实现：挑战者臂 + 成对 delta**。
+   ⚠️ 三题已**饱和**（都是"恢复一行不变量"）⇒ **成功率没有区分度**，主判据必须用"成本与路径"。
    `pass^k` 可靠性、公开靶场地板也都还没做。
 2. **回滚路径的重叠窗口**：`quiesced=false` 且 flip 后 verify 失败、走到 `rollbackFlip` 时，
    旧代（未停写）与新代（已服务过一小会儿）仍可能碰同一会话。窗口小但未消除。
@@ -247,7 +247,8 @@ node scripts\verify-drain-after-swap.mjs
 ### 6.3 里程碑状态
 - M0 ✅ 真机验收通过（含回合运行中换代）。
 - M1-step-1 ✅ 判据地基（`evals/` + `eval-validate.mjs`）。
-- M1-step-2 🟡 **单臂基线已真跑通**（cli-0001 FIXED，14:24）；剩 2 题 + 挑战者臂（§3）。
-- M2 ⬜ 把实验结论接进 `verifyCmd` 闸（接口已存在）。
+- M1-step-2 🟡 单臂基线 **3/3 跑完**（`docs/eval-baseline-single-arm.md`）+ 挑战者定义已定
+  （`docs/eval-challenger-arm.md`）；**剩实现：`eval-run --pair` 成对 delta**（§3.B）。
+- M2 ⬜ 把实验结论接进 `verifyCmd` 闸（接口已存在）；**依赖 §3.B 的结论**。
 - M3 ⬜ **触发式**：custody 拆分（写权收授 + 前门搬家）—— 触发条件：替换频率高到
   "每次都要跑实验/停机"不能接受。**别提前做**。
