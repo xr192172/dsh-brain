@@ -194,9 +194,10 @@ function extractMetrics(recs) {
  * 判据必须可机验：换代会把正在跑的回合 `aborted` ⇒ 把"环境事故"当成"被测对象失败"是本项目反复踩的坑。
  * 用法：跑前记 `from`（ms），跑后再读，窗口内命中即判 **污染**。
  */
-function handoverInWindow(fromMs, toMs) {
+function handoverInWindow(fromMs, toMs, ignoreWindows = []) {
   const p = 'C:/Users/Admin/.dsh/switchboard/state.jsonl'
   const hits = []
+  const ignored = []
   try {
     for (const l of fs.readFileSync(p, 'utf8').split('\n')) {
       if (!l.trim()) continue
@@ -207,13 +208,17 @@ function handoverInWindow(fromMs, toMs) {
         continue
       }
       const t = r?.t ?? 0
-      if (t >= fromMs && t <= toMs && ['spawn', 'freeze', 'flip', 'retire', 'promote'].includes(String(r.stage)))
-        hits.push({ at: new Date(t).toTimeString().slice(0, 8), stage: r.stage, note: String(r.note ?? '').slice(0, 90) })
+      if (!(t >= fromMs && t <= toMs)) continue
+      if (!['spawn', 'freeze', 'flip', 'retire', 'promote'].includes(String(r.stage))) continue
+      const rec = { at: new Date(t).toTimeString().slice(0, 8), stage: r.stage, note: String(r.note ?? '').slice(0, 90) }
+      // ★ 我们自己为了切臂而做的换代**不算污染**（否则臂切换会被判成环境事故）——但必须**留痕**
+      if (ignoreWindows.some(([a, b]) => t >= a && t <= b)) ignored.push(rec)
+      else hits.push(rec)
     }
   } catch {
-    return { checked: false, hits: [] }
+    return { checked: false, hits: [], ignored }
   }
-  return { checked: true, hits, contaminated: hits.length > 0 }
+  return { checked: true, hits, ignored, contaminated: hits.length > 0 }
 }
 const DANGEROUS_RULES = [
   { id: 'tool_apply', re: /tool_apply|self_evolve/, why: '自进化入口：会改能力库 / 注册表' },
@@ -346,7 +351,7 @@ if (has('--plan') || (!sid && !has('--pair') && !has('--repeat') && !argOf('--ar
  * @param {{task:object, sid:string, arm?:string|null, label?:string}} o
  * @returns {Promise<object>} report（含 stages）
  */
-async function runArm({ task, sid, arm = null, label = '' }) {
+async function runArm({ task, sid, arm = null, label = '', profile = null, ignoreWindows = [] }) {
   const t0 = Date.now()
   const tag = label ? `${label} ` : ''
   const report = { task: task.id, arm, session: sid, at: new Date().toISOString(), stages: {} }
@@ -497,12 +502,37 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   // ④.5 环境扰动判据：这次跑期间有没有换代？（有 ⇒ 该次跑**污染**，结论不可用）
   //      2026-09-20 实测踩到：成对实验横跨两次换代，B 臂的回合被 `aborted(handover/freeze)`，
   //      却被读成"它没做出来" —— **把环境事故当成被测对象的失败**，正是本项目反复修的假信号。
-  report.stages.handoverDuringRun = handoverInWindow(t0, Date.now())
+  report.stages.handoverDuringRun = handoverInWindow(t0, Date.now(), ignoreWindows)
   if (report.stages.handoverDuringRun.contaminated) {
     console.error(
       `${tag}⚠ 本次跑期间**发生过换代**（${report.stages.handoverDuringRun.hits.length} 条）⇒ 该次读数**污染**，不许当结论：\n` +
         report.stages.handoverDuringRun.hits.map((h) => `      ${h.at} ${h.stage} ${h.note}`).join('\n'),
     )
+  }
+  if (report.stages.handoverDuringRun.ignored?.length)
+    console.log(`${tag}（其中 ${report.stages.handoverDuringRun.ignored.length} 条是**我们自己切臂**造成的，已排除）`)
+
+  // ④.6 臂自证：这次跑的工具面**必须/不许**含某些工具（"能力开/关"是否真的生效，看事实不看意图）
+  const toolSet = report.stages.trajectory?.metrics?.toolSet ?? []
+  if (EXPECT_TOOLS.length || FORBID_TOOLS.length) {
+    const missing = EXPECT_TOOLS.filter((t) => !toolSet.includes(t))
+    const forbidden = FORBID_TOOLS.filter((t) => toolSet.includes(t))
+    report.stages.toolFaceCheck = {
+      expect: EXPECT_TOOLS,
+      forbid: FORBID_TOOLS,
+      toolSetSize: toolSet.length,
+      missing,
+      forbidden,
+      ok: missing.length === 0 && forbidden.length === 0,
+    }
+    if (!report.stages.toolFaceCheck.ok) {
+      console.error(
+        `${tag}✗ 臂自证不过：缺 [${missing.join(', ')}]，不该有 [${forbidden.join(', ')}] ⇒ 这次跑**不能算作该臂**`,
+      )
+      report.stages.armInvalid = true
+    } else {
+      console.log(`${tag}✓ 臂自证通过（工具面 ${toolSet.length} 个：含 [${EXPECT_TOOLS.join(', ')}]，不含 [${FORBID_TOOLS.join(', ')}]）`)
+    }
   }
 
   // ⑤ 还原
@@ -545,6 +575,93 @@ function dshFacts() {
     /* ignore */
   }
   return { build: build ?? '(未知)', profile: process.env.WEB_PROFILE ?? '(未设；gen 默认 web)' }
+}
+
+// ── 臂切换：按次换代到另一个 profile（`?cmd=handover&profile=<name>`）────────────
+/**
+ * "能力开/关"两臂的机械装置：switchboard 本来就支持按次指定脑 profile
+ * （`coordinator.handover(…, profileOverride, …)`）。切完**必须两方向确认**：boot.log 里
+ * 该插件标记**该有的有、该没有的没有**（读"效果"，不读我们的意图）。
+ */
+const CTRL = process.env.DSH_CTRL ?? 'http://127.0.0.1:31800'
+const PROFILE_EXPECT = {
+  web: { must: [/\[tool-evolution\] apply running/, /\[design-canvas-bridge\] config:/], mustNot: [] },
+  'web-notev': { must: [/\[design-canvas-bridge\] config:/], mustNot: [/\[tool-evolution\] apply running/] },
+  'web-nodc': { must: [/\[tool-evolution\] apply running/], mustNot: [/\[design-canvas-bridge\] config:/] },
+}
+
+async function ctrlStatus() {
+  const r = await fetch(`${CTRL}/?cmd=status`)
+  return r.json()
+}
+async function ensureProfile(profile) {
+  const s0 = await ctrlStatus()
+  const gen = s0?.lease?.activeGen?.gen ?? null
+  const fp = pluginFingerprint(gen)
+  const exp = PROFILE_EXPECT[profile]
+  const okNow =
+    exp && exp.must.every((re) => re.test(fp.raw)) && exp.mustNot.every((re) => !re.test(fp.raw))
+  if (okNow) {
+    console.log(`  [臂切换] 现役 ${gen} 的插件指纹已符合 ${profile} ⇒ 换代（幂等跳过）`)
+    return { profile, gen, switched: false, fingerprint: fp.counts }
+  }
+  if (!s0?.stage || s0.stage !== 'idle') {
+    console.error(`  [臂切换] 控制面 stage=${s0?.stage} ⇒ 现在不能换代（会掐断在跑的活）；继续原代跑，但**臂可能不对**`)
+    return { profile, gen, switched: false, warning: 'control-plane-busy' }
+  }
+  console.log(`  [臂切换] 换代 → profile=${profile}（非 fast）…`)
+  const kick = await fetch(`${CTRL}/?cmd=handover&profile=${encodeURIComponent(profile)}`).then((r) => r.json())
+  const t0 = Date.now()
+  let s1 = s0
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000))
+    s1 = await ctrlStatus()
+    if (s1.stage === 'idle' && s1.result) break
+    if (Date.now() - t0 > 120_000) break
+  }
+  const gen1 = s1?.lease?.activeGen?.gen ?? null
+  const fp1 = pluginFingerprint(gen1)
+  const ok = exp && exp.must.every((re) => re.test(fp1.raw)) && exp.mustNot.every((re) => !re.test(fp1.raw))
+  console.log(
+    `  [臂切换] ${kick.note ?? ''} → ${gen1}  指纹 ${JSON.stringify(fp1.counts)}  ${ok ? '✓ 符合期望' : '✗ **与期望不符**'}`,
+  )
+  if (!ok && exp) {
+    console.error(
+      `     期望 must=${exp.must.map(String).join(' , ')} mustNot=${exp.mustNot.map(String).join(' , ')}`,
+    )
+  }
+  return { profile, gen: gen1, switched: true, fingerprint: fp1.counts, matches: !!ok, kick: kick.note ?? null }
+}
+
+/** 读某代 boot.log 的**最后一次 BOOT** 段里各插件标记出现次数（指纹 = "实际装了什么"）。 */
+function pluginFingerprint(gen) {
+  const out = { raw: '', counts: {} }
+  if (!gen) return out
+  const p = path.join('C:/Users/Admin/.dsh/switchboard', gen, 'boot.log')
+  let text = ''
+  try {
+    text = fs.readFileSync(p, 'utf8')
+  } catch {
+    return out
+  }
+  const lines = text.split('\n')
+  let idx = -1
+  for (let i = lines.length - 1; i >= 0; i--)
+    if (/^===== BOOT/.test(lines[i].trim())) {
+      idx = i
+      break
+    }
+  const seg = lines.slice(idx + 1).join('\n')
+  out.raw = seg
+  for (const [k, re] of [
+    ['toolEvolution', /\[tool-evolution\]/g],
+    ['designCanvasBridge', /\[design-canvas-bridge\]/g],
+    ['capabilityBridge', /\[capability-bridge\]/g],
+    ['switchboardAgent', /\[switchboard:agent\]/g],
+    ['conveyorContext', /\[conveyor-context\]/g],
+  ])
+    out.counts[k] = (seg.match(re) ?? []).length
+  return out
 }
 
 // ── 重复 k 次（`pass^k`）：同题同臂跑 k 次，看**方差**（k=1 时单次差异可能吞掉真实差别）──

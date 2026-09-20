@@ -93,6 +93,9 @@
 | 资产拓扑 | `topics/asset-topology.md` | 分不清资产/副本、design-canvas 真身与副本 |
 
 **入口级 / 关键文档**：
+- ★ **`docs/revised-architecture-2026-09-20.md` —— 当前架构权威记录**：
+  两层（顶层=**专家评审团**多模型讨论 / 下层=**子 agent 层**，进化在此发生，来源=skill）。
+  **取代**三脑作为顶层的旧表述（`three-brain-evolution.md` / master-plan §11.7 canonical 表）。
 - `docs/ideas-spec.md` —— 实现无关的思路规格，**改架构前先读**。
 - `docs/handover-vs-restart.md` —— 换代副作用 + **§8 写入竞态**（真因/操作纪律/候选修法）。
 - `docs/oss-prior-art-and-next-steps.md` —— 里程碑 M0–M3 + 开源先例（**闭环无现成产品**）。
