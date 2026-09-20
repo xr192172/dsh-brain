@@ -17,6 +17,7 @@
     "verify:drain": "node scripts/verify-drain-after-swap.mjs",
     "check:upstream": "node scripts/check-upstream-drift.mjs",
     "eval:validate": "node scripts/eval-validate.mjs",
+    "eval:run": "node scripts/eval-run.mjs",
     "check:profile": "node node_modules/@deepseek-ai/dsh/lib/bin.js web --dump-config"
   },
   "dependencies": {
