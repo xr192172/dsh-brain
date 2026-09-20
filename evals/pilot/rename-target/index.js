@@ -1,4 +1,5 @@
-// 入口：导入 + 调用（两处都要跟着改名），并用 --selftest 打印**固定期望**以证明行为没变。
+// 入口：导入 + 调用（两处都要跟着改名）。
+// `--selftest` 打印的**只有数据、不带任何符号名** ⇒ 所以"行为不变"这件事可以直接逐字比对。
 import { computeHash, KEY_NAMESPACE, legacyAlias } from './math.js'
 import { put, get, size } from './store.js'
 
@@ -10,8 +11,8 @@ if (process.argv.includes('--selftest')) {
   const id = put('alpha', 'one')
   const rec = get(id)
   const lines = [
-    `computeHash("abc")=${computeHash('abc')}`,
-    `describe("abc")=${describe('abc')}`,
+    `h=${computeHash('abc')}`,
+    `d=${describe('abc')}`,
     `put/get=${rec ? rec.value + '@' + rec.ns : 'null'}`,
     `size=${size()}`,
     `legacy=${legacyAlias()}`,
