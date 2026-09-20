@@ -134,7 +134,7 @@ if (!task) {
 // ── --plan：只打印计划 ─────────────────────────────────────────────────────
 const sid = argOf('--session')
 if (has('--plan') || !sid) {
-  const clean = sh('git', ['status', '--porcelain']).stdout.trim()
+  const wt = worktreeState()
   console.log(`任务：${task.id}`)
   console.log(` 不变量：${task.invariant}`)
   console.log(` seed（反向打回）：`)
@@ -142,7 +142,8 @@ if (has('--plan') || !sid) {
   console.log(` oracle（FAIL_TO_PASS）：${task.oracle.cmd.join(' ')}`)
   console.log(` regression（不许弄坏）：${task.regression.cmd.join(' ')}`)
   console.log(` budget：≤${task.budget?.maxToolCalls} 次工具 / ≤${task.budget?.maxMinutes} 分钟（超即失败）`)
-  console.log(` 工作区是否干净：${clean ? '**脏**（真跑会被拒绝）' : '干净 ✓'}`)
+  console.log(` 工作区是否干净：${wt.clean ? '已跟踪文件无改动 ✓' : '**有已跟踪文件被改**（真跑会被拒绝）'}`)
+  if (wt.untracked.length) console.log(` 未跟踪的新文件（不拦实验）：${wt.untracked.slice(0, 5).join(' / ')}${wt.untracked.length > 5 ? ` …等 ${wt.untracked.length} 项` : ''}`)
   console.log(` 会话：${sid ? sid : '(未指定 —— 真跑必须 --session <sessionId>，会往那份会话里发题面)'}`)
   console.log(`\n真跑：node scripts/eval-run.mjs --task ${task.id} --session <sessionId>`)
   console.log(`（计划里含 ${task.metrics?.length ?? 0} 项要记账的指标：${(task.metrics ?? []).join(', ')}）`)

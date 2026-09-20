@@ -58,10 +58,20 @@
 - **远端 `origin/master` = `89a7d8c`，与本地 HEAD 一致** ⇒ **全部 41 个提交已在远端**。
   依据是 `git ls-remote origin refs/heads/master` —— **直接问服务器**，不看本地 remote-tracking 引用。
 - 原先的阻塞（代理 `127.0.0.1:7890` 未启动）**已解除**：13:42 实测 7890 在监听。
-- ⚠️ **坑（记下来）**：本环境下 `git push` 可能报
+- ⚠️ **坑（记下来）**：本环境下裸 `git push` 可能报
   `fatal: could not read Username for 'https://github.com': terminal prompts disabled`
   —— 那是**推行需要认证而终端提示被禁用**，**不代表内容没上去**。
-  **判断"推没推上去"的唯一可信方式是 `git ls-remote`**，不是 `git push` 的输出、也不是本地 `origin/master`。
+- ✅ **可用的推送方式**（13:43 实测成功）：
+
+  ```bash
+  GIT_TERMINAL_PROMPT=0 git push origin master
+  ```
+
+  即**显式禁用终端提示**，让凭据助手（`credential.helper=manager`）走它自己的缓存凭据。
+  实测输出：`89a7d8c..663c3ad  master -> master`。
+- **核验"推没推上去"的唯一可信方式**是 `git ls-remote origin refs/heads/master`
+  （直接问服务器）—— **不是** `git push` 的输出、也**不是**本地 `origin/master`
+  （后者可能被本地推断更新，会骗人）。
 
 ---
 
