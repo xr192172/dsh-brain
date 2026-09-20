@@ -33,7 +33,16 @@ import os from 'node:os'
 import { execFileSync } from 'node:child_process'
 
 const REPO = 'D:/project_develop/dsh-brain'
-const PROFILE = path.join(os.homedir(), '.dsh', 'profiles', 'web')
+/**
+ * profile 名：`--profile <name>`，缺省 `web`。
+ * （2026-09-20 追加：`candidate` profile 也引用了同一个已删包 ⇒ 它同样会装配失败，
+ *   故本脚本泛化为可对任意 profile 执行。）
+ */
+const argProfile = (() => {
+  const i = process.argv.indexOf('--profile')
+  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : 'web'
+})()
+const PROFILE = path.join(os.homedir(), '.dsh', 'profiles', argProfile)
 const MANIFEST = path.join(PROFILE, 'package.json')
 const TARGET = '@dsh-brain/conveyor-context'
 const APPLY = process.argv.includes('--apply')
@@ -68,7 +77,8 @@ if (!inDeps && !inBundles) {
 
 if (!APPLY) {
   console.log('[dry-run] 将：① 从 dependencies 删掉该键；② 从 dsh.profile.bundles 删掉该项')
-  console.log(`          然后验证 --dump-config 应为：exit 0 / stderr 空 / ${EXPECT_LINES} 行 / pet 0 / dup 0`)
+  console.log('          然后验证 --dump-config 的**实质判据**：exit 0 / stderr 空 / pet 0 / dup 0 /')
+  console.log('          conveyor 引用 0 处 / compaction 在链上（行数只打印、不作断言）')
   console.log('确认后加 --apply。')
   process.exit(0)
 }
