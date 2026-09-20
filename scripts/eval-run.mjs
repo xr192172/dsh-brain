@@ -787,6 +787,31 @@ const PROFILE_EXPECT = {
   'web-nodc': { must: [/\[tool-evolution\] apply running/], mustNot: [/\[design-canvas-bridge\] config:/] },
 }
 
+/**
+ * **臂就绪闸**：换代刚 flip 完时插件可能还在注册工具（实测出现"工具面只有 4 个"的臂）⇒
+ * 必须等到**工具面正常**再开跑。判据用"真读一次工具面"，不用"boot 无错"。
+ * 代价：一次极短 prompt（几秒 + 少量 token），换来"臂跑在完整 gen 上"。
+ */
+async function waitArmReady(minTools = 20, tries = 8) {
+  for (let i = 1; i <= tries; i++) {
+    const sid = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+    if (!sid || !sid.startsWith('session-')) {
+      await new Promise((r) => setTimeout(r, 3000))
+      continue
+    }
+    await rpc('session.prompt', { sessionId: sid, mode: 'steer', content: [{ type: 'text', text: '只回一个字：好' }] })
+    for (let k = 0; k < 12; k++) {
+      await new Promise((r) => setTimeout(r, 2000))
+      const a = analyzeTrajectory(sid)
+      const n = a?.metrics?.toolSetSize ?? 0
+      if (n >= minTools) return { ready: true, toolSetSize: n, probeSession: sid, tries: i }
+    }
+    console.log(`  [就绪闸] 第 ${i} 次探测：工具面仍不足 ${minTools} 个 ⇒ 等 5s 再试`)
+    await new Promise((r) => setTimeout(r, 5000))
+  }
+  return { ready: false, toolSetSize: 0, tries }
+}
+
 async function ctrlStatus() {
   const r = await fetch(`${CTRL}/?cmd=status`)
   return r.json()
@@ -960,6 +985,13 @@ if (has('--pair')) {
   // ★★ **先建好两臂的会话、读出模型、确认两臂同模型再开跑**（2026-09-20 用户指出：
   //   我们要测的是 **DSH 这一层**，不是模型能力 ⇒ 模型是被控制的常量，必须**回读**证明它没变）。
   const armSessions = {}
+  // ★ 开跑前的就绪闸（否则可能跑在"插件还没注册完工具"的 gen 上 —— 实测踩过：工具面只有 4 个）
+  {
+    const rd = await waitArmReady()
+    pair.readyGate = rd
+    if (rd.ready) console.log(`  [就绪闸] ✓ 工具面 ${rd.toolSetSize} 个（探测 ${rd.tries} 次）`)
+    else console.error('  [就绪闸] ✗ 一直没就绪 ⇒ 这次跑的结果不可信（工具面不足）')
+  }
   for (const [label, preset] of ARM_LIST) {
     const prof = profByLabel[label]
     if (prof) {
