@@ -20,8 +20,21 @@ const outId = join(root, 'out', buildId)
 
 if (!existsSync(outId)) mkdirSync(outId, { recursive: true })
 
+// tsc 解析：**优先仓库内 node_modules**（`typescript` 本就在 devDependencies 里）。
+// 原先裸调 `tsc`，依赖它是全局安装且在 PATH 上 —— 一旦不在（实测：agent 的 shell 里就没有），
+// 构建直接失败，而失败方式是 "tsc 不是内部或外部命令"，看起来像配置问题而不是"缺个入口"。
+// 构建必须可复现：拿得到本地 tsc 就用它，拿不到才退回 PATH。
+const localTsc = [
+  join(root, '..', '..', 'node_modules', 'typescript', 'bin', 'tsc'),
+  join(root, 'node_modules', 'typescript', 'bin', 'tsc'),
+].find((p) => existsSync(p))
+const compile = localTsc
+  ? `"${process.execPath}" "${localTsc}" -p tsconfig.json --outDir "out/${buildId}" --declarationDir "out/${buildId}/types"`
+  : `tsc -p tsconfig.json --outDir "out/${buildId}" --declarationDir "out/${buildId}/types"`
+console.log('[build] tsc =', localTsc ?? '(PATH 上的 tsc)')
+
 // 1) 编到全新 out/<buildId>
-execSync(`tsc -p tsconfig.json --outDir "out/${buildId}" --declarationDir "out/${buildId}/types"`, {
+execSync(compile, {
   stdio: 'inherit',
   cwd: root,
 })

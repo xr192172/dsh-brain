@@ -45,8 +45,8 @@ export function injectedUserMessage(text: string) {
     content: [{ type: 'text', text }],
   }
 }
-import { newDrain, evaluateStatic } from './drain.js'
-import { computeCaughtUpSeq } from './preseed.js'
+import { newDrain, drainForHandover, agentPhase, type DrainAgent } from './drain.js'
+import { liveMaxSeq, type SessionsShim } from './preseed.js'
 import { noSnapshot, type SnapshotProvider } from './snapshot.js'
 import { registerHostGuard } from './guard.js'
 import { registerApplyTool } from './deploy.js'
@@ -148,9 +148,52 @@ function resumeTrace(genDir: string | undefined, rec: Record<string, unknown>): 
  * @param attempts 剩余重试次数（agent-loop / sessionPersistence 可能尚未就绪）。
  * @param traceDir 写 resume.jsonl 的目录（= genDir）。
  */
+/**
+ * 本代 agent 注册表在交接期需要的能力。
+ *
+ * ★ `list()` / `phase` / `cancel()` / `whenIdle()` 是 2026-09-15 事故修复的关键：
+ * 判断"有没有活在跑"必须看 **agent 的真实 phase**，而不是听一个跨插件事件
+ * （我们原先监听的 `turn/start` 从未触发过 ⇒ `turnInFlight` 恒 false ⇒ defer 形同虚设）。
+ */
 interface AgentShim {
   get(id: string): unknown
   resume(o: { resumeSessionId: string; agentOptions?: unknown }): Promise<unknown>
+  list?(): unknown[]
+}
+
+/** 把注册表里的 agent 代理归一成 drain 需要的形状（字段全可选，缺了就保守当"在跑"）。 */
+function toDrainAgents(agents: AgentShim | undefined): DrainAgent[] {
+  const raw = (() => {
+    try {
+      return agents?.list?.() ?? []
+    } catch {
+      return []
+    }
+  })()
+  return raw.map((a, i) => {
+    const o = a as {
+      id?: string
+      status?: string
+      phase?: { kind?: string }
+      session?: { id?: string }
+      cancel?: (c: { kind: string; reason?: string }, o?: { keepInbox?: boolean }) => void
+      whenIdle?: () => Promise<void>
+    }
+    const status = typeof o?.status === 'string' ? o.status : undefined
+    const kindOf = (): 'idle' | 'running' | 'maintenance' | undefined => {
+      const k = o?.phase?.kind
+      return k === 'idle' || k === 'running' || k === 'maintenance' ? k : undefined
+    }
+    return {
+      id: String(o?.id ?? `#${i}`),
+      sessionId: o?.session?.id,
+      // ★ 实时读（不拍快照）：见 DrainAgent.readPhase 的注释（真机验收暴露的假红）。
+      readPhase: kindOf,
+      ...(status ? { status } : {}),
+      cancel: typeof o?.cancel === 'function' ? o.cancel.bind(o) : undefined,
+      whenIdle: typeof o?.whenIdle === 'function' ? o.whenIdle.bind(o) : undefined,
+    } satisfies DrainAgent
+  })
 }
 
 function scheduleResume(agentsRef: { current: AgentShim | undefined }, sessionId: string, steers: string[], attempts: number, traceDir?: string): void {
@@ -212,27 +255,13 @@ export function apply(ctx: Context, patch: Config): void {
     lastActiveSessionId: '',
   } as { mode: HandoverConfig['mode']; caughtUpSeq: number; drain: ReturnType<typeof newDrain>; lastActiveSessionId: string }
 
-  // ── 延迟切换：挂"回合开始/结束"信号，供 prepareSwitch 判断当前是否有活在跑、并等待收尾 ──
-  // turnInFlight（2026-09-14）：区分"有活在跑"与"会话空闲"。
-  // 之前只监听 turn/end，于是 prepareSwitch 无法知道会话是否空闲 →
-  // 对空闲会话也会注入"请收尾"提示，然后白等满 grace（默认 20s，因为空闲会话永不产生 turn/end）。
-  let turnInFlight = false
-  let lastTurnEndAt = 0
-  let pendingPrepare: { resolve: (r: PrepareReply) => void; timer: ReturnType<typeof setTimeout> | undefined; base: number; foundAgent: boolean } | null = null
-  ;(ctx as unknown as { on?: (ev: string, fn: (p: unknown) => void) => void }).on?.('turn/start', () => {
-    turnInFlight = true
-  })
-  ;(ctx as unknown as { on?: (ev: string, fn: (p: unknown) => void) => void }).on?.('turn/end', () => {
-    const now = Date.now()
-    lastTurnEndAt = now
-    turnInFlight = false
-    if (pendingPrepare && now > pendingPrepare.base) {
-      const p = pendingPrepare
-      pendingPrepare = null
-      clearTimeout(p.timer)
-      p.resolve({ ok: true, foundAgent: p.foundAgent, waitedForTurnEnd: true, turnInFlight: true })
-    }
-  })
+  // ── 延迟切换（defer）的"有没有活在跑"判据 ────────────────────────────────
+  // ★ 2026-09-15 事故修复：这里原先挂 `ctx.on('turn/start'|'turn/end')` 维护一个
+  // `turnInFlight` 布尔。实测 **204 次 defer、0 次** `waitedTurnEnd=true`，且 22:30 那次
+  // 明明有一轮在跑却报 `reason=idle` ⇒ **那两个监听从未触发过**（事件不在本插件的 ctx 上发）。
+  // 后果：defer 的"先请活跃代收尾本轮"从来没用过，换代永远在别人正写着的时候发生。
+  // 现在改为**直读 agent 的真实阶段**（`agent.phase.kind`，见 drain.ts 的 phaseOf 兜底），
+  // 不再依赖任何跨插件事件。
 
   // 方案③ seam：快照提供者默认 none
   const snapshot: SnapshotProvider = noSnapshot
@@ -256,9 +285,20 @@ export function apply(ctx: Context, patch: Config): void {
     agentsRef.current = (aCtx as { agents?: AgentShim }).agents
   })
 
-  // 冷读暖机 + 持续追平
+  // ★ 同理取 sessions 服务。**不能**直接读 `ctx.sessions`：未声明服务依赖时它在真机上是 `undefined`
+  //   ⇒ `sessions.list()` 返回空、`flush` 一次都不执行、`lastSeq` 恒 -1（2026-09-20 真机验收当场抓到，
+  //   而且空闲场景还会因此报 `quiesced=true` —— 假绿）。现在与 agents 同款：经 inject 拿。
+  const sessionsRef: { current: SessionsShim | undefined } = { current: undefined }
+  ;(ctx as unknown as { inject?: (svc: string[], fn: (c: unknown) => void) => void }).inject?.(['sessions'], (sCtx) => {
+    sessionsRef.current = (sCtx as { sessions?: SessionsShim }).sessions
+  })
+
+  // 进度读数：**本进程 live 会话已落盘到哪**（不是"暖机到共享投影"）
+  // ★ 2026-09-20 换掉旧实现：它依赖 `sessionPersistence.listSessions()`（上游**没有**这个方法）
+  //   ⇒ 恒返回 0，171 条 freeze 里的 lastSeq 全是 0，门槛从未量过任何东西（假绿）。
+  //   现在报的是真数：持有会话 ⇒ 真进度；刚拉起还没加载会话 ⇒ 0（诚实）。
   const warm = async (): Promise<void> => {
-    state.caughtUpSeq = await computeCaughtUpSeq(ctx)
+    state.caughtUpSeq = await liveMaxSeq(sessionsRef.current)
   }
   void warm()
   const warmTimer = setInterval(() => void warm(), 5000)
@@ -306,45 +346,78 @@ export function apply(ctx: Context, patch: Config): void {
     freeze: async (): Promise<FreezeReply> => {
       state.drain.armed = true
       ;(ctx as unknown as { emit?: (n: string) => void }).emit?.('handover/freeze')
-      // 强制 flush：旧代退役前把所有 live 会话事件真正落盘（不等 agent-loop 回合结束才 flush）。
-      // 否则频繁换代时事件只留在内存，session.jsonl 只有 header 空壳，新代入 resume 读不到真实
-      // 上下文 → 续接断裂（需手动重发）+ 空壳重建后 run_code 固定 seed 前缀重复。
-      // 走 DSH 官方钩子：emit session/flush 逐会话触发 persistence.flush(session)。
-      try {
-        const sessList = (ctx as unknown as { sessions?: { list?: () => unknown[] } })?.sessions?.list?.() ?? []
-        for (const s of sessList) {
-          ;(ctx as unknown as { emit?: (n: string, p?: unknown) => void }).emit?.('session/flush', s)
+      // ★★ 真静止点（2026-09-15 事故修复）：旧实现只"通知 + flush + 睡 400ms"，
+      // 既没排在跑的回合，也没等任何落盘确认 ⇒ 旧代照写、新代照接，同一个会话被两代追加。
+      // 现在由 drain.ts 负责：cancel 在跑的回合 → 等维护结束 → 官方 flush 逐会话落盘 →
+      // 报出**真实 lastSeq**；返回的 `quiesced` 只有"确实不会再写"才为真。
+      //
+      // ★ 2026-09-20 真机验收抓到的第二个 bug：这里原先读 `ctx.sessions`（**未声明服务依赖**
+      // ⇒ 真机上是 undefined）⇒ `sessions=0` / `lastSeq=-1` / **flush 一次都没跑过** ——
+      // 会话那一半全是空转（空闲场景还会因此报 `quiesced=true`，是假绿）。
+      // 现在统一走 `sessionsRef`（`ctx.inject(['sessions'])` 取得，与 agents 同款）。
+      const sess = sessionsRef.current
+      const sessionsObservable = !!sess && typeof sess.list === 'function' && typeof sess.flush === 'function'
+      const live = (() => {
+        try {
+          return (sessionsObservable ? (sess!.list!() as Array<{ id?: string; seq?: number }>) : []) ?? []
+        } catch {
+          return []
         }
-        // 给 write-behind（默认 200ms 批）一点落盘时间，确保后续代可读到
-        await new Promise((res) => setTimeout(res, 400))
-      } catch {
-        /* flush 失败不阻断 freeze：仍按强切推进 */
+      })()
+      const outcome = await drainForHandover({
+        // ★ "看不到 agent" ≠ "没有 agent 在跑"：拿不到注册表（或它没有 list）时必须报"未停写"，
+        //   否则控制面会留着可能仍在写的旧代（假绿）。见 drain.ts 的 DrainDeps.agentsObservable。
+        agentsObservable: !!agentsRef.current && typeof agentsRef.current.list === 'function',
+        // ★ 同理：看不到会话服务 ⇒ 落盘无法确认 ⇒ 不许报"停写"。
+        sessionsObservable,
+        agents: toDrainAgents(agentsRef.current),
+        sessions: live,
+        flush: async (s) => {
+          // 官方 flush：会 await 持久化回调（write-behind 200ms 批），比 emit + sleep 可靠。
+          if (!sessionsObservable) throw new Error('sessions service unavailable (ctx.inject([sessions]) 没拿到)')
+          await sess!.flush!(s)
+        },
+        lastActiveSessionId: state.lastActiveSessionId,
+      })
+      state.drain.lastStaticSeq = outcome.lastSeq
+      resumeTrace(cfg.genDir, {
+        phase: 'drain',
+        quiesced: outcome.quiesced,
+        agentsObservable: outcome.agentsObservable,
+        lastSeq: outcome.lastSeq,
+        runningAtEntry: outcome.runningAtEntry,
+        cancelled: outcome.cancelled,
+        stillBusy: outcome.stillBusy,
+        maintenanceAtEntry: outcome.maintenanceAtEntry,
+        maintenanceTimedOut: outcome.maintenanceTimedOut,
+        flushFailed: outcome.flushFailed,
+        primarySessionId: outcome.primarySessionId,
+        waitedMs: outcome.waitedMs,
+      })
+      console.log(
+        `[switchboard:agent] drain quiesced=${outcome.quiesced} lastSeq=${outcome.lastSeq} ` +
+          `canSeeAgents=${outcome.agentsObservable} canSeeSessions=${outcome.sessionsObservable} running=${outcome.runningAtEntry}→cancelled=${outcome.cancelled} ` +
+          `stillBusy=[${outcome.stillBusy.join(',')}] flushFailed=[${outcome.flushFailed.join(',')}] ` +
+          `sessions=${outcome.sessions.length} (${outcome.waitedMs}ms)`,
+      )
+      return {
+        static: outcome.quiesced,
+        lastSeq: outcome.lastSeq,
+        sessions: outcome.sessions,
+        quiesced: outcome.quiesced,
+        primarySessionId: outcome.primarySessionId,
+        drain: {
+          runningAtEntry: outcome.runningAtEntry,
+          cancelled: outcome.cancelled,
+          stillBusy: outcome.stillBusy,
+          agentsObservable: outcome.agentsObservable,
+          sessionsObservable: outcome.sessionsObservable,
+          maintenanceAtEntry: outcome.maintenanceAtEntry,
+          maintenanceTimedOut: outcome.maintenanceTimedOut,
+          flushFailed: outcome.flushFailed,
+          waitedMs: outcome.waitedMs,
+        },
       }
-      const r = await evaluateStatic(ctx, state.drain)
-      // 上报本代"主活跃会话"：优先用事件流跟踪到的 lastActiveSessionId（agent 会话事件，最可靠）。
-      // 兜底再从 workspace 会话注册表取每个工作区最近 attach 的会话。
-      // 全部 try/catch——冷代/无会话时优雅上报空，不得击穿 freeze。
-      let live: Array<{ id: string; seq: number }> = []
-      try {
-        if (state.lastActiveSessionId) {
-          live = [{ id: state.lastActiveSessionId, seq: 1 }]
-        } else {
-          const reg = (ctx as unknown as { workspaceRegistry?: { list(): Array<{ sessionIds?: readonly string[] }> } }).workspaceRegistry
-          const workspaces = typeof reg?.list === 'function' ? reg.list() : []
-          for (const w of workspaces) {
-            const sid = w?.sessionIds?.[0]
-            if (sid) {
-              live = [{ id: sid, seq: 0 }]
-              break
-            }
-          }
-        }
-      } catch {
-        live = []
-      }
-      if (live.length > 0) resumeTrace(cfg.genDir, { phase: 'detect', genId: cfg.gen, sessionId: live[0].id })
-      else resumeTrace(cfg.genDir, { phase: 'detect', genId: cfg.gen, sessionId: null, note: 'no active session detected' })
-      return { static: r.static, lastSeq: r.lastSeq, sessions: live }
     },
     promote: async (req: PromoteRequest): Promise<{ ok: boolean }> => {
       if (req.gen && req.gen !== cfg.gen) return { ok: false }
@@ -389,19 +462,19 @@ export function apply(ctx: Context, patch: Config): void {
       // 经 agentsRef 安全取 live 代理（避免 `ctx.agents` 无 inject 直接抛错），全程 try/catch 优雅降级。
       try {
         const agents = agentsRef.current
-        const agent = (state.lastActiveSessionId ? agents?.get?.(state.lastActiveSessionId) : undefined) as
-          | { steer?: (m: unknown) => void }
-          | undefined
+        // ★ "有没有活在跑" = 直读注册表里 agent 的真实阶段（不再听跨插件事件，见上面的说明）。
+        const drainAgents = toDrainAgents(agents)
+        const busy = drainAgents.filter((a) => agentPhase(a) === 'running')
+        // 挑一个能 steer 的代理：优先**正在跑回合**那个 agent 的会话，其次事件流记的 lastActive。
+        const steerTarget = busy[0]?.sessionId || state.lastActiveSessionId
+        const agent = (steerTarget ? agents?.get?.(steerTarget) : undefined) as { steer?: (m: unknown) => void } | undefined
         const foundAgent = !!agent
-        // 调用时刻的"有没有活"快照。注意区分两个字段：
-        //   turnInFlight      = 调用时是否有未收尾的回合（"有没有活"）
-        //   waitedForTurnEnd  = 是否等到了它收尾（"活干完了没"）
+        // 两个字段的分工（沿用既有语义）：
+        //   turnInFlight     = 调用时是否有未收尾的回合（"有没有活"）
+        //   waitedForTurnEnd = 是否等到了它收尾（"活干完了没"）
         // 控制面只认第二个为真的情形才注入续跑 —— 即"确有活、且已干净收尾"。
-        const inFlightAtEntry = turnInFlight
-        // ★ 空闲即返回（2026-09-14）：没有未收尾的回合 → 无事可"收尾"。
-        // 两条收益：① 不再对空闲会话注入"请收尾"提示（那是污染会话的噪声）；
-        //          ② 省下原先必然白等的 grace（默认 20s —— 空闲会话永不产生 turn/end）。
-        if (!turnInFlight) {
+        if (busy.length === 0) {
+          // 空闲即返回：没有未收尾的回合 → 无事可"收尾"，不注入噪声、也不白等 grace。
           return { ok: true, foundAgent, waitedForTurnEnd: false, reason: 'idle', turnInFlight: false }
         }
         // 注入挂起提示：让大脑把当前任务收尾、把话说完，交接由控制面在后台完成。
@@ -413,26 +486,21 @@ export function apply(ctx: Context, patch: Config): void {
             ),
           )
         } catch {
-          /* steer 失败也要继续等待 turn/end（兜底走 grace） */
+          /* steer 失败也要继续等（兜底走 grace；届时 drain 会 cancel 它） */
         }
-        // 等待一个"新的"回合结束（晚于本次调用发起点），或 grace 兜底。
-        return await new Promise<PrepareReply>((resolve) => {
-          const p = { resolve, timer: undefined as ReturnType<typeof setTimeout> | undefined, base: lastTurnEndAt, foundAgent }
-          if (pendingPrepare) {
-            // 并发/重复调用：旧的让位（superseded），用新的请求点与 grace。
-            clearTimeout(pendingPrepare.timer)
-            pendingPrepare.resolve({ ok: false, foundAgent: pendingPrepare.foundAgent, waitedForTurnEnd: false, reason: 'superseded' })
+        // 轮询等它真的结束（有界 = grace）。用**状态**而不是事件：事件路径实测从未触发过一次。
+        const deadline = Date.now() + (graceMs > 0 ? graceMs : 20_000)
+        for (;;) {
+          if (toDrainAgents(agentsRef.current).every((a) => agentPhase(a) !== 'running')) {
+            return { ok: true, foundAgent, waitedForTurnEnd: true, turnInFlight: true }
           }
-          p.timer = setTimeout(() => {
-            if (pendingPrepare === p) {
-              pendingPrepare = null
-              // grace 超时：没等到新的 turn/end。inFlightAtEntry 仍为 true ⇒ 有活但没收尾，
-              // 常见于"卡在等人类输入"（如 ask_user_question）→ 控制面据此**不注入续跑**。
-              resolve({ ok: true, foundAgent, waitedForTurnEnd: false, reason: 'grace', turnInFlight: inFlightAtEntry })
-            }
-          }, graceMs > 0 ? graceMs : 20_000)
-          pendingPrepare = p
-        })
+          if (Date.now() >= deadline) {
+            // grace 超时：有活但没收尾（常见于"卡在等人类输入"，如 ask_user_question）
+            // → 控制面据此**不注入续跑**；随后的 freeze 会 cancel 它，让新代干净接手。
+            return { ok: true, foundAgent, waitedForTurnEnd: false, reason: 'grace', turnInFlight: true }
+          }
+          await new Promise((res) => setTimeout(res, 250))
+        }
       } catch (e) {
         return { ok: false, foundAgent: false, waitedForTurnEnd: false, reason: e instanceof Error ? e.message : String(e) }
       }

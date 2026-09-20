@@ -88,10 +88,40 @@ export interface HealthReply {
   staticAt: number
 }
 
+/**
+ * 冻结应答。**它的每个字段都必须来自"停写之后"的观测** —— 2026-09-15 的事故正是
+ * 因为这里报的是"意图"而不是观测：`static` 恒 true、`lastSeq` 恒 0、`sessions` 报的是
+ * 事件流里"最近活跃"的那一条（实测报了个**不是**在跑回合的会话，导致新代 resume 错人）。
+ */
 export interface FreezeReply {
+  /** 旧语义：是否已到静止点。现在 = `quiesced`（保留字段名以兼容两端版本错配）。 */
   static: boolean
+  /** 已落盘的全局最大 seq（**由 live 会话的 `seq-1` 算出**，不再是暖机读数）。 */
   lastSeq: number
+  /** 全部 live 会话 + 各自已落盘 max seq（控制面按 seq 排序挑 resume 目标时的兜底）。 */
   sessions: Array<{ id: string; seq: number }>
+  /**
+   * ★★ 真判据：本代此刻**确实不会再往会话日志追加**。要求"开工时在跑的回合全部被 cancel
+   * 且在预算内观察到 idle" + "每个会话都经官方 flush 落盘且未抛错"。
+   * 缺省（老版本 gen）按 `false` 处理：控制面会强杀旧代再交出前门（安全方向，见 `sealPlan`）。
+   */
+  quiesced?: boolean
+  /** 建议新代 resume 的主活跃会话：优先"有回合在跑的那个 agent 的会话"。 */
+  primarySessionId?: string
+  /** 诊断留痕（人读；写进 state.jsonl 的 note）。 */
+  drain?: {
+    runningAtEntry: number
+    cancelled: number
+    stillBusy: string[]
+    /** gen 侧**有没有能力**观察 agent；false ⇒ `quiesced` 必然为 false（看不到 ≠ 空闲）。 */
+    agentsObservable: boolean
+    /** 同上，会话服务（看不到 ⇒ quiesced 必为 false）。 */
+    sessionsObservable?: boolean
+    maintenanceAtEntry: number
+    maintenanceTimedOut: boolean
+    flushFailed: string[]
+    waitedMs: number
+  }
 }
 
 export interface PromoteRequest {

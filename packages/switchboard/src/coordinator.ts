@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { LeaseStore } from './lease.js'
+import { sealPlan } from './drain.js'
 import type { FrontDoor } from './proxy.js'
 import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
 import { verifyBootHealth, lastBootSegment } from './boot-health.js'
@@ -160,9 +161,25 @@ export class Coordinator {
     return old
   }
 
-  private async activeSeq(): Promise<number> {
-    const h = await this.active.client.health(3000)
-    return h?.caughtUpSeq ?? -1
+  /**
+   * 结构性就绪：staging 进程活着 + admin 可达 + 自报 gen 名一致。
+   *
+   * 2026-09-20 取代原来的"seq 追平门槛"（那个门槛因为读数是恒 0 的假值，从未量过任何东西）。
+   * 注意**不要**在这里比 seq：新代按需懒加载会话，promote 之前它手上没有会话，"追平"没有定义；
+   * 真正保证一致性的是 freeze 侧的真停写（`drain.ts`）+ 封口（`sealPlan`），不是这里的读数。
+   */
+  private async waitReady(b: Cage): Promise<boolean> {
+    const deadline = Date.now() + Math.min(this.cfg.readyTimeoutMs, 10_000)
+    for (;;) {
+      if (!pidAliveFrom(b.inst.pid)) return false
+      const h = await b.client.health(3000).catch(() => null)
+      if (h && (!h.gen || h.gen === b.inst.gen)) {
+        this.record('ready-probe ok: gen=' + h.gen + ' mode=' + h.mode + ' caughtUpSeq=' + h.caughtUpSeq)
+        return true
+      }
+      if (Date.now() > deadline) return false
+      await new Promise((r) => setTimeout(r, 500))
+    }
   }
 
   /**
@@ -289,42 +306,77 @@ export class Coordinator {
     if (fail === 'spawn') return this.abort(b, 'injected-fail-spawn')
 
     this.stage = 'ready'
-    const targetSeq = await this.activeSeq()
     if (fail === 'catchup') return this.abort(b, 'injected-fail-catchup')
-    if (!(await this.waitCatchUp(b, targetSeq))) return this.abort(b, 'b-catchup-failed')
+    // ★ 2026-09-20：这里原先比"seq 追平"当 ready 门槛，而那个读数（`computeCaughtUpSeq`）
+    //   恒 0（它依赖的 `sessionPersistence.listSessions` 在上游**不存在**）⇒ 门槛从未量过任何东西。
+    //   现在改成**结构性就绪**：进程活着 + admin 应答 + 自报 gen 名对得上。
+    //   为什么不再比 seq：新代是**按需懒加载**会话的，被 promote 之前根本不持有会话 ⇒ "追平"对它没有定义
+    //   （见 `preseed.ts` 头部与 `docs/handover-vs-restart.md` §8.4）。
+    if (!(await this.waitReady(b))) return this.abort(b, 'b-not-ready')
 
     this.stage = 'freeze'
     if (fail === 'freeze') return this.abort(b, 'injected-fail-freeze')
     // 强切兜底：freeze 依赖旧代配合（调用 gen 内 admin）。旧代主线程被占/僵死时，freeze 会超时抛错，
     // 若不管它，handover 卡死在 freeze 且无 abort/无推进（观察到的"卡 freeze"现象）。
     // → 失败不 abort、不挂死：吞掉，走"无冻结强切"，直接 promote 新一代 + flip + 退役旧代。
+    //
+    // ★ 2026-09-15 补上的另一半：强切意味着**旧代未被冻结**，而它可能正往会话日志里写。
+    //   旧实现只是"直接 promote"就完事 ⇒ 两代并发写同一份会话（事故记录见 docs/handover-vs-restart.md §8）。
+    //   现在强切会走到下面的 `sealPlan` ⇒ **交出前门之前强杀旧代**（`retire(seal)` 分支）。
     let fr: FreezeReply | null
     try {
       fr = await this.active.client.freeze(cfg.freezeTimeoutMs)
     } catch {
       fr = null
     }
+    // 区分两种"没冻住"：① 旧代 admin 不可达/超时（真·强切）；② 有应答但没到静止点
+    // （`quiesced:false` —— 回合没停住 / 落盘失败 / gen 看不到 agent）。两者的处理相同
+    // （都按"未停写"⇒ 稍后 seal 强杀），但**日志必须能分辨**，否则下次又会被误读成"硬切是主因"。
+    const frRaw = fr
     if (!fr || !fr.static) {
-      this.record('freeze 活跃代无响应 → 走强切（省去静态冻结，直接 promote）')
+      const why = !frRaw
+        ? 'freeze 活跃代无响应（admin 不可达/超时）→ 走强切；旧代未停写 ⇒ 稍后 seal 阶段强杀'
+        : 'freeze 有应答但**未达静止点**（quiesced=false' +
+          (frRaw.drain
+            ? `：canSeeAgents=${frRaw.drain.agentsObservable} stillBusy=[${frRaw.drain.stillBusy.join(',')}] flushFailed=[${frRaw.drain.flushFailed.join(',')}]`
+            : '：无 drain 诊断=老版本 gen') +
+          '）→ 按未停写处理，稍后 seal 阶段强杀'
+      this.record(why)
       fr = null
     } else {
-      this.record('freeze a lastSeq=' + fr.lastSeq)
+      // ★ 记录 freeze 的**真读数**：`lastSeq` 现在来自 live 会话（不再是恒 0 的暖机值），
+      //   `quiesced` 才是"旧代确实不会再写会话日志"的判据（缺省=老版本 gen ⇒ 按未停写处理）。
+      const d = fr.drain
+      this.record(
+        'freeze a lastSeq=' + fr.lastSeq + ' quiesced=' + (fr.quiesced === true) +
+          (d ? ` (canSeeAgents=${d.agentsObservable} canSeeSessions=${d.sessionsObservable} running=${d.runningAtEntry}→cancel=${d.cancelled} stillBusy=[${d.stillBusy.join(',')}] flushFailed=[${d.flushFailed.join(',')}] ${d.waitedMs}ms)` : ' (无 drain 诊断：老版本 gen)'),
+      )
     }
+    // ★★ 封口决策（2026-09-15 事故修复）：旧代有没有"确认停写"？
+    //   没停写 ⇒ 它正在写的会话会在下一次被新代以"磁盘前缀"重新加载并续写 ⇒ **必然 seq 重叠**
+    //   （`dsh-session` 的 seq 就是 `log.length`）。所以必须**在交出前门之前**把它杀到 PID 消失。
+    const seal = sealPlan(fr?.quiesced === true)
+    this.record('seal: ' + (seal.killNow ? 'KILL-OLD' : 'keep-old') + ' — ' + seal.why)
 
     this.stage = 'promote'
-    // 挑"主活跃会话"用于新代 resume，实现对话接续。
-    // 优先用常驻前门嗅探到的会话（最可靠，不依赖 gen 内部）；有冻结再用其最高 seq 会话；都没有则空（冷启）。
+    // 挑"主活跃会话"用于新代 resume，实现对话接续（顺序见下面的注释）。
+    // 注意用 `frRaw`：即使这次没冻住（要强杀旧代），它上报的主活跃会话仍然是最准的线索。
     const frontSid = this.front.lastSessionId || ''
-    const freezeSid = fr && fr.sessions && fr.sessions.length > 0 ? [...fr.sessions].sort((a, b) => b.seq - a.seq)[0].id : ''
-    const resumeId = (frontSid || freezeSid) as string | undefined
-    const via = frontSid ? ' (via-front-door)' : freezeSid ? ' (via-gen)' : fr ? '' : ' (hard-switch, no-freeze)'
+    const primarySid = frRaw?.primarySessionId ?? ''
+    const freezeSid = frRaw && frRaw.sessions && frRaw.sessions.length > 0 ? [...frRaw.sessions].sort((a, b) => b.seq - a.seq)[0].id : ''
+    // ★ 顺序（2026-09-15）：primarySessionId（= 冻结时**有回合在跑**那个 agent 的会话）→ 前门嗅探 →
+    //   冻结上报里 seq 最大者。原先把前门放在最前，实测把 resume 指向了一个**没在跑**的会话。
+    const resumeId = (primarySid || frontSid || freezeSid) as string | undefined
+    const via = primarySid ? ' (via-freeze-primary)' : frontSid ? ' (via-front-door)' : freezeSid ? ' (via-gen)' : frRaw ? '' : ' (hard-switch, no-freeze)'
     this.record('resume-session=' + (resumeId ?? 'none') + via)
     // 有冻结时才要求 staging 追平冻结 seq；追不平也**不 abort 挂死**，仍按强切推进
     //（staging 已按自身日志/checkpoint 就绪即视为可接，不给"等旧代配合"留死锁面）。
     if (fr) {
-      if (!(await this.waitCatchUp(b, fr.lastSeq))) {
-        this.record('re-ready-b-behind → 仍按强切继续（不阻塞旧代追平）')
-      }
+      // ⚠️ 这一项**只做有界观测**（1.5s），不再阻塞推进：
+      //   旧代一旦交给 drain 处理，落盘确认已经发生（quiesced 才为真），而 staging 是按需懒读共享
+      //   日志的 —— "追平"对它本就没有意义。旧实现拿这个恒 0 的读数当门槛，是彻底的假绿。
+      const caughtUp = await this.waitCatchUp(b, fr.lastSeq, 1500)
+      this.record('post-freeze catchup(观测项)：ok=' + caughtUp + ' target=' + fr.lastSeq)
     }
 
     this.stage = 'promote'
@@ -434,8 +486,35 @@ export class Coordinator {
     }
 
     this.stage = 'retire'
-    this.record('retire ' + old.inst.gen)
-    setTimeout(() => void old.spawned.stop(), cfg.retainMs)
+    if (seal.killNow) {
+      // ★★ 2026-09-15 事故修复的收口：旧代**未确认停写**时，必须在**释放前门锁之前**（锁在本方法的
+      //    finally 才放）把它杀到 PID 消失。锁期间前门对 WS 升级与非 GET 请求一律 503，
+      //    于是"浏览器把同一份会话加载到新代上"这件事被推迟到旧代确定不再写之后。
+      //    代价：这一段没有"非破坏回滚"（旧代已死）—— 故意取舍，见 drain.ts 的 sealPlan 注释。
+      this.record('retire(seal) ' + old.inst.gen + ' — 强杀旧代（未确认停写）pid=' + old.inst.pid)
+      const stopRes = await old.spawned.stop(1500)
+      if (stopRes.pidGone) {
+        this.record('seal ok：旧代已确认消失 ' + old.inst.gen + '（pid=' + old.inst.pid + '）')
+      } else {
+        // 绝不静默：落盘现场 + 大字告警。仍然放锁（把前门永久锁死比留下可观测窗口更糟）。
+        this.record('⚠ seal 未确认旧代消失：gen=' + old.inst.gen + ' pid=' + old.inst.pid + '（两代并发写同一会话的风险未消除）')
+        try {
+          writeFileSync(
+            join(cfg.coordDir, 'unfenced-old-gen.txt'),
+            `gen=${old.inst.gen}\npid=${old.inst.pid}\nport=${old.inst.port}\nreason=seal-kill-unconfirmed\nat=${new Date().toISOString()}\n`,
+            'utf8',
+          )
+        } catch {
+          /* 现场落盘失败不影响交接 */
+        }
+        console.error(
+          '[switchboard] ⚠ 旧代未能确认停止写：gen=' + old.inst.gen + ' pid=' + old.inst.pid + ' — 前门即将放锁，存在两代并发写同一会话的风险',
+        )
+      }
+    } else {
+      this.record('retire ' + old.inst.gen)
+      setTimeout(() => void old.spawned.stop(), cfg.retainMs)
+    }
     this.stage = 'idle'
     this.recordResult({
       t: Date.now(),
@@ -582,8 +661,16 @@ export class Coordinator {
     return this.stage
   }
 
-  private async waitCatchUp(b: Cage, target: number): Promise<boolean> {
-    const deadline = Date.now() + this.cfg.readyTimeoutMs
+  /**
+   * 轮询 staging 的 `caughtUpSeq` 直到 ≥ `target` 或超时。
+   *
+   * ⚠️ **只用于"有界观测"，不得用作推进门槛**（2026-09-20 明确）：新代按需懒加载会话，
+   * promote 之前它手上没有会话 ⇒ 这个读数对它就是 0，拿它 gate 只会白等。
+   * 现在的用法只有一处：freeze 之后记录一次观测（1.5s 上限），供人事后判断。
+   * @param timeoutMs 覆盖默认的 `readyTimeoutMs`（40s）—— 观测项一律给短上限。
+   */
+  private async waitCatchUp(b: Cage, target: number, timeoutMs?: number): Promise<boolean> {
+    const deadline = Date.now() + (timeoutMs ?? this.cfg.readyTimeoutMs)
     for (;;) {
       // 自愈核心：staging 进程已死（崩溃/强杀）→ 立即判失败回滚，不等 readyTimeout 假死。
       // 此前只轮询 health()，staging 崩后连不上一个死进程，会一直磨到超时，表现为"换不了代卡死"。
