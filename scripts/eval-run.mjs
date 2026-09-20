@@ -86,14 +86,24 @@ async function sessionStats(sid) {
 }
 
 /**
- * "工作区干净"只要求**已跟踪文件没有改动**（seed/还原以 HEAD 为基准）。
- * 未跟踪的新文件（比如本脚本自己、新写的文档）不该拦住实验 —— 但要**打出来**让人看到。
+ * 只影响**文档/记忆**的改动（不碰被测代码路径）—— 本仓库有并发会话，它们常年在写这些文件。
+ * 这类改动不该拦住实验（也不该把它当"污染"），但要**打印出来**让人看见。
+ */
+const DOC_ONLY = /^(\.workbuddy[\\/]|docs[\\/])/
+
+/**
+ * "工作区干净"只要求**已跟踪的代码/脚本没有改动**（seed/还原以 HEAD 为基准）。
+ * 文档/记忆被改 ⇒ 放行但提示；未跟踪的新文件 ⇒ 放行但提示。
+ * ★ 2026-09-20 放宽：原先**任何**已跟踪改动都拦 —— 于是"另一个会话改了 MEMORY.md"这种常态
+ *   会把实验完全堵死（实测撞到两次）。判据要盯**会不会污染被测对象**，不是"有没有人动过仓库"。
  */
 function worktreeState() {
   const lines = sh('git', ['status', '--porcelain']).stdout.split('\n').filter((l) => l.trim())
   const modifiedTracked = lines.filter((l) => /^( M|M |MM|A | D|D )/.test(l))
+  const codeDirty = modifiedTracked.filter((l) => !DOC_ONLY.test(l.slice(3).trim()))
+  const docDirty = modifiedTracked.filter((l) => DOC_ONLY.test(l.slice(3).trim()))
   const untracked = lines.filter((l) => l.startsWith('??'))
-  return { modifiedTracked, untracked, clean: modifiedTracked.length === 0 }
+  return { modifiedTracked, codeDirty, docDirty, untracked, clean: codeDirty.length === 0 }
 }
 function taskPrompt(t) {
   return [
@@ -254,13 +264,12 @@ async function runArm({ task, sid, arm = null, label = '' }) {
   const budgetMs = (task.budget?.maxMinutes ?? 15) * 60_000
   // ★ `--force`：实验期间改那些文件的**就是我们自己派出去的 Agent** ⇒ 跑完无条件回到实验起点（保护留给手工 `--restore`）。
   const restoreAll = () => sh('node', ['scripts/eval-validate.mjs', '--restore', '--force'])
-  /** 跑完必须干净：否则后面的（尤其成对的后续跑）会在 `--prepare` 上连环失败（2026-09-20 实测）。 */
+  /** 跑完必须干净：否则后面的（尤其成对的后续跑）会在 `--prepare` 上连环失败（2026-09-20 实测）。
+   *  判据只看**代码/脚本**有没有残留（文档/记忆被别的会话改是常态，不该算残留）。 */
   const assertClean = (where) => {
-    const dirty = sh('git', ['status', '--porcelain']).stdout
-      .split('\n')
-      .filter((l) => l.trim() && !l.startsWith('??'))
+    const dirty = worktreeState().codeDirty
     if (dirty.length) {
-      console.error(`${tag}✗ ${where}：工作区仍有已跟踪文件被改（后续跑会连环失败）：\n${dirty.join('\n')}`)
+      console.error(`${tag}✗ ${where}：代码/脚本仍有改动（后续跑会连环失败）：\n${dirty.join('\n')}`)
       return false
     }
     return true
@@ -435,7 +444,11 @@ if (has('--pair')) {
   const armB = argOf('--armB') ?? 'code'
   const wt = worktreeState()
   if (!wt.clean) {
-    console.error('有**已跟踪文件被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' + wt.modifiedTracked.join('\n'))
+    console.error(
+      '有**已跟踪的代码/脚本被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' +
+        wt.codeDirty.join('\n') +
+        (wt.docDirty.length ? `\n（另有文档/记忆改动 ${wt.docDirty.length} 项 —— 不拦实验）` : ''),
+    )
     process.exit(1)
   }
   console.log(
@@ -512,7 +525,11 @@ if (has('--pair')) {
 // ── 单臂 CLI（`--repeat k` 时就是 pass^k）─────────────────────────────────
 const wtRun = worktreeState()
 if (!wtRun.clean) {
-  console.error('有**已跟踪文件被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' + wtRun.modifiedTracked.join('\n'))
+  console.error(
+    '有**已跟踪的代码/脚本被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' +
+      wtRun.codeDirty.join('\n') +
+      (wtRun.docDirty.length ? `\n（另有文档/记忆改动 ${wtRun.docDirty.length} 项 —— 不拦实验）` : ''),
+  )
   process.exit(1)
 }
 const armSingle = argOf('--arm') ?? null
