@@ -351,7 +351,7 @@ if (has('--plan') || (!sid && !has('--pair') && !has('--repeat') && !argOf('--ar
  * @param {{task:object, sid:string, arm?:string|null, label?:string}} o
  * @returns {Promise<object>} report（含 stages）
  */
-async function runArm({ task, sid, arm = null, label = '', profile = null, ignoreWindows = [] }) {
+async function runArm({ task, sid, arm = null, label = '', profile = null, ignoreWindows = [], armLabel = null }) {
   const t0 = Date.now()
   const tag = label ? `${label} ` : ''
   const report = { task: task.id, arm, session: sid, at: new Date().toISOString(), stages: {} }
@@ -517,12 +517,14 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
 
   // ④.6 臂自证：这次跑的工具面**必须/不许**含某些工具（"能力开/关"是否真的生效，看事实不看意图）
   const toolSet = report.stages.trajectory?.metrics?.toolSet ?? []
-  if (EXPECT_TOOLS.length || FORBID_TOOLS.length) {
-    const missing = EXPECT_TOOLS.filter((t) => !toolSet.includes(t))
-    const forbidden = FORBID_TOOLS.filter((t) => toolSet.includes(t))
+  const expTools = [...EXPECT_TOOLS.both, ...(armLabel ? (EXPECT_TOOLS[armLabel] ?? []) : [])]
+  const forbTools = [...FORBID_TOOLS.both, ...(armLabel ? (FORBID_TOOLS[armLabel] ?? []) : [])]
+  if (expTools.length || forbTools.length) {
+    const missing = expTools.filter((t) => !toolSet.includes(t))
+    const forbidden = forbTools.filter((t) => toolSet.includes(t))
     report.stages.toolFaceCheck = {
-      expect: EXPECT_TOOLS,
-      forbid: FORBID_TOOLS,
+      expect: expTools,
+      forbid: forbTools,
       toolSetSize: toolSet.length,
       missing,
       forbidden,
@@ -534,7 +536,7 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
       )
       report.stages.armInvalid = true
     } else {
-      console.log(`${tag}✓ 臂自证通过（工具面 ${toolSet.length} 个：含 [${EXPECT_TOOLS.join(', ')}]，不含 [${FORBID_TOOLS.join(', ')}]）`)
+      console.log(`${tag}✓ 臂自证通过（工具面 ${toolSet.length} 个：含 [${expTools.join(', ')}]，不含 [${forbTools.join(', ')}]）`)
     }
   }
 
@@ -744,8 +746,21 @@ function agg(runs, pick) {
 const fmtAgg = (a) => (a ? `${a.mean.toFixed(0)} [${a.min.toFixed(0)}–${a.max.toFixed(0)}]` : '-')
 
 // 臂自证用的工具名单（可重复传）：`--expectTool design_canvas_index --forbidTool self_evolve`
-const EXPECT_TOOLS = argv.reduce((acc, a, i) => (a === '--expectTool' ? [...acc, argv[i + 1]] : acc), []).filter(Boolean)
-const FORBID_TOOLS = argv.reduce((acc, a, i) => (a === '--forbidTool' ? [...acc, argv[i + 1]] : acc), []).filter(Boolean)
+// ★ 支持**按臂**指定：`--expectTool A:design_canvas_index`（只对 A 臂）／不带前缀 = 两臂都适用。
+function parseToolFlags(flag) {
+  const out = { A: [], B: [], both: [] }
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== flag) continue
+    const v = argv[i + 1]
+    if (!v) continue
+    const m = /^(A|B):(.+)$/.exec(v)
+    if (m) out[m[1]].push(m[2])
+    else out.both.push(v)
+  }
+  return out
+}
+const EXPECT_TOOLS = parseToolFlags('--expectTool')
+const FORBID_TOOLS = parseToolFlags('--forbidTool')
 
 // ── 成对 CLI：--pair --task X --armA council --armB code [--repeat k] ───────
 if (has('--pair')) {
@@ -873,6 +888,7 @@ if (has('--pair')) {
         label: `[${label}/${preset}${profByLabel[label] ? '@' + profByLabel[label] : ''} 第 ${i + 1}/${REPEAT} 次]`,
         profile: profByLabel[label] ?? null,
         ignoreWindows,
+        armLabel: label,
       })
       pair.arms[label].runs.push({ preset, session: sidUse, profile: profByLabel[label] ?? null, ...r.stages })
       if (r.stages.cleanAfterRestore === false) {
