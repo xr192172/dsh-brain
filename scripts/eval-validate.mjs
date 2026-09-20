@@ -156,7 +156,19 @@ if (tasks.length === 0) {
 
 // ── --prepare：只打坏（给 Agent 用）────────────────────────────────────────
 if (argOf('--prepare')) {
-  const t = tasks[0]
+  // ★ 2026-09-20 修掉一个**静默误伤**：原先这里取 `tasks[0]`，
+  //   而 `--prepare` 后面那个值只当"真值"用 ⇒ `--prepare cli-0002` 其实**打的是第一题**（cli-0001），
+  //   调用方却以为打的是 cli-0002（`eval-run.mjs` 的第一次真跑就因此报"题目没有信号"，白查一圈）。
+  //   现在：值必须是**能唯一匹配的 id 或前缀**，匹配不上就直接报错（宁可吵，也不要静默打错题）。
+  const sel = argOf('--prepare')
+  const exact = tasks.find((t) => t.id === sel)
+  const prefix = tasks.filter((t) => t.id.startsWith(sel))
+  if (!exact && prefix.length !== 1) {
+    say(`--prepare 打哪一题必须唯一：'${sel}' ${prefix.length > 1 ? `匹配到多题 ${prefix.map((t) => t.id).join(', ')}` : '匹配不到任何题'}`)
+    say(`可用：${tasks.map((t) => t.id).join(', ')}`)
+    process.exit(1)
+  }
+  const t = exact ?? prefix[0]
   const bad = checkShape(t)
   if (bad.length) {
     say(`任务 ${t.id} 结构不合格，拒绝 prepare：`)

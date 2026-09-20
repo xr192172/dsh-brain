@@ -172,9 +172,22 @@ const regression = task.regression.cmd
 
 // ① 打 seed + 证明题目有信号
 console.log('① 打 seed 并确认 oracle 变红（题目有信号）…')
-const prep = sh('node', ['scripts/eval-validate.mjs', '--prepare', task.id])
+const prep = sh('node', ['scripts/eval-validate.mjs', '--only', task.id, '--prepare', task.id])
 if (prep.status !== 0) {
   console.error(prep.stdout + prep.stderr)
+  done(1)
+}
+// ★ 断言 seed **真的打在了本题点名的文件上**（2026-09-20 加的：此前 `--prepare <id>` 因 CLI 缺陷
+//   静默打了第一题，导致"题目没有信号"的假警报，白查一圈）。判据：git 看到的改动文件集合 == seed 点名的文件集合。
+const expectFiles = [...new Set(task.seed.edits.map((e) => e.file))].sort()
+const changedFiles = sh('git', ['diff', '--name-only']).stdout.split('\n').filter((l) => l.trim()).sort()
+report.stages.seedFiles = { expect: expectFiles, actual: changedFiles }
+if (JSON.stringify(expectFiles) !== JSON.stringify(changedFiles)) {
+  console.error(
+    `seed 打错了地方：期望改动 ${expectFiles.join(', ')}，实际改动 ${changedFiles.join(', ') || '(无)'}\n` +
+      `⇒ 弃跑（否则后面的"没信号/有余量"全不可信）`,
+  )
+  sh('node', ['scripts/eval-validate.mjs', '--restore'])
   done(1)
 }
 const seeded = sh(oracle[0], oracle.slice(1))
