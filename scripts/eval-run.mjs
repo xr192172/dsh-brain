@@ -812,6 +812,13 @@ function ensureWorktree(dir) {
  */
 const CTRL = process.env.DSH_CTRL ?? 'http://127.0.0.1:31800'
 /** 各 profile 的**工具面**家族要求（就绪闸用）：空数组 = 只查工具条数下限。 */
+/** 各 profile **必须看不见**的工具家族（缺失型臂的判据；否则 102 个工具也会被判"就绪"）。 */
+const PROFILE_TOOL_FORBID = {
+  web: [],
+  'web-nodc': ['mcp__design-canvas__*', 'design_canvas_*', 'self_evolve'],
+  'web-notev': [],
+}
+
 const PROFILE_TOOL_MUST = {
   web: ['mcp__design-canvas__*'],
   'web-nodc': [],
@@ -829,7 +836,7 @@ const PROFILE_EXPECT = {
  * 必须等到**工具面正常**再开跑。判据用"真读一次工具面"，不用"boot 无错"。
  * 代价：一次极短 prompt（几秒 + 少量 token），换来"臂跑在完整 gen 上"。
  */
-async function waitArmReady(minTools = 20, tries = 8, must = []) {
+async function waitArmReady(minTools = 20, tries = 8, must = [], forbid = []) {
   for (let i = 1; i <= tries; i++) {
     const sid = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
     if (!sid || !sid.startsWith('session-')) {
@@ -844,8 +851,11 @@ async function waitArmReady(minTools = 20, tries = 8, must = []) {
       const set = a?.metrics?.toolSet ?? []
       const mt = (p, nm) => (p.endsWith('*') ? nm.startsWith(p.slice(0, -1)) : nm === p)
       const miss = must.filter((p) => !set.some((nm) => mt(p, nm)))
-      if (n >= minTools && miss.length === 0) return { ready: true, toolSetSize: n, missing: [], probeSession: sid, tries: i }
+      const bad = forbid.filter((p) => set.some((nm) => mt(p, nm)))
+      if (n >= minTools && miss.length === 0 && bad.length === 0)
+        return { ready: true, toolSetSize: n, missing: [], forbidden: [], probeSession: sid, tries: i }
       if (n >= minTools && miss.length) console.log('  [就绪闸] 工具数够(' + n + ')但缺家族 ' + miss.join(',') + ' ⇒ 再等')
+      if (n >= minTools && bad.length) console.log('  [就绪闸] 工具数够(' + n + ')但**出现了不该有的家族** ' + bad.join(',') + ' ⇒ 再等')
     }
     console.log(`  [就绪闸] 第 ${i} 次探测：工具面仍不足 ${minTools} 个 ⇒ 等 5s 再试`)
     await new Promise((r) => setTimeout(r, 5000))
@@ -893,6 +903,9 @@ async function ensureProfile(profile) {
     console.error(
       `     期望 must=${exp.must.map(String).join(' , ')} mustNot=${exp.mustNot.map(String).join(' , ')}`,
     )
+    // ★ 硬失败：指纹不符说明**目标 profile 没生效**（实测：B 臂因此实际跑在 web 上，102 个工具）
+    //   ⇒ 继续跑等于把 A 臂当成 B 臂，读数全废。
+    throw new Error(`臂切换失败：请求 profile=${profile}，但 ${gen1} 的插件指纹不符 ⇒ 拒绝继续`)
   }
   return { profile, gen: gen1, switched: true, fingerprint: fp1.counts, matches: !!ok, kick: kick.note ?? null, t0, t1 }
 }
@@ -1049,7 +1062,7 @@ if (has('--pair')) {
     }
     // ★ 该臂的就绪闸：按**这个 profile 的家族要求**探一次工具面（web 必须看得见 design-canvas）
     {
-      const rd = await waitArmReady(20, 6, PROFILE_TOOL_MUST[prof] ?? [])
+      const rd = await waitArmReady(20, 6, PROFILE_TOOL_MUST[prof] ?? [], PROFILE_TOOL_FORBID[prof] ?? [])
       pair.arms[label].readyGate = rd
       if (!rd.ready) console.error('  [就绪闸] ' + label + ' 臂（' + prof + '）没就绪 ⇒ 该臂结果不可信')
       else console.log('  [就绪闸] ' + label + ' 臂（' + prof + '）✓ 工具面 ' + rd.toolSetSize + ' 个')
@@ -1193,6 +1206,7 @@ if (has('--pair')) {
   console.log(bothAllFixed ? '⇒ 两臂每次都过地板（差异看成本/路径）' : '⇒ **有跑没过地板** ⇒ 先看那几跑，别急着解读均值')
   pair.bothAllFixed = bothAllFixed
   // ★ 写入报告后**自动跑一次两臂隔离审计**（把有没有碰到共享面落进产物里，见 eval-isolation-audit.mjs）
+  const out = path.join(REPO, 'out', `eval-pair-${task.id}-${Date.now()}.json`)
   pair.isolationAudit = { ranAt: new Date().toISOString() }
   try {
     fs.writeFileSync(out, JSON.stringify(pair, null, 2), 'utf8')
