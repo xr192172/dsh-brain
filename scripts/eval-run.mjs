@@ -221,9 +221,9 @@ if (!task) {
   process.exit(1)
 }
 
-// ── --plan：只打印计划（`--pair` 不走这里，它自己会建会话）────────────────────
+// ── --plan：只打印计划（`--pair` / `--repeat` / `--arm` 会自动建会话，不走这里）────
 const sid = argOf('--session')
-if (has('--plan') || (!sid && !has('--pair'))) {
+if (has('--plan') || (!sid && !has('--pair') && !has('--repeat') && !argOf('--arm'))) {
   const wt = worktreeState()
   console.log(`任务：${task.id}`)
   console.log(` 不变量：${task.invariant}`)
@@ -493,16 +493,26 @@ if (!wtRun.clean) {
   process.exit(1)
 }
 const armSingle = argOf('--arm') ?? null
-if (armSingle) {
-  const sel0 = await rpc('agentPreset.select', { sessionId: sid, agentPreset: armSingle })
-  const rb0 = await sessionStats(sid)
-  console.log(`单臂 ${armSingle}：会话 ${sid} preset→HTTP ${sel0.status} 回读=${rb0?.agentPreset ?? '?'} ${rb0?.agentPreset === armSingle ? '✓' : '✗'}`)
-  if (rb0?.agentPreset !== armSingle) {
-    console.error('preset 未生效 ⇒ 弃跑（HTTP 200 不算证据）')
-    process.exit(1)
+let runs
+if (sid && REPEAT === 1) {
+  // 老行为（向后兼容）：跑在**给定会话**上；带 `--arm` 则先切 preset 并回读
+  if (armSingle) {
+    const sel0 = await rpc('agentPreset.select', { sessionId: sid, agentPreset: armSingle })
+    const rb0 = await sessionStats(sid)
+    console.log(`单臂 ${armSingle}：会话 ${sid} preset→HTTP ${sel0.status} 回读=${rb0?.agentPreset ?? '?'} ${rb0?.agentPreset === armSingle ? '✓' : '✗'}`)
+    if (rb0?.agentPreset !== armSingle) {
+      console.error('preset 未生效 ⇒ 弃跑（HTTP 200 不算证据）')
+      process.exit(1)
+    }
   }
+  runs = [(await runArm({ task, sid, arm: armSingle, label: `[${armSingle ?? 'given-session'}]` })).stages]
+  console.log('')
+  console.log(`结论：**${runs[0].verdict ?? runs[0].error ?? '?'}**（outcome=${runs[0].outcome ?? '-'}，预算内=${runs[0].budgetOk ?? '-'}）`)
+} else {
+  // `--repeat k`（pass^k）或 `--arm`：每次**新建空会话**，自动建
+  console.log(`pass^k：${task.id} × ${REPEAT} 次${armSingle ? `，臂=${armSingle}` : ''}\n`)
+  runs = await runArmRepeated(task, armSingle, REPEAT, `[${armSingle ?? 'default'}]`)
 }
-const runs = await runArmRepeated(task, armSingle, REPEAT, `[${armSingle ?? 'session'}]`)
 const fixedN = runs.filter((r) => r.verdict === 'FIXED').length
 console.log('─'.repeat(70))
 console.log(`pass^k（同题同臂重复 ${REPEAT} 次，单用新建空会话）`)
