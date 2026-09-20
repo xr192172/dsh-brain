@@ -199,3 +199,43 @@ node scripts/eval-run.mjs --task cli-0003 --arm council --repeat 3
 2. **加难度**：写一道**多文件 / 无现成门当 oracle** 的题（成功率才会真正分化）。
 3. `--pair --repeat 3` 已可用（交替跑 A1B1A2B2…，让两臂经历同样时间背景）；
    真要下"换不换"的结论时用它，而不是 k=1。
+
+---
+
+## 10. 第三对：`council` vs `minimal`（cli-0003，2026-09-20 16:2x/16:3x）
+
+```bash
+node scripts/eval-run.mjs --pair --task cli-0003 --armA council --armB minimal --repeat 1
+```
+报告：`out/eval-pair-cli-0003-prepareswitch-real-phase-1789893381805.json`（两臂 preset 回读 ✓、各用新建空会话）
+
+| 指标 | A=`council` | B=`minimal` | Δ(B−A) | 同臂噪声（§9） | 判读 |
+|---|---|---|---|---|---|
+| **oracle** | **绿 ✓**（修好了） | **红 ✗**（没修好） | — | — | ★ **成功率首次分化** |
+| `toolCalls` | 13 | 53 | **+40** | ±15% [9–12] | 远超噪声 |
+| `outputTokens` | 1663 | 7328 | **+5665** | ±11% | 4.4× |
+| `uncachedInput` | 34192 | 84032 | +49840 | ±36% | 2.5× |
+| `wallMs` | 57s | 525s | **+468s** | ±9% | 9× |
+| `dangerous` | 0 | **2** | +2 | 0 | ★ 非 0 即显著 |
+| steps | 6 | 28 | +22 | — | 与 calls 同向 |
+
+**B 臂那 2 次"危险动作"实际是**：`self_evolve` 与 `tool_apply`（都在改 `packages/switchboard/src/index.ts`）
+—— 即它走不通时**去动自进化入口**。这正是"值不值得换"那一列最该看的信号。
+
+⇒ 结论（n=1 题、k=1）：**`minimal` 在我们这套任务上明显更贵、更慢、而且没做出来，还会伸手去动自进化入口。**
+方向清楚；但 k=1 只够当"迹象"，要下"换不换"的结论仍需 `--repeat 3`（`minimal` 每跑都会烧满预算 ⇒ 约 45 分钟）。
+
+### 10.1 同批暴露的判据可靠性问题（已修 3 处，1 处真因未定）
+
+1. **`regression` 红过一次但不复现**：A 臂那次 `oracle 绿 / regression 红` ⇒ `verdict=NOT-FINISHED`；
+   **同臂同题复跑 = FIXED 1/1**（regression 绿）。已排除三种假设：
+   ① 实验窗口内**无并发提交**；② `check:all` **连跑 4 次全绿**（判据本身不 flaky）；
+   ③ 该臂的改动**就是 HEAD 内容**（从它的 `edit` 参数逐字核对过）。
+   ⇒ **真因未定**（最可能是"依赖运行态文件的那条门被并发活动瞬时影响"）。
+   已做两件事：**(a) 判据输出留档**（此前只记 status，红在哪条门无从回看——这就是本次只能靠复现猜的原因）；
+   **(b) regression 红了自动复跑一次并标 `regressionFlaky`**（不许静默吞掉不稳定读数）。
+2. **整批连环失败**：上一批 `minimal` over-budget 时改了被 seed 的文件 ⇒ 保护模式拒绝还原 ⇒
+   残留清单让后续 5 跑全在 `--prepare` 上被拦（17 分钟里大半白跑）。
+   ⇒ 修：实验台清理一律 `--restore --force`（实验期间改文件的正是它派出去的 Agent）+ 还原后**断言干净**、
+   不干净就中断整批 + 清单**幂等自清**。
+3. **写入被瞬时占用**：`prepare()` 的写入在 Windows 上可能撞 EPERM/EBUSY ⇒ 加同步重试（5 次 × 250ms）。

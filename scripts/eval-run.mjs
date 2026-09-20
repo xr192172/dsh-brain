@@ -366,7 +366,21 @@ async function runArm({ task, sid, arm = null, label = '' }) {
 
   // ④ 判据 + 轨迹
   const after = sh(oracle[0], oracle.slice(1))
-  const reg = sh(regression[0], regression.slice(1))
+  const reg1 = sh(regression[0], regression.slice(1))
+  // ★ regression 红了先**复跑一次**确认：本机的 gate 里有一条（capability-gate）依赖**运行中的 DSH 栈**
+  //   会写的运行态文件（能力注册表），并发活动可能让它瞬时变红（2026-09-20 观察到的"red 不复发"现象）。
+  //   两次读数都留档，并用 `regressionFlaky` 标出"两次不一致" —— **不许静默吞掉 flaky**。
+  let reg = reg1
+  let regRetry = null
+  if (reg1.status !== 0) {
+    regRetry = sh(regression[0], regression.slice(1))
+    if (regRetry.status === 0) reg = regRetry
+  }
+  report.stages.regressionRun = {
+    first: { status: reg1.status, tail: `${reg1.stdout ?? ''}${reg1.stderr ?? ''}`.slice(-1200) },
+    retry: regRetry ? { status: regRetry.status, tail: `${regRetry.stdout ?? ''}${regRetry.stderr ?? ''}`.slice(-1200) } : null,
+    flaky: !!regRetry && regRetry.status === 0,
+  }
   report.stages.diffStat = sh('git', ['diff', '--stat']).stdout.trim()
   // ★ 2026-09-20 加：**把判据自己的输出留档**。此前只记 status，出现过"regression 红但无从知道哪条门红"，
   //   只能靠复现猜（而猜了半天没复现出来）。判据的产出必须可回看，否则等于没有证据。
@@ -380,6 +394,7 @@ async function runArm({ task, sid, arm = null, label = '' }) {
     pass: reg.status === 0,
     tail: `${reg.stdout ?? ''}${reg.stderr ?? ''}`.slice(-2000),
   }
+  report.stages.regressionFlaky = report.stages.regressionRun.flaky
   // ★ `git diff` 为空 **不等于**"它什么都没做"（正解常是改回 HEAD）⇒ 必须看轨迹
   report.stages.trajectory = analyzeTrajectory(sid)
   report.stages.verdict = outcome === 'settled' && after.status === 0 && reg.status === 0 ? 'FIXED' : 'NOT-FIXED'
