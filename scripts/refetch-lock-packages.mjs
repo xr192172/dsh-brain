@@ -71,11 +71,16 @@ for (const name of names) {
   fs.mkdirSync(path.dirname(dest), { recursive: true })
   fs.cpSync(inner, dest, { recursive: true })
   fs.rmSync(tmp, { recursive: true, force: true })
-  // 对账：它自己声明的 files 都到位了吗（②那类残缺的判据）
+  // 对账：它自己声明的 files（★ 只查【字面】项 —— glob 与 `!` 排除项判不了，
+  //   拿它们当"要求存在"就是假红。同一课在 audit-partial-packages.mjs 里也踩过：
+  //   `dist-*/*` / `lib/*.js` 是 glob，`!x.map` 是排除项，都不是"必须存在"。）
   const pj = JSON.parse(fs.readFileSync(path.join(dest, 'package.json'), 'utf8'))
-  const want = Array.isArray(pj.files) ? pj.files : []
+  const want = (Array.isArray(pj.files) ? pj.files : [])
+    .filter((f) => !/[*?[\]]/.test(f) && !f.startsWith('!'))
   const missing = want.filter((f) => !fs.existsSync(path.join(dest, f)))
-  console.log(`    声明 files ${want.length} 个 → 缺 ${missing.length} 个${missing.length ? '：' + missing.join(',') : ' ✓'}`)
+  const skipped = (Array.isArray(pj.files) ? pj.files.length : 0) - want.length
+  console.log(`    字面 files ${want.length} 个 → 缺 ${missing.length} 个${missing.length ? '：' + missing.join(',') : ' ✓'}` +
+    (skipped ? `（跳过 ${skipped} 个 glob/排除项）` : ''))
   if (missing.length) failed++
 }
 
