@@ -454,6 +454,8 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   console.log(`${tag}   ✓ 有信号：oracle 现在红`)
 
   // 跑前工作区快照（能力题还原要用它：把跑出来的改动退回去；see ⑤）
+  // ★ 索引冷热状态（跨臂继承的性能混淆项）—— 跑前记一次
+  report.stages.indexBefore = indexState()
   const preRunState = worktreeState()
 
   // ② 交给 Agent
@@ -541,6 +543,15 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   report.stages.trajectory = analyzeTrajectory(sid)
   report.stages.verdict = outcome === 'settled' && after.status === 0 && reg.status === 0 ? 'FIXED' : 'NOT-FIXED'
   report.stages.budgetOk = outcome !== 'over-budget'
+
+  // ★ 索引冷热状态 —— 跑后再记一次（对比 start 就能看出"这一臂有没有建/用索引"）
+  report.stages.indexAfter = indexState()
+  if (report.stages.indexBefore)
+    report.stages.indexDelta = {
+      files: report.stages.indexAfter.files - report.stages.indexBefore.files,
+      bytes: report.stages.indexAfter.bytes - report.stages.indexBefore.bytes,
+      warmAtStart: report.stages.indexBefore.files > 0,
+    }
 
   // ④.5 环境扰动判据：这次跑期间有没有换代？（有 ⇒ 该次跑**污染**，结论不可用）
   //      2026-09-20 实测踩到：成对实验横跨两次换代，B 臂的回合被 `aborted(handover/freeze)`，
@@ -639,6 +650,43 @@ async function sessionModel(sid) {
   const r = await rpc('session.models', { sessionId: sid })
   const c = r.json?.result?.value?.current
   return c ? `${c.provider}/${c.model}` : null
+}
+
+/**
+ * **索引/缓存目录**的状态（冷/热）。跨臂继承 ⇒ 必须记账，否则会被读成"能力差异"。
+ * 路径来自 profile 里 mcp-client 的 env DESIGN_CANVAS_HOME（默认取仓库下 .design-canvas）。
+ */
+function indexState(dir = path.join(REPO, '.design-canvas')) {
+  const out = { dir, exists: false, files: 0, bytes: 0, newest: null, newestStr: null }
+  const walk = (d) => {
+    let ents = []
+    try {
+      ents = fs.readdirSync(d, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of ents) {
+      const p = path.join(d, e.name)
+      if (e.isDirectory()) walk(p)
+      else
+        try {
+          const st = fs.statSync(p)
+          out.files++
+          out.bytes += st.size
+          if (!out.newest || st.mtimeMs > out.newest) out.newest = st.mtimeMs
+        } catch {
+          /* ignore */
+        }
+    }
+  }
+  try {
+    out.exists = fs.statSync(dir).isDirectory()
+  } catch {
+    return out
+  }
+  walk(dir)
+  out.newestStr = out.newest ? new Date(out.newest).toTimeString().slice(0, 8) : null
+  return out
 }
 
 /** 这次跑所在**哪个 build / profile**（"不同时期不同版本"是靠它记账的）。 */
