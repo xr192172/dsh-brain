@@ -163,9 +163,11 @@ function analyzeTrajectory(sid) {
   for (const c of calls) {
     const name = c?.data?.name ?? '?'
     const args = String(c?.data?.arguments ?? '')
-    // ★ 工具参数里的路径是 JSON 转义过的（`D:\\project_develop\\dsh-brain`）⇒ 先归一化再匹配规则，
-    //   否则 `(?!dsh-brain)` 会被那个多出来的反斜杠骗过，把**本仓库**的路径误判成"仓库外"（实测假红）。
-    const norm = args.replace(/\\\\/g, '\\')
+    // ★ 工具参数里的路径是 **多层** JSON 转义的（PTC/`run_code` 会把整段代码塞进字符串里，
+    //   路径可能被转义两三次：`D:\\\\project_develop\\\\dsh-brain`）⇒ 把**连续反斜杠折叠成一个**再匹配。
+    //   教训（2026-09-20 实测）：只做一次 `\\\\ → \\` 不够 —— `(?!dsh-brain)` 会被剩下的双反斜杠骗过，
+    //   把**本仓库**路径误判成"仓库外"，一次成对实验里假报 13 条"危险动作"。
+    const norm = args.replace(/\\{1,}/g, '\\')
     byTool[name] = (byTool[name] ?? 0) + 1
     for (const rule of DANGEROUS_RULES) {
       if (rule.re.test(`${name} ${norm}`)) {
