@@ -456,6 +456,13 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   // 跑前工作区快照（能力题还原要用它：把跑出来的改动退回去；see ⑤）
   // ★ 索引冷热状态（跨臂继承的性能混淆项）—— 跑前记一次
   report.stages.indexBefore = indexState()
+  // ★ 痕迹可见性清单（"挪走产物 ≠ 没痕迹"）—— 跑前记一次
+  report.stages.traceInventory = traceInventory()
+  console.log(
+    `${tag}痕迹面：会话目录 ${report.stages.traceInventory.sessionScopes} 个（6h 内动过 ${report.stages.traceInventory.sessionScopesTouchedIn6h}）` +
+      ` · 我的报告 ${report.stages.traceInventory.myReports} 份 · 索引 ${report.stages.traceInventory.indexWarm ? '热' : '冷'}(${report.stages.traceInventory.indexNewest ?? '-'})` +
+      ` · git 近 6h ${report.stages.traceInventory.gitCommitsLast6h} 个提交`,
+  )
   const preRunState = worktreeState()
 
   // ② 交给 Agent
@@ -650,6 +657,69 @@ async function sessionModel(sid) {
   const r = await rpc('session.models', { sessionId: sid })
   const c = r.json?.result?.value?.current
   return c ? `${c.provider}/${c.model}` : null
+}
+
+/**
+ * **痕迹可见性清单**：此刻一个"好奇的 agent"能看到的、属于上一臂或我的痕迹。
+ * 与隔离审计的区别：审计看"**有没有碰**"，这里看"**能碰到什么**"。
+ * 为什么要它：把产物挪走 ≠ 没痕迹（mtime / 会话日志 / 我的报告 / git log / 构建产物 / 索引冷热都在）。
+ */
+function traceInventory() {
+  const inv = {}
+  // ① 会话日志目录（含**别的会话**的完整转录）
+  try {
+    const root = 'C:/Users/Admin/.dsh/sessions'
+    const dirs = fs.readdirSync(root).filter((d) => {
+      try {
+        return fs.statSync(path.join(root, d)).isDirectory()
+      } catch {
+        return false
+      }
+    })
+    let recent = 0
+    const cutoff = Date.now() - 6 * 3600 * 1000
+    for (const d of dirs) {
+      try {
+        if (fs.statSync(path.join(root, d)).mtimeMs > cutoff) recent++
+      } catch {
+        /* ignore */
+      }
+    }
+    inv.sessionScopes = dirs.length
+    inv.sessionScopesTouchedIn6h = recent
+  } catch {
+    inv.sessionScopes = null
+  }
+  // ② 我的报告（含另一臂轨迹）
+  try {
+    const outs = fs.readdirSync(path.join(REPO, 'out')).filter((f) => /^eval-(pair|run|validate)/.test(f))
+    inv.myReports = outs.length
+    let newest = 0
+    for (const f of outs) {
+      try {
+        newest = Math.max(newest, fs.statSync(path.join(REPO, 'out', f)).mtimeMs)
+      } catch {
+        /* ignore */
+      }
+    }
+    inv.myReportsNewest = newest ? new Date(newest).toTimeString().slice(0, 8) : null
+  } catch {
+    inv.myReports = null
+  }
+  // ③ git 近况（commit message 里写着我在做什么）
+  try {
+    const head = sh('git', ['log', '-1', '--format=%h %ad %s', '--date=format:%H:%M']).stdout.trim()
+    inv.gitHead = head.slice(0, 120)
+    const n = sh('git', ['log', '--since=6.hours', '--oneline']).stdout.split(String.fromCharCode(10)).filter(Boolean).length
+    inv.gitCommitsLast6h = n
+  } catch {
+    inv.gitHead = null
+  }
+  // ④ 索引冷热
+  const ix = indexState()
+  inv.indexWarm = ix.files > 0
+  inv.indexNewest = ix.newestStr
+  return inv
 }
 
 /**
