@@ -560,8 +560,13 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   const expTools = [...EXPECT_TOOLS.both, ...(armLabel ? (EXPECT_TOOLS[armLabel] ?? []) : [])]
   const forbTools = [...FORBID_TOOLS.both, ...(armLabel ? (FORBID_TOOLS[armLabel] ?? []) : [])]
   if (expTools.length || forbTools.length) {
-    const missing = expTools.filter((t) => !toolSet.includes(t))
-    const forbidden = forbTools.filter((t) => toolSet.includes(t))
+    // ★ 支持**前缀/家族匹配**（`mcp__design-canvas__*`）—— 2026-09-20 教训：我按包内注册名
+    //   （`design_canvas_index`）写期望，而模型实际看到的是 MCP 客户端暴露的名字（`mcp__design-canvas__…`）
+    //   ⇒ 判据假红。期望必须按**模型实际看到的工具面**写，且允许按家族匹配。
+    const matchTool = (pattern, name) =>
+      pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern
+    const missing = expTools.filter((t) => !toolSet.some((n) => matchTool(t, n)))
+    const forbidden = forbTools.filter((t) => toolSet.some((n) => matchTool(t, n)))
     report.stages.toolFaceCheck = {
       expect: expTools,
       forbid: forbTools,

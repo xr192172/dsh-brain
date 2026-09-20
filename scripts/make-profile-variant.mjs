@@ -28,6 +28,11 @@ const argOf = (k) => {
   return i < 0 ? null : argv[i + 1]
 }
 const drops = argv.reduce((acc, a, i) => (a === '--drop' ? [...acc, argv[i + 1]] : acc), [])
+/** `--drop-insert <loader-id>`：从 `cordis.patch.yml` 里删掉某个 `- insert:` 块。
+ *  ★ 为什么必须有它（2026-09-20 实测）：能力可能有**两条**进工具的路径 ——
+ *    包（bundle）+ profile 里 `- insert: id: mcp-client`（指向外部 MCP server）。
+ *    只 drop bundle ⇒ 那个能力的工具**照样在**（实测：B 臂仍有 mcp__design-canvas__*）。 */
+const dropInserts = argv.reduce((acc, a, i) => (a === '--drop-insert' ? [...acc, argv[i + 1]] : acc), []).filter(Boolean)
 
 if (argv.includes('--list')) {
   for (const d of fs.readdirSync(PROFILES, { withFileTypes: true })) {
@@ -100,6 +105,62 @@ console.log(`  改 package.json：移除 ${removed.length} 处（deps+bundles �
 for (const r of removed) console.log(`    - ${r}`)
 if (removed.length !== drops.length * 2) {
   console.warn(`  ⚠ 期望移除 ${drops.length * 2} 处，实际 ${removed.length} 处 —— 检查包名拼写`)
+}
+
+// ②b 从 `cordis.patch.yml` 里删掉指定的 `- insert:` 块（行级手术；块 = `- insert:` 到下一个**顶格**行为止）
+if (dropInserts.length) {
+  const ymlPath = path.join(toDir, 'cordis.patch.yml')
+  if (!fs.existsSync(ymlPath)) {
+    console.warn('  ⚠ 没有 cordis.patch.yml，--drop-insert 无从下手')
+  } else {
+    const lines = fs.readFileSync(ymlPath, 'utf8').split('\n')
+    for (const target of dropInserts) {
+      const i0 = lines.findIndex((l) => /^-\s*insert:\s*$/.test(l))
+      if (i0 < 0) {
+        console.warn(`  ⚠ 没找到 \`- insert:\` 块（无法删 ${target}）`)
+        continue
+      }
+      // 块结束 = i0 之后第一个**非空且不缩进**的行
+      let i1 = lines.length
+      for (let i = i0 + 1; i < lines.length; i++) {
+        const l = lines[i]
+        if (l.trim() === '') continue
+        if (!/^[ \t]/.test(l)) {
+          i1 = i
+          break
+        }
+      }
+      const block = lines.slice(i0, i1)
+      const entryStarts = block
+        .map((l, k) => (/^\s*-\s*id:\s*(\S+)/.exec(l) ? { k, id: /^\s*-\s*id:\s*(\S+)/.exec(l)[1] } : null))
+        .filter(Boolean)
+      const ids = entryStarts.map((e) => e.id)
+      if (!ids.includes(target)) {
+        console.warn(`  ⚠ 该 insert 块里没有 ${target}（块内 id：${ids.join(', ') || '(无)'}）`)
+        continue
+      }
+      if (ids.length === 1) {
+        // 只有一个条目 ⇒ 整块删掉
+        lines.splice(i0, i1 - i0)
+        console.log(`  删 insert 块（整块，唯一 id=${target}）`)
+      } else {
+        // 多个条目 ⇒ 只删那一条（从它的 `- id:` 到下一个条目）
+        const at = entryStarts.findIndex((e) => e.id === target)
+        const from = i0 + entryStarts[at].k
+        const to = at + 1 < entryStarts.length ? i0 + entryStarts[at + 1].k : i1
+        // 回退到它上面的注释/空行也算它的
+        let from2 = from
+        while (from2 > i0 && /^\s*(#|$)/.test(lines[from2 - 1])) from2--
+        lines.splice(from2, to - from2)
+        console.log(`  删 insert 条目（块内 ${ids.length} 条，只删 ${target}）`)
+      }
+    }
+    fs.writeFileSync(ymlPath, lines.join('\n'), 'utf8')
+    // 自证：目标 id 必须不在了，其它 id 还在
+    const after = fs.readFileSync(ymlPath, 'utf8')
+    const stillThere = dropInserts.filter((d) => new RegExp(`^\\s*-\\s*id:\\s*${d}\\s*$`, 'm').test(after))
+    console.log(`  自证：目标 id 是否仍存在 = ${stillThere.length ? stillThere.join(', ') + '（✗ 没删掉）' : '无 ✓'}`)
+  }
 }
 
 // ③ node_modules 用 junction 指向源 profile（零复制、零安装）
