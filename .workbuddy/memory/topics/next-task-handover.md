@@ -9,6 +9,35 @@
 
 ---
 
+## ★ eval 子会话回执（2026-09-20 22:3x，合并前整理）
+
+> 完整版：`docs/receipt-to-main-2026-09-20.md`。**git 与文档已整理干净**（本地=远端 `18cc948` 起）。
+
+**状态**：判据层（实验台）机器**已就位并各自验证**——任务集（`cli-0005` 能力敏感题 + 空 seed 支持）、
+**B1 每臂独立工作区**（`git worktree` + 每臂 `--cwd`）、**就绪闸**（真读工具面 + 家族 must/forbid）、
+**臂自证**、**模型回读锁定**、**指标**（`callsTotalMs`/`slowestCalls`/`approvalWaitHits` + 索引冷热 + 痕迹清单 +
+两臂隔离审计 + 换代污染判据）、**能力库快照还原**、M0 换代写入竞态、regression 假红真因。
+
+**只差一次重启**才拿到第一对**可信** delta（能力开/关：A=`exp-base` / B=`exp-base-nodc`）。原因与绕法：
+
+| 事项 | 现状 | 绕法（已就位） |
+|---|---|---|
+| `profiles/web` 引用**已删除**的 `@dsh-brain/conveyor-context`（用户有意删） | `dsh --profile web --dump-config` **exit=1** ⇒ 重启会失败 | **不动 P2**：用变体 `exp-base`（=web−conveyor，exit=0/575 行）起栈 |
+| 换代端口撞保留端口 3101 | 已修（`c7ba4d4`，测试 16/0，构建 `b1789910762643`）| 待重启后真机验证：handover→`exp-base-nodc` 应 success、新代应为 **gen-3102** |
+| `check-all` 基线 **12/3**（不是 15/0） | 3 项失败**全部**由 conveyor-context 被删引起 | `cli-0005` 因此暂判"前提不成立"（regression 红）⇒ **包恢复/替换后自动回到 5 题有效** |
+
+**重建实验用 profile（仓库外，需一条命令）**：
+```bash
+node scripts/make-profile-variant.mjs --from web --to exp-base --drop @dsh-brain/conveyor-context --force
+node scripts/make-profile-variant.mjs --from exp-base --to exp-base-nodc --drop @dsh-brain/design-canvas-bridge --drop-insert mcp-client --force
+```
+**起栈**（用户终端）：`set WEB_PROFILE=exp-base` + `node scripts\relaunch-switchboard.mjs`
+**臂分离探针**：`node scripts/arm-probe.mjs exp-base exp-base-nodc`（换代 + 真读工具面）
+
+⚠️ 我造的 `web-notev`/`web-nodc` 两个旧变体**已作废**（都引用被删的 conveyor-context）⇒ 已删；请勿再用。
+
+---
+
 ## 0. 一句话
 
 **换代写入竞态已修 + 真机验收通过（含"回合运行中换代"主路径），并在验收中抓到并修掉了我自己修复里的两个假信号。
