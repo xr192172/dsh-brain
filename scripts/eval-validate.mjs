@@ -125,7 +125,16 @@ function restore() {
   let ok = true
   for (const f of man.files) {
     const abs = path.join(REPO, f.file)
-    if (sha(fs.readFileSync(abs)) === f.sha256) continue // 已是原字节
+    const cur = sha(fs.readFileSync(abs))
+    if (cur === f.sha256) continue // 已是原字节
+    // ★★ 2026-09-20 加的**防覆盖**：本仓库可能**同时有别的会话在写**（实测发生过）。
+    //   只有"当前内容 == 我们打进去的那个 seed"才允许还原；否则**拒绝改写**（否则会把并发写者的编辑抹掉）。
+    if (f.after && cur !== f.after) {
+      ok = false
+      say(`  ✗ 拒绝还原 ${f.file}：当前内容既不是原字节、也不是我们打进去的 seed（**疑似并发写者**）⇒ 不覆盖它。`)
+      say(`     备份仍在：${f.backup}（人工决定怎么处理；处理完删掉 ${MANIFEST} 即可恢复流程）`)
+      continue
+    }
     if (!fs.existsSync(f.backup)) {
       ok = false
       say(`  ✗ 还原失败：备份不见了 ${f.backup}`)
