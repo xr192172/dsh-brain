@@ -817,18 +817,24 @@ const PROFILE_TOOL_FORBID = {
   web: [],
   'web-nodc': ['mcp__design-canvas__*', 'design_canvas_*', 'self_evolve'],
   'web-notev': [],
+  "exp-base": [],
+  "exp-base-nodc": ['mcp__design-canvas__*', 'design_canvas_*', 'self_evolve'],
 }
 
 const PROFILE_TOOL_MUST = {
   web: ['mcp__design-canvas__*'],
   'web-nodc': [],
   'web-notev': ['mcp__design-canvas__*'],
+  "exp-base": ['mcp__design-canvas__*'],
+  "exp-base-nodc": [],
 }
 
 const PROFILE_EXPECT = {
   web: { must: [/\[tool-evolution\] apply running/, /\[design-canvas-bridge\] config:/], mustNot: [] },
   'web-notev': { must: [/\[design-canvas-bridge\] config:/], mustNot: [/\[tool-evolution\] apply running/] },
   'web-nodc': { must: [/\[tool-evolution\] apply running/], mustNot: [/\[design-canvas-bridge\] config:/] },
+  "exp-base": { must: [/\[tool-evolution\] apply running/, /\[design-canvas-bridge\] config:/], mustNot: [] },
+  "exp-base-nodc": { must: [/\[tool-evolution\] apply running/], mustNot: [/\[design-canvas-bridge\] config:/] },
 }
 
 /**
