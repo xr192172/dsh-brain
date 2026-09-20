@@ -262,17 +262,34 @@ async function runArm({ task, sid, arm = null, label = '' }) {
     return report
   }
   // ★ 断言 seed **真的打在了本题点名的文件上**（2026-09-20 加的：此前 `--prepare <id>` 因 CLI 缺陷
-  //   静默打了第一题，导致"题目没有信号"的假警报，白查一圈）。判据：git 看到的改动文件集合 == seed 点名集合。
+  //   静默打了第一题，导致"题目没有信号"的假警报）。判据分两档（2026-09-20 二次修订）：
+  //   · seed 点名的文件**必须**都被改动 —— 否则是题目/CLI 的问题（hard）
+  //   · 另有文件被改 ⇒ 是**并发写者**（同一个工作副本里还有别的会话在写！）：
+  //     动到被检代码路径/脚本的 ⇒ hard（实验无效）；只动文档/记忆的 ⇒ 记黄（不影响被测代码）
+  //   ★ 为什么分档：本仓库**真的有两个会话并行**（2026-09-20 实测被撞到），
+  //     一刀切成"seed 打错了地方"会把并发写者误诊成题目 bug（误导下一个人去改一道好题）。
   const expectFiles = [...new Set(task.seed.edits.map((e) => e.file))].sort()
   const changedFiles = sh('git', ['diff', '--name-only']).stdout.split('\n').filter((l) => l.trim()).sort()
-  report.stages.seedFiles = { expect: expectFiles, actual: changedFiles }
-  if (JSON.stringify(expectFiles) !== JSON.stringify(changedFiles)) {
+  const missingSeed = expectFiles.filter((f) => !changedFiles.includes(f))
+  const extra = changedFiles.filter((f) => !expectFiles.includes(f))
+  const DOC_ONLY = /^(\.workbuddy[\\/]|docs[\\/])/
+  const contaminating = extra.filter((f) => !DOC_ONLY.test(f))
+  report.stages.seedFiles = { expect: expectFiles, actual: changedFiles, missing: missingSeed, extra }
+  if (missingSeed.length || contaminating.length) {
     console.error(
-      `${tag}seed 打错了地方：期望改动 ${expectFiles.join(', ')}，实际改动 ${changedFiles.join(', ') || '(无)'} ⇒ 弃跑`,
+      `${tag}弃跑：\n` +
+        (missingSeed.length ? `  · seed 没打在点名的文件上：缺 ${missingSeed.join(', ')}\n` : '') +
+        (contaminating.length
+          ? `  · **并发写者动了被检代码路径**：${contaminating.join(', ')}\n    同一个工作副本里只能有一个写者 ⇒ 实验无效（请与另一个会话协调，或用 git worktree 各开一份）\n`
+          : ''),
     )
     restoreAll()
-    report.stages.error = 'seed-mismatch'
+    report.stages.error = missingSeed.length ? 'seed-missing' : 'concurrent-writer'
     return report
+  }
+  if (extra.length) {
+    console.warn(`${tag}⚠ 有并发写者改了**文档/记忆**（不影响被测代码路径）：${extra.join(', ')}`)
+    report.stages.foreignEdits = extra
   }
   const seeded = sh(oracle[0], oracle.slice(1))
   report.stages.seededOracle = { status: seeded.status, hasSignal: seeded.status !== 0 }
