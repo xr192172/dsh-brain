@@ -1,4 +1,4 @@
-# 接手指南（**回执** + 下一项）—— 2026-09-20 13:42（13:42 复核：推送已完成、栈健康）
+# 接手指南（**回执** + 下一项）—— 2026-09-20 13:52（回执复核：推送已完成、栈健康、§3 已修订）
 
 > **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。
 > 上一轮的交接文档就是本文件；本轮把「做完了什么 + 现在什么状态 + 下一项」重写在顶部，旧长尾留档在 §6。
@@ -98,25 +98,40 @@ node scripts/verify-drain-after-swap.mjs          # R0 会告诉你：栈在不�
 
 ---
 
-## 3. 下一项：M1-step-2 —— 跑 Agent 的那一半
+## 3. 下一项：M1-step-2 —— **第一版已建，剩"真跑一次"**（13:46 更新）
 
-**目标**：把 `evals/pilot/tasks.jsonl` 的题面交给 Agent（跑在**只读沙箱/分叉会话**里），收轨迹，
-再跑 oracle + `regression`，产出「现行 vs 挑战者」的 **delta 报告**（成功率 / 工具调用数 / token /
-延迟 / **危险动作**）。
+> ⚠️ **本节 13:46 已修订**：原先写「要新建 `scripts/eval-run.mjs`」—— **该文件已存在**，
+> 由并行会话在 13:46 建好（其提交 `56e04f5` 当时**漏加了文件本身**，随后被 `git add -A` 收入并推送）。
+> 现状：**已跟踪、已在远端**（`git ls-files` / `git ls-tree origin/master` 均确认）。
 
-**已有**：任务集 + 有效性校验（step-1）；`--prepare/--restore` 已给这一步备好（打 seed + 字节级还原）。
-**要新建**：`scripts/eval-run.mjs`（驱动 + 收轨迹 + 出报告）。
+**目标**（不变）：把 `evals/pilot/tasks.jsonl` 的题面交给 Agent（只读沙箱/分叉会话），收轨迹，
+再跑 oracle + `regression`，产出「现行 vs 挑战者」的 **delta 报告**。
+
+**已有**：
+- 任务集 3 题（`--list` 实测）：`cli-0001-injected-message-identity` /
+  `cli-0002-seal-before-unlock` / `cli-0003-prepareswitch-real-phase`
+  —— **三题就是我们修过的三个回归**，oracle 分别是
+  `test-injected-message-shape.mjs`、`test-handover-drain.mjs`、`test-handover-drain.mjs`。
+- `scripts/eval-run.mjs`：`--list` / `--plan`（只打印计划、不动东西）/ `--task <前缀> --session <sid>`（真跑）。
+  判据全可机验：seed ⇒ oracle 变红（复用 `eval-validate` 同段代码）→ 发题面 → 轮询到 `running=false`
+  （**超预算即失败**）→ oracle 由红转绿 + `regression`（check:all）绿；记账 steps/tokens/墙钟 + `git diff --stat`。
+- `--prepare/--restore` 字节级备份 + sha256（`eval-validate.mjs`）。
+
+**⬜ 剩下的一步**：
+- **`--plan` 已验；真跑那条路径还没跑过一次**（`eval-run.mjs` 头注里作者自己标了）。
+  ⇒ 建议先 `--plan` 复核 → 挑 `cli-0001` 在**专门的分叉会话**上真跑一次 → 看 delta 报告是否成型。
 
 **复用点**（别重造）：
 - 起挑战者：`packages/switchboard/src/spawner.ts`；只读沙箱：profile 已有 `sandbox: read-only`
   （`out/profile-dump.txt:114`）与 `dsh-fs-sandbox` / `dsh-sandbox-windows-acl`。
-- 把结论接成闸：`tool_apply(verify=…)` + `VERIFY_ALLOW`（**M2 就是它**，今天已存在）。
+- 把结论接成闸：`tool_apply(verify=…)` + `VERIFY_ALLOW`（**M2 就是它**，已存在）。
 - 驱动会话：`scripts/session-drive.mjs prompt <id> "<text>"`（走前门 RPC，已实测可用）。
 
-**注意**（本轮踩过的）：
+**注意**（累积）：
 - 单臂基线也要先记账：先量"现行自己在预算内能不能修好这题"，否则没有对照。
 - 沙箱/工作区必须隔离：Agent 会改文件；实验起点必须可重置（否则两次不可比）。
 - 别把期望答案放进 Agent 能读的地方（判据要在它够不到的位置）。
+- **真跑会往你指定的会话里写记录、消耗 token** ⇒ 必须显式传 `--session`，别拿在用的会话试。
 
 ---
 
