@@ -198,7 +198,14 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
    - `wsl.exe -d Ubuntu-24.04` → **`Wsl/Service/HCS_E_CONNECTION_TIMEOUT`**（列表显示 Running 但连不上）。
    ⇒ **结论：这个"干净下界"在当前已发布载体上不可达** ⇒ 要用它得**从源码构建 DSH**，或等发布对齐。
    （替代做法：**先静态引用 §1.1.1 的 46 字符**，那个已被上游自测钉死；动态复现留到源码构建之后。）
-2. **离线编译一次 VeRO**（`uv` 与 Docker 都在，编译**不需要凭据**）。
+2. ✅ **离线编译一次 VeRO**（`uv` 与 Docker 都在，编译**不需要凭据**）—— **已做，结果见
+   `docs/vero-integration-findings.md`**。三条关键结论：
+   · **`command` 后端语言无关 ⇒ 可以是本地 Node/CLI，且不用容器**（我们自己的 node oracle 可直接当 evaluator）；
+   · ⚠️ **但它在 Windows 上直接失败**（`LocalSandbox` 的 POSIX 假设），而在 Windows 上真能用的
+     `DockerSandbox` **没被接到 CLI**（`vero optimize` 无 `--sandbox` 选项）；
+   · ⇒ **和上游 `minimal` 卡在同一处：我们需要一个 POSIX 底座**（WSL 或 Linux 容器）。
+   **`uv sync --all-extras` 会卡死**（litellm 的 sdist 要拉 Rust 工具链）；用
+   **`uv sync --extra harbor --no-dev`** + **`uv run --no-sync …`** 绕过。
 3. **之后**才谈 cli-0007 要不要写（很可能被 §3.1 的声明式梯度或 §3.2 的"承认耦合"路线取代）。
 
 

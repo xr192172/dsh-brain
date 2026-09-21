@@ -182,6 +182,13 @@
   只能在 `native` 模式下做；或在 code 模式下直接问"这 39 800 字符换来了什么"。
   **★ 上游 `minimal` 的 system prompt = 那一句 persona，仅 46 字符**（上游自测断言"逐字等于环境变量那句话"）；
   而我们自制的下界臂是 **39 605** ⇒ **差 ≈860 倍 ⇒ 自制下界臂不干净，梯度要重建**。
+- ★★ **`docs/vero-integration-findings.md` —— "VeRO 能不能接 DSH"的实测摸底（2026-09-21）**：
+  **`command` 后端语言无关**（target = 干净 Git 仓库 + target 外的 `harness_root`；argv 占位符 + schema-1 JSON；
+  **我们自己的 node oracle 可直接当 evaluator，且不用容器**）；
+  **隔离是真的**（`docker run` **只有** `--detach --rm --workdir`、**无 bind mount**；推理网关按 scope 限预算）；
+  ⚠️ **20/40/40 的"不可变"不是代码强制**（代码只强制"partitions ⊆ manifest"；`ratios`/`partition_digest` 只在生成脚本里）；
+  ⚠️ **Windows 是硬阻塞**（`LocalSandbox` POSIX 假设 ⇒ `/tmp` 被解析成 `D:\tmp`；能用的 `DockerSandbox` **未接到 CLI**）
+  ⇒ **与上游 `minimal` 卡在同一处：需要一个 POSIX 底座**。
 - `docs/eval-discrimination-plan.md` —— cli-0005 为什么零区分度（含 **S4：判据可读 ⇒ 难度折价**）+ cli-0007 设计稿
   + **步 0 结果**（行为面叶子工具直方图：两臂 `byTool` 同形但叶子层分化）。
 

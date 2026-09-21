@@ -39,7 +39,11 @@
   1. **Development**：逐例反馈（per-case feedback）；
   2. **Validation**：**只给聚合分**；
   3. **Test**：**只有最终 evaluator 才能看到**用例与结果。
-  切分钉死为 **20% / 40% / 40%**，写在 `baseline/build.yaml`（"that file is the source of truth"）。
+  切分 **20% / 40% / 40%**，写在 `baseline/build.yaml`（"that file is the source of truth"）。
+  ⚠️ **2026-09-21 实测更正**：**"不可变"不是代码强制的** ——
+  代码层真正强制的只有"**partitions 引用的 case 必须在 manifest 里**"；
+  `ratios` 与 `partition_digest` 在 `src/` 里**零命中**（只出现在生成脚本中）⇒ 靠"由 seed 确定性重生成 + 流程规则"。
+  **详见 `docs/vero-integration-findings.md` §1.3。**
 - **现成 benchmark（4 套，同一结构）**：GAIA / OfficeQA / BrowseComp-Plus / **Terminal-Bench 2.1**；
   每套 = `target/`（**可被优化器编辑的 seed harness**）+ `partitions/`（钉住的 dev/val/test 用例 id）+ `baseline/build.yaml`。
   GAIA 的论文变体用 `target-shell/`（**故意极简的起点**）而不是 `target/`。
@@ -103,7 +107,7 @@
 | 层 | 内容 | 2026 年开源状态 | 我们要不要自造 |
 |---|---|---|---|
 | **L1 题库** | 任务与用例 | **成熟且很多**（Terminal-Bench 2.1 / SWE-bench / BFCL / MCP-Atlas / GAIA…） | ❌ 已用（`agent-eval-arenas.md`） |
-| **L2 隔离与拆档** | evaluator 拥有 case+评分、在沙箱外；dev/val/test 不可变；预算由网关计量 | ★ **已做完**（VeRO，MIT，`20/40/40`，`build.yaml` 为唯一真相） | ❌ **不该自造**（我们这里还违规了，见下） |
+| **L2 隔离与拆档** | evaluator 拥有 case+评分、在沙箱外；dev/val/test 拆档；预算由网关计量 | ★ **已做完**（VeRO，MIT；无 bind-mount 沙箱 + 推理网关预算 + 三 scope；**20/40/40 是流程纪律而非代码强制** —— 见 `docs/vero-integration-findings.md`） | ❌ **不该自造**（我们这里还违规了，见下） |
 | **L3 循环** | version → evaluate → select，保留每个候选，Git 版本化 | ★ **已做完**（VeRO 的 version/evaluate/select + Git worktree + sandbox） | ❌ 不该自造 |
 | **L4 自变量** | 「**工具集/装配树**」开/关（profile 变体）；上游 `minimal` 模式 | **没有**（VeRO 的 target 是"可编辑的 harness"，不是"装配开关"；上游只有 minimal 这一个定点） | ✅ **只有我们有** |
 | **L5 题源与判据** | 来自**我们真实修过的回归**的冻结任务 + 我们已有的门当 `FAIL_TO_PASS` | **没有**（通用榜对我们饱和、且污染） | ✅ **只有我们有** |
