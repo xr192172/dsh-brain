@@ -13,6 +13,9 @@
 1. **Bash 工具 PATH 被破坏**：调用开头先
    `export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin:/c/Program Files/nodejs:/c/Program Files/Git/cmd"`。
 2. **PowerShell stdout 被吞**：结果写文件再用 Read 读。
+   **★ 且从 Bash/node 里 `spawnSync('powershell')` 是 `ENOENT`（PATH 无 `WindowsPowerShell\v1.0`），
+   命令里出现该字样还会被安全策略直接拦** ⇒ **自动化脚本一律别依赖进程表那类 PS 通道**
+   （改用**纯文件**通道，如 `scripts/probe-gen-boot.mjs` 读 boot.log）。
 3. **不能在工具内起长期后台服务** ⇒ **switchboard 只能由用户终端启动**：
    `cd D:\project_develop\dsh-brain && node scripts\relaunch-switchboard.mjs`
    （日志落 `out/switchboard-run.log`）。`schtasks`/`cmd start`/`Win32_Process.Create` 全被拦；
@@ -100,6 +103,18 @@
 12. **★ "看不到" ≠ "没有"**：服务缺失 / 列表为空 / 读数拿不到，**一律不得**当作正向判据。
     落地例：`drain` 的 `agentsObservable` / `sessionsObservable`（看不到 ⇒ `quiesced` 必须为 false
     ⇒ 宁可强杀旧代，也不许报"已停写"）。
+13. **★ 否定命题（"X 被关掉了/没有"）必须带一个与自变量【正交】的阳性对照**（2026-09-21 翻车实证）：
+    我拿 `self_evolve` 当"恒在对照"，它其实是 **`design-canvas-bridge` 的工具**（不是 `tool-evolution` 的）
+    ⇒ **就在被测的那一族里** ⇒ 被测臂必然归零 ⇒ 判语全废。
+    · **选对照先自问**：「我动自变量时它会不会跟着变？」会 ⇒ 不能用；
+    · **把正交性写成断言**（多臂跑完做"对照体检"：对照在**任一臂**为 0 ⇒ **前面判语全部作废**）；
+    · **对照要可换**（`--control <名>`），别硬编码；
+    · **否定读数至少要两条正交通道**（本例：请求侧工具面 × 装配侧 boot.log 痕迹）——
+      **矛盾时不许下结论，矛盾本身就是发现**。
+14. **★ 通道"不可用" ≠ 读数"为 0"**：调不到的工具/服务返回 `null`，**不许当 0 参与判定**
+    （本机 PS 通道恒不可用 ⇒ 若当 0 数就会得出"进程不存在"的假阳性）。
+    且 **append-only 日志（`boot.log`）必须只读末段**（分隔符 `===== BOOT … =====`）——
+    陈旧段会让**阳性臂被谎报成"起来了"**。
 18. **★ 判据要证明"修复真的在起作用" ⇒ 用【消融自证】：撤掉修复，判据必须变红**（2026-09-21 定型）：
     · 光"写了测试且它通过"**不够** —— 那可能是**测试与被检对象一起错**。
     · 强的形式：**逐个撤回补丁 ⇒ 对应断言必须变红**。

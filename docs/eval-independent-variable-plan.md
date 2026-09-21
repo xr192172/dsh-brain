@@ -24,13 +24,15 @@
 
 | 来源 | 工具数 |
 |---|---|
-| `design-canvas`（其中 `mcp__*` **64**） | **67** |
-| `self_evolve` | 1 |
+| `design-canvas`（其中 `mcp__*` **64**） | **67** ← 实为 **72**：64(MCP) + **8**(bridge)，见 §2.3 的勘误表 |
+| `self_evolve` | 1 ← ✗ **归属记错了**：它是 `design-canvas-bridge` 的，见 §2.3 |
 | `capability-bridge`（`list_capabilities` / `capability_report`） | **2** |
 | `subagent-council`（`council_architect`） | **1** |
 
 ⇒ **除 `design-canvas` 外，"某个能力开/关"能造的反差都只有 1–2 个工具** ⇒ **量级太小，测不出东西。**
 ⇒ **而 `design-canvas` 正是不可用的那个**（未完成 + `kernelDir` 不匹配 + MCP 迟到挂载 —— 见 §6 来源文档）。
+> ⚠️ 上面这张表是**当时**的读数，含两处错（`design-canvas` 少算 5、`self_evolve` 认错归属）。
+> 勘误见 §2.3，**以 §2.3/§2.1 的表为准**。
 
 ---
 
@@ -42,33 +44,143 @@
 2. **它才是"我们这一层"的直接变量** —— 也正是一开始那句「**变量不就是工具数量吗**」的字面实现；
 3. **它绕开了"能力完成度"这个坑**：不需要所涉能力"已完成"，只需要**能可靠地关掉一批工具**。
 
-**⇒ 而唯一的大旋钮是 `mcp__*` 那 64 个**（来自 `design-canvas` 的独立 MCP server）。
+**⇒ 而唯一的大旋钮是 `design-canvas` 那 72 个**（64 走 MCP + 8 走 bridge）。
 ⇒ **所以真正的前置问题变成了**：
 
 > **怎么【可靠地】关掉一个能力挂在工具面上的工具？**
 
-已知它**至少三条路**（`task-bank-thinking.md` §5 已记）：
-`dsh.profile.bundles` / profile 里的 **`mcp-client` insert** / **独立 MCP server 进程**。
-⇒ **只 drop bundle 关不掉**（实测：`exp-base-nodc` 仍有 `mcp__design-canvas__*`，且今天又发现 **MCP server 会迟到挂载**）。
-⇒ ★ **我刚加的"稳定窗口"只解决"等它稳"，不解决"关掉它"** —— **两者不同**，别混。
+~~已知它**至少三条路**~~ ⇒ **实为【两条】路**（2026-09-21 实测更正，见 §2.1）：
+`dsh.profile.bundles`（连带的包内 patch）/ profile 里的 **`mcp-client` insert**。
+**"独立 MCP server 进程"不是第三条路，是第二条路的产物。**
+⇒ **只 drop bundle 关不掉**（实测：`exp-base-nodc` 早期仍有 `mcp__design-canvas__*`，且 MCP server 会**迟到挂载**）。
+⇒ ★ "稳定窗口"只解决"**等它稳**"，不解决"**关掉它**" —— **两者不同**，别混。
+
 
 ---
 
 ## 2. 修正后的执行顺序
 
-1. **先解决"怎么可靠地关掉一批工具"**（← **这是自变量的真前置**）：
-   - 查清 MCP 工具的三条挂载路径，找到**能同时断掉三条**的旋钮（或证明只能断两条 ⇒ 如实记录）；
-   - 判据：**换代后工具面里该家族【为 0】**，且**连续 N 次采样都为 0**（复用 `stableWindow`，防迟到挂载）；
-2. **再定梯度**（例如 `mcp__*` 全开 / 全关 / 开一半）；
+1. ~~**先解决"怎么可靠地关掉一批工具"**~~ ✅ **已解决，见 §2.1**
+2. **再定梯度**（例如 `mcp__*` 全开 / 全关 / 开一半）← **当前在这**
 3. **配一道"会用得上被关掉那批工具"的题** ⇒ 否则关了也没差别 ⇒ 那样定出来的自变量仍是"某两种配置的成本差"。
 
-> 背景：`docs/task-bank-thinking.md` §6 判定「自变量（能力开/关）的效度还不成立」，§8 把它列为**第 1 优先级**
-> （"没有它，后面全是空转"）。本文就是它的第一步：**把自变量定下来，并给出配对的题**。
->
-> 一句话结论：**自变量 = `@dsh-brain/subagent-council` 的开/关**（摘 bundle ⇒ 它注册的**三个 provider 全没**
-> ⇒ 委派能力整体关闭）；**配对题 = 一道"必须多视角 + 对抗性检查"的题**（新题 `cli-0006`）。
+### 2.1 ✅ 「可靠地关掉一批工具」已解决（2026-09-21 实测坐实）
+
+> ★ **臂名以 canonical 为准**：本方向的两臂是 **`exp-base`（开） / `exp-base-nodc`（关）**
+> （见 `topics/next-task-handover.md` 的 eval 回执）。
+> 本段先用 `web` / `web-nodc` 验证机制（现役 `web` 就是 `exp-base` 的来源，两者配置**逐字节相同**：
+> bundles 相同、`cordis.patch.yml` 相同），随后**用 canonical 两臂复跑，数字完全一致**：
+> `exp-base` **102** ↔ `exp-base-nodc` **30**（gen-3113/3114/3115，各 3 次采样）。
+> ⚠️ 我临时造的 `web-nodc` **已退役并删除**（它是 `exp-base-nodc` 的**逐字节重复**，
+> 且该名字被另一会话标记过"已作废"⇒ 留着就是给后人挖坑）。删除前已逐字比对确认它与 `exp-base-nodc` 相同，
+> 因此**不留副本、无需重建**（要重建就是 §2.1 那条命令）。
+
+**旋钮**（一个命令，可复跑）：
+
+```bash
+node scripts/make-profile-variant.mjs --from web --to exp-base-nodc \
+     --drop @dsh-brain/design-canvas-bridge \   # 断①「包」这条路
+     --drop-insert mcp-client                   # 断②「profile 的 - insert」这条路
+```
+
+**两条路的真相**（此前记的"三条"是把**产物**当成了路）：
+
+| # | 路 | 断它的旋钮 | 提供什么 |
+|---|---|---|---|
+| ① | `dependencies` + `dsh.profile.bundles` 里的 `@dsh-brain/design-canvas-bridge` | `--drop` | **bridge 的 8 个工具**（本包自己的 `cordis.patch.yml` 随之装配） |
+| ② | profile 的 `cordis.patch.yml` 里 `- insert: id: mcp-client` | `--drop-insert mcp-client` | **64 个 `mcp__design-canvas__*`** |
+| ③ | 「独立 MCP server 进程」 | — | **不是一条独立的路**，是②的**产物**（②在，server 才被拉起） |
+
+**四条判据，全部为真**：
+
+| 通道 | 开（`exp-base`） | 关（`exp-base-nodc`） | 依据 |
+|---|---|---|---|
+| ① **请求侧**工具面（`request/header.tools[]`） | **102**（design-canvas 67 / mcp 64） | **30**（design-canvas 0 / mcp 0） | 3 次采样全一致，窗口 10s |
+| ② **装配侧** boot.log（末段） | bridge apply=1、MCP server started=1、**7 行"已注册"** | **全 0** | `scripts/probe-gen-boot.mjs` |
+| ③ 装载树（离线 `--profile X --dump-config`） | 575 行 | 548 行 | diff **只差那两条 entry**，逐字无其它改动 |
+| ④ 健康性（防"关掉"与"坏了"混淆） | plugin-tree-failed=0 / dupId=0 / startup-error=0 | **同样全 0** | ⇒ 是**干净地少**，不是**坏掉** |
+
+**★ 数量守恒（这条判据自己会说话）**：
+
+```
+102 − 30 = 72
+72 = 64（路②）+ 8（路①，boot.log 逐行点名的 7 个 + 无日志的 design_canvas_index）
+⇒ 两条路合计**正好**覆盖全部差量，**无残留**
+```
+
+**可复现性**：`exp-base ↔ exp-base-nodc`（gen-3113/3114/3115）与 `web ↔ web-nodc`（gen-3105…3110，两轮）
+**两组共五腿**，102 ↔ 30 **全部完全复现**，无一次振荡。
+
+
+### 2.2 ★★ 过程中翻的一个车：**阳性对照选错了**（必须记住）
+
+第一版探针拿 `self_evolve` 当"恒在的阳性对照"，结果它在**被测臂里也归零了** ⇒ 脚本只能判"不可采信"。
+
+**根因**：`self_evolve` **根本不是 `tool-evolution` 的工具**，而是 **`design-canvas-bridge` 的 8 个工具之一**
+（`src/index.ts:633`）。⇒ **它就在被关掉的那一族里**，当对照等于"拿体温计量自己的体温"。
+
+**⇒ 规则（已写进 `arm-probe.mjs` 文件头与 `gate-authoring` skill）**：
+
+> **阳性对照族必须与本次自变量【正交】** —— 即"你不动它，它就在"。
+> 否则"读数可见"这件事本身就没被证明，"全 0"仍然只是"看不到"。
+
+**已修**：
+- 默认对照改为 `subagent`（`subagent-council` 的产物，关 design-canvas 时恒为 3）；
+- 支持 `--control <族名>`；
+- 多臂时新增**对照体检**：对照族在**每一臂**都必须非 0，否则直接宣告"前面的判语作废，换对照族重跑"。
+
+### 2.3 已知限制（如实记）
+
+
+- `--samples` / `--interval` / `--control` 是**全局**的（对所有臂生效）；给不同臂不同采样数要分开跑。
+- `arm-probe --proc <kw>`（进程通道）在 **Agent 的 Bash 沙箱里调不到 PowerShell**（`spawn ENOENT`，
+  且命令里出现相关字样还会被安全策略拦）⇒ 该通道在自动化里**不可用**；
+  已改为**显式报"不可用"而不是报"没有"**（否则又是一个假绿）。
+  真正顶替它的是**通道② boot.log** —— 纯文件、不需要任何外部 shell。
+- `boot.log` **跨启动累积**（分隔符 `===== BOOT gen=… =====`）⇒ 必须**只数末段**。
+  实测 gen-3105 的 boot.log 有两段，**第一段是前一天一次失败的启动**（`MODULE_NOT_FOUND`）；
+  整篇一起数会把**阳性臂谎报成"起来了"**。
+- **`self_evolve` 的归属此前记错了**：长期记忆里写在 `tool-evolution` 名下 —— 实际是
+  `design-canvas-bridge` 的。各包**真实**工具体量（2026-09-21 从源码核出）：
+
+  | 包 | 工具数 | 名字 |
+  |---|---|---|
+  | `design-canvas-bridge` | **8** | `design_canvas_index` / `design_canvas_prewarm` / `design_canvas_prewarm_scan` / `memory_observe` / `move_symbol` / `safe_rename` / `symbol_edit` / `self_evolve` |
+  | `tool-evolution` | 1 | `tool_score` |
+  | `capability-bridge` | 2 | `list_capabilities` / `capability_report` |
+  | `subagent-council` | 0（注册 **provider**） | 产物是上游的 `subagent` / `subagent_fork` + 自己的 `council_architect` |
+  | MCP（`mcp-client` insert） | **64** | `mcp__design-canvas__*` |
 
 ---
+
+## 2.4 下一步：定梯度（三个旋钮位，四个点）
+
+同一个旋钮家族可以给出**四个**可复跑的配置：
+
+| 级别 | 怎么造 | 工具面 | 备注 |
+|---|---|---|---|
+| **L0 全关** | `--drop design-canvas-bridge --drop-insert mcp-client`（= `exp-base-nodc`） | **30** | ✅ 已造并坐实 |
+| **L1 只 bridge** | `--drop-insert mcp-client` | 38 | 8 个 bridge 工具在，但它们的执行端（MCP）没了 ⇒ **工具"在"但多半调不通** |
+| **L2 只 MCP** | `--drop design-canvas-bridge` | 94 | 64 个 MCP 工具在，少了本地编排/索引封装 |
+| **L3 全开** | 直接用 `exp-base`（≡ `web`） | **102** | ✅ 已坐实 |
+
+**★ 主对比用 L0 vs L3（干净）**：一整块能力（design-canvas）整体开/关，语义清楚。
+**L1 / L2 是"梯度补充"，必须标注 confound**：它们把**同一个能力的两半**拆开，
+所以"少 64 个"≠"少一份能力"，而是"少了执行端"（或反之）⇒ 会与"能力完整性"混淆。
+⇒ 若目标是"**工具数量** → 表现"的函数关系，L1/L2 有价值；若目标是"**能力有无**"，只用 L0/L3。
+
+## 3. 再下一步：配一道"会用得上被关掉那批工具"的题
+
+**约束（来自 §A.3 的教训，别忘）**：design-canvas 的工具**大多可被 grep + edit 手工替代**
+⇒ 关掉后**不是"做不到"，只是"更贵/更易错"** ⇒ 判据必须**同时**有：
+- **行为面**：轨迹里该家族工具的实际调用次数（关的臂必然为 0）；
+- **成本面**：`toolCalls` / `tokens` / `wallMs`（关的臂应显著上涨）；
+- **质量面**：产物正确性（关的臂应更容易漏改 / 漏引用）；
+⇒ **区分度主要来自成本面与质量面**，不是"能不能做"。
+
+**题面方向（待落盘）**：拿一个**索引工具才划算**的仓库（文件多、跨文件引用密），
+要求"做一次跨文件重构 + 报出完整影响面"—— 手工 grep 会**成本爆炸且易漏**，
+而有 `find_references` / `impact_analysis` / `rename_symbols` 时是**一次调用**。
 
 ---
 

@@ -1,3 +1,44 @@
+## ★ 实验台回执（2026-09-21 05:0x）—— 自变量前置**已完成**：工具面可被可靠地开/关
+
+> 新增段（放在最顶，便于接手先读）。完整版：`docs/eval-independent-variable-plan.md` §2.1–§2.4。
+
+**一句话**：上一条 §3.D 之前卡着的**自变量前置（"怎么可靠地关掉一批工具"）已坐实**，
+且是**两条路一起断**、**四条判据全真**、**数量守恒无残留**、**五个来回全复现**。
+
+| 项 | 值 |
+|---|---|
+| canonical 两臂 | **`exp-base`（开） / `exp-base-nodc`（关）** |
+| 工具面 | **102 ↔ 30**（design-canvas 67↔0，其中 `mcp__*` 64↔0） |
+| 健康性 | 关的臂 `plugin-tree-failed=0 / dupId=0 / startup-error=0` ⇒ **干净地少，不是坏了** |
+| 数量守恒 | `102−30 = 72 = 64（mcp-client insert 路）+ 8（bridge bundle 路）` ⇒ **无残留** |
+| 离线可查 | `--profile exp-base --dump-config` **575 行** vs `exp-base-nodc` **548 行**，diff 只差那两条 entry |
+
+**两条路（此前记的"三条"是把产物当成了路）**：
+① `dsh.profile.bundles` 的 `@dsh-brain/design-canvas-bridge`（`--drop`）；
+② profile `cordis.patch.yml` 的 `- insert: id: mcp-client`（`--drop-insert mcp-client`）。
+**"独立 MCP server 进程"是②的产物，不是第三条路。**
+
+**新工具**（已在 `main` 上）：
+`scripts/probe-gen-boot.mjs`（装配侧痕迹＝第二通道）、`scripts/diff-arm-toolsets.mjs`（逐**名**比工具面）、
+`scripts/probe-node-procs.mjs`（进程通道，**本机 Agent shell 里不可用**，见下）、
+`scripts/arm-probe.mjs` 大改（`--samples/--interval` 多次采样 + **同窗口阳性对照** + `--control` + **对照体检**）。
+
+**★ 两条新纪律（已写进 `MEMORY.md` 铁律 #13/#14 与 `gate-authoring` skill）**：
+1. **否定命题的阳性对照必须与自变量【正交】** —— 我第一版拿 `self_evolve` 当"恒在对照"，
+   它其实是 **`design-canvas-bridge` 的工具**（不是 `tool-evolution` 的）⇒ 就在被测族里 ⇒ 判语全废。
+   现在：多臂跑完自动做**对照体检**（对照在任一臂为 0 ⇒ 宣告前面判语全部作废）。
+2. **通道"不可用" ≠ 读数"为 0"**；且 **append-only 的 `boot.log` 必须只读末段**
+   （`===== BOOT … =====` 分隔）—— 陈旧段会让**阳性臂被谎报成"起来了"**。
+
+**清理**：我临时造的 `web-nodc` 与 `exp-base-nodc` **逐字节相同**、且该名字被 §1 标过"已作废"
+⇒ 已按安全步骤删除（先 `rmdir` 只摘 junction，再删目录；已核验 `web/node_modules` 完好），**请勿复用该名字**。
+
+**⏭ 下一项（本方向）**：`docs/eval-independent-variable-plan.md` **§2.4 定梯度**（L0=30 / L1=38 / L2=94 / L3=102；
+**主对比用 L0 vs L3**）→ **§3 配题**（判据必须**行为面 + 成本面 + 质量面**三条，
+因为 design-canvas 的工具**大多可被 grep+edit 手工替代** ⇒ 关掉是"更贵/更易错"，不是"做不到"）。
+
+---
+
 # 接手指南（**回执** + 下一项）—— 2026-09-20 15:15（§3.B **已实现并跑通第一对**；下一项 §3.D）
 
 > **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。

@@ -51,8 +51,13 @@ if (argv.includes('--list')) {
 
 const from = argOf('--from')
 const to = argOf('--to')
-if (!from || !to || !drops.length) {
-  console.error('用法: --from <src> --to <dst> --drop <包名> [--drop …] [--force]')
+if (!from || !to || (!drops.length && !dropInserts.length)) {
+  console.error(
+    '用法: --from <src> --to <dst> (--drop <包名> | --drop-insert <loader-id>) […] [--force]\n' +
+      '  --drop         从 dependencies + dsh.profile.bundles 里摘掉包（断①「包」这条路）\n' +
+      '  --drop-insert  从 profile 的 cordis.patch.yml 里删掉某个 `- insert:` 条目（断②「profile insert」这条路）\n' +
+      '  ★ 一个能力可能【两条路都在】⇒ 两条都要断（见脚本头注释与 docs/eval-independent-variable-plan.md §1）',
+  )
   process.exit(1)
 }
 const fromDir = path.join(PROFILES, from)
@@ -108,58 +113,90 @@ if (removed.length !== drops.length * 2) {
 }
 
 // ②b 从 `cordis.patch.yml` 里删掉指定的 `- insert:` 块（行级手术；块 = `- insert:` 到下一个**顶格**行为止）
+/**
+ * 把一个 YAML 顶层数组切成若干「块」。每块 = 一条以顶格 `-` 开头的条目，
+ * 到下一个顶格行为止。这里只关心 `- insert:` 这种块。
+ * ★ 2026-09-21 修 bug：旧实现用 `findIndex` 拿**第一个** `- insert:` 块 ⇒
+ * 一旦 profile 里出现**第二个** `- insert:`（很自然会发生在加第二个 MCP 时），
+ * `--drop-insert` 就会去删第一个块里的 id ⇒ 目标没删掉、还误报"块里没有该 id"。
+ * 现在改成「**按 id 找到它所属的那个块**」。
+ */
+function findInsertBlocks(lines) {
+  const heads = []
+  for (let i = 0; i < lines.length; i++) if (/^-\s*insert:\s*$/.test(lines[i])) heads.push(i)
+  return heads.map((i0) => {
+    let i1 = lines.length
+    for (let i = i0 + 1; i < lines.length; i++) {
+      const l = lines[i]
+      if (l.trim() === '') continue
+      if (!/^[ \t]/.test(l)) {
+        i1 = i
+        break
+      }
+    }
+    const entryStarts = []
+    for (let k = i0; k < i1; k++) {
+      const m = /^\s*-\s*id:\s*(\S+)/.exec(lines[k])
+      if (m) entryStarts.push({ k, id: m[1] })
+    }
+    return { i0, i1, entryStarts, ids: entryStarts.map((e) => e.id) }
+  })
+}
+
 if (dropInserts.length) {
   const ymlPath = path.join(toDir, 'cordis.patch.yml')
   if (!fs.existsSync(ymlPath)) {
     console.warn('  ⚠ 没有 cordis.patch.yml，--drop-insert 无从下手')
   } else {
     const lines = fs.readFileSync(ymlPath, 'utf8').split('\n')
+    const done = []
     for (const target of dropInserts) {
-      const i0 = lines.findIndex((l) => /^-\s*insert:\s*$/.test(l))
-      if (i0 < 0) {
+      // ★ 每次都**重新切块**（上一轮已经改了 lines）
+      const blocks = findInsertBlocks(lines)
+      if (!blocks.length) {
         console.warn(`  ⚠ 没找到 \`- insert:\` 块（无法删 ${target}）`)
         continue
       }
-      // 块结束 = i0 之后第一个**非空且不缩进**的行
-      let i1 = lines.length
-      for (let i = i0 + 1; i < lines.length; i++) {
-        const l = lines[i]
-        if (l.trim() === '') continue
-        if (!/^[ \t]/.test(l)) {
-          i1 = i
-          break
-        }
-      }
-      const block = lines.slice(i0, i1)
-      const entryStarts = block
-        .map((l, k) => (/^\s*-\s*id:\s*(\S+)/.exec(l) ? { k, id: /^\s*-\s*id:\s*(\S+)/.exec(l)[1] } : null))
-        .filter(Boolean)
-      const ids = entryStarts.map((e) => e.id)
-      if (!ids.includes(target)) {
-        console.warn(`  ⚠ 该 insert 块里没有 ${target}（块内 id：${ids.join(', ') || '(无)'}）`)
+      const blk = blocks.find((b) => b.ids.includes(target))
+      if (!blk) {
+        console.warn(
+          `  ⚠ 没有哪个 insert 块含 ${target}（共 ${blocks.length} 块，块内 id：` +
+            `${blocks.map((b) => '[' + (b.ids.join(', ') || '(无)') + ']').join(' ')}）`,
+        )
         continue
       }
-      if (ids.length === 1) {
+      if (blk.ids.length === 1) {
         // 只有一个条目 ⇒ 整块删掉
-        lines.splice(i0, i1 - i0)
+        lines.splice(blk.i0, blk.i1 - blk.i0)
         console.log(`  删 insert 块（整块，唯一 id=${target}）`)
       } else {
         // 多个条目 ⇒ 只删那一条（从它的 `- id:` 到下一个条目）
-        const at = entryStarts.findIndex((e) => e.id === target)
-        const from = i0 + entryStarts[at].k
-        const to = at + 1 < entryStarts.length ? i0 + entryStarts[at + 1].k : i1
+        const at = blk.entryStarts.findIndex((e) => e.id === target)
+        const from = blk.entryStarts[at].k
+        const to = at + 1 < blk.entryStarts.length ? blk.entryStarts[at + 1].k : blk.i1
         // 回退到它上面的注释/空行也算它的
         let from2 = from
-        while (from2 > i0 && /^\s*(#|$)/.test(lines[from2 - 1])) from2--
+        while (from2 > blk.i0 && /^\s*(#|$)/.test(lines[from2 - 1])) from2--
         lines.splice(from2, to - from2)
-        console.log(`  删 insert 条目（块内 ${ids.length} 条，只删 ${target}）`)
+        console.log(`  删 insert 条目（块内 ${blk.ids.length} 条，只删 ${target}）`)
       }
+      done.push(target)
     }
     fs.writeFileSync(ymlPath, lines.join('\n'), 'utf8')
-    // 自证：目标 id 必须不在了，其它 id 还在
+    // 自证①：目标 id 必须不在了（读回磁盘，不信内存）
     const after = fs.readFileSync(ymlPath, 'utf8')
     const stillThere = dropInserts.filter((d) => new RegExp(`^\\s*-\\s*id:\\s*${d}\\s*$`, 'm').test(after))
-    console.log(`  自证：目标 id 是否仍存在 = ${stillThere.length ? stillThere.join(', ') + '（✗ 没删掉）' : '无 ✓'}`)
+    console.log(`  自证①：目标 id 是否仍存在 = ${stillThere.length ? stillThere.join(', ') + '（✗ 没删掉）' : '无 ✓'}`)
+    // 自证②：**别的** insert 块不能被我误删（块数应等于 原块数 - 唯一 id 的整块删除数）
+    const afterBlocks = findInsertBlocks(after.split('\n'))
+    console.log(
+      `  自证②：剩余 insert 条目 id = ${afterBlocks.flatMap((b) => b.ids).join(', ') || '(无)'}` +
+        `（应恰好等于「原有 id 集 - ${done.join(',')}」）`,
+    )
+    // 记账：把"断了哪条 insert"写进 package.json（否则事后没人知道这个变体是怎么造的）
+    const pkg2 = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+    pkg2.dsh.profile.droppedInserts = done
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg2, null, 2) + '\n', 'utf8')
   }
 }
 
