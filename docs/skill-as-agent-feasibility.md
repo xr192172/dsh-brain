@@ -399,3 +399,94 @@ skill 声明它需要哪些工具（SkillNode.Tools，已有数据）
 - **"大大缩减长程任务的漂移"** ⚠️ **机制上说得通，但本项目还没有判据** ——
   需要一个"长程任务漂移"的可测定义（例如：同一多步任务，委派版 vs 单线程版的**步数、返工次数、最终正确率**）。
   **未设计。** 在拿到这个判据之前，"缩减漂移"只能算**有机制支撑的假设**，不是结论。
+
+---
+
+## 10. ★★★ 用户更正我的读法（2026-09-21 深夜）—— **我撤回上一轮的"同意"；你的"压缩点合入"是对的**
+
+### 10.1 先把两个定义钉死（逐字，不是我的解释）
+
+`dsh-agent-tool-presentation/README.md:5`：
+> "The row an agent preset carries to say which form of its tools the model sees:
+> **`native` (every schema)**, **`code` (only `run_code` plus a generated TypeScript SDK)**, or `both`."
+
+| 模式 | 模型看到什么 | 怎么调 | 工具知识住在哪 |
+|---|---|---|---|
+| **`native`** | **每个工具的完整 schema** | 直接 emit tool call | **`tools` 字段** |
+| **`code`** | **只有 `run_code`** + 一个**生成的 TypeScript SDK** | 写代码，在 `run_code` 里调 | **`system` 里的 SDK section** |
+
+补充事实：
+- **presentation 是 per-agent 的**：`ctx.tools.presentAs()` "declares it for the mounting agent alone,
+  so a Code Mode session runs beside native ones in one process, **each seeing its own catalog**"（`:9`）
+  ⇒ ★ **主体走 `code`、分身走 `native` 是允许的。**
+- 但**一个 agent 只能声明一种**：`:19` "**One agent declares one presentation.** A second declaration in the same composition is refused rather than merged"。
+- 我们 preset 里的对应关系（`scripts/make-council-preset.mjs` 头部注释）：
+  **`standard` = native**；**`code` = `standard` + 一行 `tool-presentation`** —— 那一行就是 Code Mode。
+
+### 10.2 「code 模式一定要渲染进 system 吗？」—— **是，而且是它的定义所迫**
+
+`:23` 逐字：
+> "`code` presents `run_code` plus **a generated SDK section** and the rule that only `run_code` may be called directly"
+> "…under `code` the registry resolves **a model-direct call naming any other tool to `UNKNOWN_TOOL`**, so this row is what keeps
+> **the announced surface and the callable surface the same**"
+
+两条推论：
+1. **必须进文本**：既然模型**只能直接调 `run_code`**，其余工具就**不能出现在 `tools` 字段** ⇒ 它们在 prompt 里的唯一去处是**文本**；
+   而文本要么进 `system`（稳定），要么进消息（每步变）⇒ 上游选了 `system` 的一个 section。
+2. ★ **`code` 模式下"尾部注入告知"是调不动的**：模型直接调那个名字会得到 **`UNKNOWN_TOOL`**。
+   要真能调，它必须进 SDK 段 ⇒ **必然改 `system`** ⇒ 与我们实测一致（79405 vs 39605，净差 39284 ≈ **98.7% 是工具目录**）。
+
+### 10.3 ★★ 我上一轮的"同意撤回"**要撤回** —— 你的"压缩点合入"是对的
+
+**上游的设计前提（`:27` 逐字）：**
+> "**No direct invalidation; the presentation is fixed when the agent is composed, so its request prefix is stable for the session's life.**"
+
+⇒ 上游**刻意让脸在整个会话生命周期固定不变**，目的正是保住前缀。
+⇒ **"中途改脸"是上游刻意避免的事**；**你的方案把"改脸"限制到唯一不付代价的时刻 —— 方向与上游一致**，
+只是把"永不改"放宽为"**只在压缩点改**"。**⇒ 你的两段式（先尾部、压缩点合入）成立，我错了。**
+
+**我错在哪（这条是真正的原因，也是本次最重要的更正）：**
+
+我上一轮说"装载已经近乎免费（97%），所以不需要压缩点对齐"——**那只算了"子代刚出生时装载"**：那时消息段 ≈ 0。
+**但装载如果发生在子代跑了很久之后，代价不是"消息段很小"，而是丢掉【子代自己已经积累的全部消息】：**
+
+```
+[system][旧工具][★新工具][子代已积累的消息 ……]
+                    ↑ LCP 断在这里 ⇒ 后面那一大段消息【全部重算】
+```
+
+⇒ **代价 = 子代当时的消息总量，随它的寿命增长。**
+⇒ ★★ **只有压缩点没有这笔账** —— 因为**压缩本来就要把那段消息替换成摘要**，前缀**无论如何都要重写一次**。
+⇒ **⇒ 在压缩点把尾部声明折进 `system` 是【真·免费】。你的直觉对，我上一轮的"画蛇添足"结论作废。**
+
+### 10.4 但有一条必须同时说清：**"零代价"与"立刻能调"对【原生工具】不能兼得**
+
+| 增量形态 | 尾部注入后**能不能立刻真调** | 成本 |
+|---|---|---|
+| **指令 + 已有 dispatcher**（`run_code`/`bash`，即 skill 形态） | ✅ **能**（dispatcher 本来就在脸上） | **0** |
+| **原生工具 schema** | ❌ **不能**（`tools` 里没有它） | 要么**立刻加** ⇒ 按"已积累消息量"付费；要么**等到压缩点** ⇒ 合入前调不动 |
+
+⇒ **⇒ 设计规则**：
+1. **优先让增量走"指令 + 已有 dispatcher"** —— 零代价 **且** 立刻可用（这是你"就像注入了一个 skill"的字面形态）。
+2. **确需原生工具**时，**把"合入 `system`"安排到压缩点**（唯一免费时刻），并接受"合入前不能直接调"，
+   或选择"立刻加 schema 到工具列表末尾"并接受重算子代已积累的消息段。
+
+### 10.5 「子 agent 自己做一套新的注入系统，全都往后面」—— **能，而且上游已有现成范式**
+
+★ **`skill` 的 catalog 就是"尾部的、可替换的、渐进披露的注入通道"**（`dsh-tool-skill/README.md:16,18`）：
+- 它是 **durable user-role 消息**（**不是 schema**），且**只带 `name` + `description`**；
+- 变化时**追加一条完整的替换消息**（同一个 `<available_skills>` 信封），空替换显式作废旧名字；
+- 正文**按需装入**（`skill` 工具调用时）⇒ **"摘要常驻 + 正文按需"**。
+
+⇒ **所以分身的"自己的注入系统"不需要发明**：仿这个形态即可 ——
+**一个 child-scoped 的 catalog 消息（尾部、可替换）承载"我现在会什么"，
+需要正文时再装入，而"硬脸"（`tools`/SDK section）只在压缩点更新。**
+
+### 10.6 未闭合（本轮新增）
+
+1. **"压缩点合入 `system`"的落地钩子**：写 system 的只能是**装配层**（§2 结论不变），所以"压缩点合入"=
+   **一个 child-scoped 的装配贡献 + 一个"是否已过压缩点"的判据**（读该子代的压缩计数/`surfaceOp` 事件）。
+   **触发条件的实现未设计。**
+2. **`code` 模式下 SDK 段会因注册变化而重生成** ⇒ 在 `code` 模式下"压缩点合入"**价值最大**（那是唯一免费时刻）；
+   在 `native` 模式下"出生时追加"也已足够便宜。**两种模式的最优策略不同，未做对照实验。**
+3. **子代能否自己选 presentation**（`presentAs` 是 per-agent，但子代是否被允许声明与父代不同）—— **未验证**。
