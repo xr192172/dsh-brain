@@ -350,6 +350,31 @@ if (has('--list')) {
 
 const taskId = argOf('--task')
 // 允许**唯一前缀**（`--task cli-0002` 就够，不用敲全 id）
+// ── `--self-test-stable`：稳定窗口判据的两方向自测（不碰栈、不跑题）────────────────
+// ★ 必须放在 `--task` 校验【之前】——否则会先被"--task 必填"挡掉（2026-09-21 实测踩过）。
+if (has('--self-test-stable')) {
+  const cases = [
+    ['绿 连续 3 次完全相同', ['a|b', 'a|b', 'a|b'], 3, true],
+    ['绿 末尾连续 3 次（前面在变）', ['x', 'x|y', 'a|b', 'a|b', 'a|b'], 3, true],
+    ['红 ★迟到挂载的形状：稳定后突然多一个工具', ['a|b', 'a|b', 'a|b', 'a|b|c'], 3, false],
+    ['红 ★数量相同但成员变了（比集合不比数量）', ['a|b', 'a|c', 'a|d'], 3, false],
+    ['红 末尾只有 2 次相同（不够窗口）', ['a|b', 'a|b'], 3, false],
+    ['红 空序列', [], 3, false],
+    ['红 一直不稳定', ['p', 'q', 'r', 's'], 3, false],
+    ['绿 need=2 时两次即稳', ['a|b', 'a|b'], 2, true],
+  ]
+  let bad = 0
+  for (const [name, keys, need, want] of cases) {
+    const got = stableWindow(keys, need)
+    const ok = got.stable === want
+    if (!ok) bad++
+    console.log(`  ${ok ? '✓' : '✗'} ${name}  keys=${JSON.stringify(keys)} need=${need} ⇒ stable=${got.stable} (run=${got.run})${ok ? '' : ` ★期望 ${want}`}`)
+  }
+  console.log('')
+  console.log(`  ${cases.length - bad} 通过 / ${bad} 失败`)
+  process.exit(bad ? 1 : 0)
+}
+
 const exact = tasks.find((t) => t.id === taskId)
 const prefix = taskId ? tasks.filter((t) => t.id.startsWith(taskId)) : []
 if (!exact && prefix.length > 1) {
@@ -845,10 +870,45 @@ const PROFILE_EXPECT = {
 }
 
 /**
+ * **稳定窗口判据（纯函数，可两方向自测）** —— 给定采样到的工具面"指纹"序列，判断是否已经稳定。
+ *
+ * ## 为什么需要（2026-09-21 实测）
+ *
+ * 旧 `waitArmReady` **第一次满足条件就放行** ⇒ 漏掉了 **MCP 工具的迟到挂载**：
+ * `exp-base-nodc` 摘掉的是 **`design-canvas-bridge` 插件**（指纹 `designCanvasBridge=0` ✓），
+ * 但 **design-canvas 的 MCP server 是独立进程**（boot.log: `[design-canvas v0.1.3] MCP server started (stdio)`）
+ * ⇒ 它**迟到启动后把工具挂上来** ⇒ 探测量到 30 个就放行，**跑中变成 76 个**
+ * （实测 B 第 1 轮：`explore_code`×12 / `edit_code`×8 / `safe_rename`×2 —— 臂隔离实际失败了）。
+ *
+ * ## 判据（关键：比【集合】，不是比【数量】）
+ *
+ * 末尾连续 `need` 个指纹**完全相同** ⇒ 稳定。数量相同但成员变了（一个工具被另一个替换）**不算稳定**。
+ * ⇒ 指纹必须用**排序后的全集**（`[...set].sort().join('|')`）。
+ *
+ * @param {string[]} keys  采样到的工具面指纹序列（最新在末尾）
+ * @param {number} need    需要的连续相同次数（≥2 才有意义）
+ * @returns {{stable: boolean, run: number}}  run = 末尾连续相同的长度
+ */
+function stableWindow(keys, need) {
+  if (!Array.isArray(keys) || keys.length === 0) return { stable: false, run: 0 }
+  let run = 1
+  for (let i = keys.length - 1; i > 0; i--) {
+    if (keys[i] === keys[i - 1]) run++
+    else break
+  }
+  return { stable: run >= need, run }
+}
+
+/**
  * **臂就绪闸**：换代刚 flip 完时插件可能还在注册工具（实测出现"工具面只有 4 个"的臂）⇒
  * 必须等到**工具面正常**再开跑。判据用"真读一次工具面"，不用"boot 无错"。
  * 代价：一次极短 prompt（几秒 + 少量 token），换来"臂跑在完整 gen 上"。
+ *
+ * ★★ 2026-09-21：加**稳定窗口**（`stableWindow`）—— 连续 `STABLE_NEED` 次指纹完全相同才放行。
+ * 同时把**采样历史**记进返回值（`sampleSizes` / `sampleHistogram`）⇒ **这条判据自己可查**，
+ * 而不是"另一个看不见的门"。
  */
+const STABLE_NEED = 3
 async function waitArmReady(minTools = 20, tries = 8, must = [], forbid = []) {
   for (let i = 1; i <= tries; i++) {
     const sid = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
@@ -857,6 +917,8 @@ async function waitArmReady(minTools = 20, tries = 8, must = [], forbid = []) {
       continue
     }
     await rpc('session.prompt', { sessionId: sid, mode: 'steer', content: [{ type: 'text', text: '只回一个字：好' }] })
+    const keys = []          // 指纹序列（最新在末尾）
+    const sampleSizes = []   // 每次采样的工具数（可查）
     for (let k = 0; k < 12; k++) {
       await new Promise((r) => setTimeout(r, 2000))
       const a = analyzeTrajectory(sid)
@@ -865,12 +927,21 @@ async function waitArmReady(minTools = 20, tries = 8, must = [], forbid = []) {
       const mt = (p, nm) => (p.endsWith('*') ? nm.startsWith(p.slice(0, -1)) : nm === p)
       const miss = must.filter((p) => !set.some((nm) => mt(p, nm)))
       const bad = forbid.filter((p) => set.some((nm) => mt(p, nm)))
-      if (n >= minTools && miss.length === 0 && bad.length === 0)
-        return { ready: true, toolSetSize: n, missing: [], forbidden: [], probeSession: sid, tries: i }
-      if (n >= minTools && miss.length) console.log('  [就绪闸] 工具数够(' + n + ')但缺家族 ' + miss.join(',') + ' ⇒ 再等')
-      if (n >= minTools && bad.length) console.log('  [就绪闸] 工具数够(' + n + ')但**出现了不该有的家族** ' + bad.join(',') + ' ⇒ 再等')
+      const ok = n >= minTools && miss.length === 0 && bad.length === 0
+      // ★ 指纹 = 排序后的**全集**（比数量，也比成员）
+      keys.push(ok ? [...set].sort().join('|') : `!notready:${n}:${miss.join(',')}:${bad.join(',')}`)
+      sampleSizes.push(n)
+      const w = stableWindow(keys, STABLE_NEED)
+      if (ok && w.stable)
+        return {
+          ready: true, toolSetSize: n, missing: [], forbidden: [], probeSession: sid, tries: i,
+          stableSamples: w.run, stableNeed: STABLE_NEED, sampleSizes,
+        }
+      if (ok && !w.stable) console.log(`  [就绪闸] 工具数够(${n})但**工具面还没稳**（连续相同 ${w.run}/${STABLE_NEED}）⇒ 再等`)
+      if (!ok && n >= minTools && miss.length) console.log('  [就绪闸] 工具数够(' + n + ')但缺家族 ' + miss.join(',') + ' ⇒ 再等')
+      if (!ok && n >= minTools && bad.length) console.log('  [就绪闸] 工具数够(' + n + ')但**出现了不该有的家族** ' + bad.join(',') + ' ⇒ 再等')
     }
-    console.log(`  [就绪闸] 第 ${i} 次探测：工具面仍不足 ${minTools} 个 ⇒ 等 5s 再试`)
+    console.log(`  [就绪闸] 第 ${i} 次探测：仍不合格 ⇒ 等 5s 再试（采样到 ${JSON.stringify(sampleSizes)}）`)
     await new Promise((r) => setTimeout(r, 5000))
   }
   return { ready: false, toolSetSize: 0, tries }
