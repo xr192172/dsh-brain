@@ -614,18 +614,25 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   // ★ 能力题（空 seed）没有 manifest ⇒ 用"跑前快照"把跑出来的改动退回去：
   //   已跟踪文件 `git checkout --`；**跑期间新出现的未跟踪文件**删除（逐个打印，且**只**在仓库内）。
   //   为什么必须做：否则 agent 的改动会留在工作区，下一次跑会被守卫拒绝（实验不可重复）。
+  // ★★ 2026-09-21 修（**worktree 模式下这段整个失效**）：
+  //   原来这里四处写死 `REPO`，而 Agent 的改动在**臂自己的 worktree**（`WORK`）里，
+  //   且 `preRunState` 是用 `worktreeState(WORK)` 取的（见上方）—— **两者基准不一致** ⇒
+  //   ① 在主仓上空转（主仓本来就干净）② 臂的 worktree **一个文件都没还原** ⇒
+  //   随后 `assertClean` 查 `WORK` 必然为假 ⇒ **每次"中断整批"** ⇒ **`--repeat k` 根本跑不起来**。
+  //   实测（2026-09-21，cli-0005 两臂同 preset）：B 臂改的 3 个靶子文件原样留在其 worktree 里。
+  //   ⇒ 四处 `REPO` → `WORK`，并给 `git` 传 `cwd: WORK`。**只作用于臂的 worktree / 主仓二者之一，绝不动另一个。**
   if (Array.isArray(task.seed?.edits) && task.seed.edits.length === 0) {
-    const now = worktreeState()
+    const now = worktreeState(WORK)
     const un = (st) => new Set(st.untracked.map((l) => l.slice(3).trim()))
     const preUn = un(preRunState ?? { untracked: [] })
     const newUntracked = now.untracked.map((l) => l.slice(3).trim()).filter((f) => !preUn.has(f))
     const preMod = new Set((preRunState?.modifiedTracked ?? []).map((l) => l.slice(3).trim()))
     const newModified = now.modifiedTracked.map((l) => l.slice(3).trim()).filter((f) => !preMod.has(f))
-    for (const f of newModified) sh('git', ['checkout', '--', f])
+    for (const f of newModified) sh('git', ['checkout', '--', f], { cwd: WORK })
     const removed = []
     for (const f of newUntracked) {
-      const abs = path.join(REPO, f)
-      if (!abs.startsWith(REPO)) continue
+      const abs = path.join(WORK, f)
+      if (!abs.startsWith(WORK)) continue
       try {
         fs.rmSync(abs, { force: true, recursive: true })
         removed.push(f)
