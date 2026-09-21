@@ -37,14 +37,14 @@
 | D1 | `web-app`：`localWebUrl` 把**实例端口**写进 system prompt → 换代必 cache miss | 上游**设计缺口** | ✅ 代码仍在（设计讨论） | ◯ 可作 feature request |
 | D2 | `--dump-config` 不校验插件 config（假绿） | 上游 **UX 缺口** | ✅ 行为已本地实测 | ◯ 可作 feature request |
 | **U4** | shell 工具在**非重定向 stderr** 时崩：`StandardErrorEncoding is only supported when standard error is redirected`（回执 §B2） | **上游 bug** | ✅ 代码仍在（`dsh-pwsh-local/lib/index.js:159`） | ✅ 可报（**绕法已实测 100% 有效**） |
-| **?** | 204 条 `Error: unknown tool "<x>": only \`run_code\` is callable directly` | ⚠ **归属待查**（工具面 vs 运行时不一致） | 未核验 | ⏸ 先查是不是我们的工具面配置 |
+| **D3** | 204（实为 58）条 `unknown tool "<x>": only \`run_code\` is callable directly` | **都不是**：上游既定设计（且已自带缓解句）+ **模型不遵守明文规则** | ✅ 代码仍在（`:3065`/`:2983`/`:2713`） | ✗ 不可报（见 §2.8；两个数差 = 口径问题） |
 | O1 | switchboard 启动健康漏判（保险失效） | **我们自己的** | — | ✗ 不可报 |
 | O2 | 6 个插件 `Config = z.object` 不容忍缺 config | **我们自己的**（根因在 cordis 设计，见 §4） | — | ✗ 不可报（设计讨论另说） |
 | O3 | `dsh-compaction-basic` 500 行补丁 | **我们自己的特性**（兜底后端） | — | ✗ 不可报 |
 | O4 | `patch-profile-deps` / 移除桌宠 | **我们的配置选择** | — | ✗ 不可报 |
 
 **结论：真正「干净、可报、且确认上游仍存在」的有 2 项（**U1** 与 **U4**）。**
-其余或需复核、或是设计讨论、或是我们自己的。
+其余或需复核、或是设计讨论、或是我们自己的（含 §2.8 的 **D3**：连"缺陷"都不是）。
 
 > ★ **U4 与 U1/U3 的关键差别**：U4 我们有**绕法**（改调用方写法即可，不动上游包），
 > 所以按铁律 10「不追上游版本 / 不改 `@deepseek-ai/*`」**我们不 patch，只上报**。
@@ -257,14 +257,71 @@ const ENCODING_PREAMBLE = "[Console]::OutputEncoding = [System.Text.UTF8Encoding
 
 ---
 
-### 2.8 ⚠ 待查：204 条 `Error: unknown tool "<x>": only \`run_code\` is callable directly`
+### 2.8 ✅ 结案（D3）：`unknown tool "<x>": only \`run_code\` is callable directly`
 
-扫全量会话发现 **204 条**这类结果，横跨 15 个工具（`pwsh` 78 / `run_code` 56 / `read` 39 /
-`glob` 11 / `grep` 4 / `memory_recall` 3 …）。形态是**运行时拒绝直连调用**，
-但工具面（`request/header.tools`）里这些工具是列给模型的 ⇒ 模型撞墙、白烧一轮。
+> 2026-09-21 查完。**原假设「工具面列了却拒收」被推翻** —— 工具面从没列过它们。
+> 本地凭证：`scripts/check-code-mode-surface.mjs`（单位层直接问上游代码 + 3 条不变量，双向自证）。
 
-**归属未定**：可能是① 我们的工具面配置多放了工具；② 上游运行时限制没同步到工具面。
-**在查清之前不报上游**（拿我们自己的配置问题去报 bug 是最典型的噪音）。
+#### ① 错源在上游（我们没 patch 过这个包）
+
+`@deepseek-ai/dsh-tools` **0.1.1-rc.2**（`patches/` 里只有 compaction-basic ⇒ 代码是原样）：
+
+| 项 | 位置 |
+|---|---|
+| 报错产出 | `lib/index.js:3065`（`createExecution` 的 `collapsed` 分支） |
+| 判定谓词 | `lib/index.js:2983` `collapses(name, scope, nested)` = `!nested && modeFor(scope)==='code' && name!=='run_code'` |
+| **工具面生成** | `lib/index.js:2713` `wireSchemas(scope)`，code 模式 :2726-2729 **把 wire schema 过滤成只剩 `run_code`** |
+| 内置缓解句 | `lib/index.js:2407` `CODE_ONLY_INSTRUCTION`，由 `collapseSection()`（:2614，order 99）渲染 |
+
+#### ② 为什么"看着像列了却拒收"——**上面那条已经把它挡掉了**
+
+`wireSchemas` 在 code 模式下只发 `run_code` 一个 tool ⇒ **工具面没有多列**。
+模型之所以知道 `read`/`pwsh`/`council_architect`，来自同一份 system 里的 **SDK 段 + 每个工具自带的 guidance 段**
+（上游自己在 :2603-2617 的注释里写明了这个陷阱，并为此加了 `CODE_ONLY_INSTRUCTION`）。
+⇒ 属**上游已知设计 + 已缓解**，既不是我们的 profile/preset 配置多放了工具，也不是上游 bug。
+
+#### ③ 数量与分布（84 会话全量，2026-09-21 扫）
+
+| 口径 | 数 |
+|---|---|
+| **`tool/result` 事件（真拒收）** | **58** |
+| 原始文本出现次数（含后续轮次把结果回喂 prompt 的重复） | **213** |
+
+⇒ **原先记的 "204" 是后者那个口径**（同一现象的 4 倍放大）。**以后所有 B 类数字必须标口径。**
+
+| 分组 | 数 |
+|---|---|
+| preset `code`（上游内置 preset，persona 裸） | 30 |
+| preset `code-council`（我方，persona 含硬规则） | 28（其中**规则在场仍失败 4**） |
+| 涉及会话 | 13 |
+| 工具名 | `read` 18 / `pwsh` 16 / `glob` 8 / `grep` 3 / `memory_recall` 3 / `council_architect` 3 / 其余 7 |
+
+#### ④ ★ **原假设「某些 preset 没写那条禁令规则」—— 推翻**
+
+- 上游缓解句：**58/58 在场**；
+- 我方硬规则只在 **4/58** 在场，**而这 4 条照样撞墙** ⇒ 规则在不在场都解释不了失败；
+- **失败瞬间的工具面 58/58 都是 `["run_code"]`，被拒的工具从未被列出（0/58）**。
+
+⇒ 不是"没写规则"，是**模型不遵守已在 system 里的明文规则**（prompt 文案降无可降时，这是模型行为问题）。
+
+#### ⑤ 修法：不改工具面，也不报上游，**建归属门**
+
+- 工具面本来就正确 ⇒ **没有可改的东西**（改过滤只会让 SDK 段消失，丢能力描述）；
+- 唯一值得做的是**让"形态变化"自动报出来**：`scripts/check-code-mode-surface.mjs`
+  · **单位层**：直接 new 上游 `Tools`，证 A1~A5（code 模式直连拒收成立 / `run_code` 与嵌套子派发不拒收 / native 不拒收 / **wire 工具面 = ["run_code"]**）
+  · **不变量**：INV1「列了却拒收」=0、INV2 工具面恒为 `["run_code"]`、INV3 缓解句必在场
+  ⇒ 任一条破了，**归属自动从"模型不遵守"移位到"工具面/运行时不一致"或"我们少配 prompt"**，到那时才重判。
+- **自证两方向**：单位层 5 项 + 语料 58 条全绿（绿向）；合成"列了却拒收 + 无缓解句" ⇒ 三条不变量全红（红向）。
+  `node scripts/check-code-mode-surface.mjs --self-test` ⇒ 0 项不符。
+
+#### ⑥ 牵出的东西
+
+1. **口径税**：同一个现象 58 vs 213 —— §2.8 的 "204"、§2.7 的 "9775/1329" 都引了不同口径。**报数必须带口径**。
+2. `.agent-presets/*` 是 P2 安全层外的**我们自己的文件**（与 `~/.dsh/profiles/**` 不同）——
+   本轮只读未改；若将来要给上游 `code` preset 补硬规则，改这里即可，不必碰 profile。
+3. 失败工具里有 **我方能力名**（`council_architect` 3 / `self_evolve` 1 / `tool_score` 1）——
+   它们只在 SDK 段出现就被记成 tool ⇒ 能力描述越醒目、误调越多（与 tool-refinement 的
+   「描述过度承诺」是同一根，`topics/tool-refinement-handover.md` §1.1）。
 
 ---
 
@@ -289,7 +346,7 @@ const ENCODING_PREAMBLE = "[Console]::OutputEncoding = [System.Text.UTF8Encoding
 
 **排序建议**：报 **U1** 与 **U4**（都确认、干净、有现场；U4 还带 100% 相关的两分表）。
 U2 复核后再定。D1/D2 用讨论帖而非 bug 帖 —— 混在一起会稀释信号。
-§2.7/§2.8 是我们自己的 / 归属未定，**不进上报包**。
+§2.7（我们自己的指标口径）/ §2.8（**属既非我也非 bug 的模型行为**）**都不进上报包**。
 
 ---
 
@@ -330,6 +387,8 @@ loader 传 `undefined` ⇒ 抛 `ValidationError` ⇒ **整棵插件树装配失�
 | `scripts/patch-agent-loop-hardening.mjs` | **U3**（`isOwned` 保护 + 非 LLM 错误留堆栈） |
 | `scripts/patch-web-app-public-url.mjs` | D1 |
 | `scripts/lib-tool-failure.mjs`（`--self-test`） | **§2.7** 工具失败判据（替掉 `isError`）+ 两方向自证 |
+| `scripts/check-code-mode-surface.mjs`（`--self-test`） | **§2.8 / D3** code 模式拒收的**归属门**（单位层 A1~A5 + INV1~INV3） |
+| `scripts/scan-unknown-tool.mjs` | §2.8 的分布统计（会话/preset/工具名/口径核对） |
 | `scripts/check-config-tolerance.mjs` / `probe-config-resolveconfig.mjs` | O2 |
 | `patches/@deepseek-ai+dsh-compaction-basic+0.1.1-rc.2.patch` | O3 |
 | `packages/switchboard/src/boot-health.ts` | O1 |
