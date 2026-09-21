@@ -76,7 +76,7 @@
 > 而 `report` 工具 schema 与 `tool:report` system 段**都住在请求头**（system 块与 tool 块**先于所有消息**）
 > ⇒ **continuable 的 forked child 在第一个继承回合之前就作废了复用**，把整份转录重新 prefill 一遍。
 > ⇒ **所以 host 层的 base bundle 把 fork 绑成 `one-shot`；`spawn` 保留 `continuable`。**
-> ⚠️ **但 agent 层的 shipped presets 仍写着 `continuable`**（同一个 id）—— 两层谁生效**尚未判定**，见 §5。
+> ⚠️ **但 agent 层的 shipped presets 仍写着 `continuable`**（同一个 id）—— 实测判定 **agent 层生效**，见 §5 末尾。
 
 ★★ **这段论证与我们今天的实测是同一件事**：我量到 **code 模式下工具目录被渲染进 `system`、占两臂净差的 98.7%**；
 上游说的是 **"工具 schema 与 system 段都在请求头，且先于消息"**。
@@ -146,20 +146,94 @@ system 长度 + 消息数 + 是否含 `report` 工具/section），让"继承与
 ⇒ **你的意图 = 上游 base bundle 的立场；与该立场冲突的是 upstream presets 那一层。**
 ⇒ **所以要改的是 `preset` 那层**（或先确认"到底哪层生效"）—— **不是"我们改错了"。**
 
-### ★ 新问题（可验证，且正是铁律 #18 的同族）：**两层同 id，谁生效？**
+### ★ 已判定：**agent 层（preset）生效，host 层被覆盖**（2026-09-21 两点对照实验，我独立复现过）
 
-这与我今天记的"多根配置、同 id 静默遮蔽"是同一族问题，**而我目前【没有】这条判据**。可验证路径：
+做法：把 `council` 的 `tool-subagent-fork` 从 `continuable` 改成 **`one-shot`**，改前/改后各跑一次委派，
+**读子代会话的 `request/header`**（判据 = 子代 `tools[]` 里有没有 `report`）：
 
-1. **便宜**：读 mount 语义 —— agent preset 的行是否**覆盖** host 层的行？（`packages/preset/agent-presets` 的 mount/`isolate` 逻辑、cordis 的 scoped realm 语义）
-2. **经验（推荐，且我们已有工具）**：**看一个 fork 子代的请求头里有没有 `report` 工具 / `tool:report` 段**
-   —— **有 ⇒ `continuable` 生效；无 ⇒ `one-shot` 生效。**
-   实现方式与我们现有 `measure-arm-face.mjs` 同路（读子代会话的 `request/header` 的 `tools[]` 与 `system`）。
-   ★ **这正好是我先前建议要加的"上下文指纹读数"的第一个真实用例**，而且它**同时**回答了"哪层生效"。
+| 时点 | 子代 `tools[]` 含 `report`？ | `system` 含 report 义务段？ | 工具数 / systemChars |
+|---|---|---|---|
+| 改前 `continuable` · **前台** fork | 否 | 否 | 102 / 6826 |
+| 改前 `continuable` · **后台** fork | **是** | **是** | **103 / 7245** |
+| 改后 `one-shot` · **前台** fork | 否 | 否 | 102 / 6461 |
+| 改后 `one-shot` · **后台** fork | **否** | **否** | **102 / 6461** |
+
+⇒ **只有"后台 fork"这一列有区分力**（前台 fork 恒走 `ctx.subagents.start()`，与绑定无关
+—— `tool-subagent/src/index.ts:387-429`）⇒ **两边都会是"没有 report"**，
+**拿它当探针会导出"host 层生效/改动是空操作"的错误结论**。这是"探针没有区分力 = 假绿"的又一例。
+⇒ 结论：**preset（agent 层）覆盖 host 层**，改动**确实生效**；相应地 `report` 义务段带来 **+419 字符 / +1 个工具**，
+改掉即省下 —— **与"用 fork 省一笔上下文开支"的意图一致。**
+
+**副作用（可观测）**：改后父会话 system 少 **365 字符**，消失的正是 `tool:subagent_fork` 段
+（该段仅在 continuable 时注册，`tool-subagent/src/index.ts:455`）。
+
+**仍未查**：shipped `code` / `standard` preset 是只读的，**它们仍写着 `continuable`** ⇒ 我们的评测臂若用 shipped `code`，
+fork 仍按 preset 侧的值；要改只能用**用户级副本**或 `--patch`。
+
+---
+
+## 6. 子 Agent 能不能再唤起子 Agent？——**能，而且带递归预算**（2026-09-21 源码核实）
+
+### 8.1 机制（逐条有出处）
+
+| 事实 | 出处 |
+|---|---|
+| 深度是**显式参数**：`SubagentStartRequest{ …, maxDepth?, toolFilter?, persona?, outputSchema? }` | `tool-cordis/src/api-catalog.ts:4154` |
+| **默认 `maxDepth = 3`** | `tool-subagent/src/index.ts:98` → `z.union([z.natural(), z.const('provider-managed')]).default(3)` |
+| 超限**抛错**：`SubagentDepthError`（`subagent depth N exceeds maxDepth M`），由 `resolveChildDepth(parent, maxDepth)` 判定 | `subagent/src/child-agent.ts:32,48-54`、`subagent/src/depth.ts:42` |
+| ★ **能力门（在 mount 时就抛，不是等到第一次委派）**：`provider 不支持 depthLimit 就不能设数字 maxDepth`，只能 `'provider-managed'` | `tool-subagent/src/index.ts:285-289` |
+| 子代会话**持久化**：`parentSession` / `origin:'subagent'` / **`delegationDepth`**（注释原话：*"Durable: **the recursion budget must survive persistence and resume**"*） | `subagent/src/child-agent.ts:101-119` |
+| `delegationDepth` 校验为**非负安全整数** | `core/session/src/index.ts:128-130` |
+| 子代树可枚举（**session-backed**、带 `parentId`/`depth`、**不加载也不恢复 Agent**） | `tool-cordis/src/api-catalog.ts`（`listTree`） |
+
+### 8.2 ★★ 关键：**子代默认继承父代的 preset**
+
+```js
+// subagent/src/child-agent.ts:108,111
+const agentPreset = parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+... agentPreset === undefined ? {} : { agentPreset }
+```
+⇒ **"子代能不能再委派" 就等于 "那份 preset 里有没有委派工具行"**：
+- `council` / `standard` 挂了 `tool-subagent` / `tool-subagent-fork` ⇒ **子代也能再委派**（到 `delegationDepth = 3` 为止）；
+- `minimal` / 我们的 `g0` **不挂委派行** ⇒ **子代不能再下探**。
+⇒ **这给了我们一把干净旋钮**：深度能力由 **preset 的行集合**决定，不需要另造机制。
+
+### 8.3 回答「专项 Agent vs 通用基底」——**委派工具给三个"专业面"旋钮**
+
+`tool-subagent` 的配置（也就是 preset 里那一行的 `config`）提供：
+
+| 旋钮 | 语义（源码注释原文） |
+|---|---|
+| **`persona`** | *"Per-child persona that **shadows `deployment:persona`**. Requires the provider's `persona` capability; **omission preserves the deployment persona**."* |
+| **`toolFilter`** | `{ allow?, deny? }`；注释警告：***"Preserve omission; Schemastery's `{ allow: [] }` default would deny every tool."*** ⇒ **空数组 = 全拒**（别把它当"默认值"） |
+| **`maxDepth`** | 递归预算（默认 3）——就是"能拆几层" |
+
+★ **但委派工具【没有】`agentPreset` 参数** ⇒ **"给子代换一份 preset" 在"代理自己发起的委派"里做不到**。
+要换整套装配，得走**宿主侧** `CreateAgentOptions.meta.agentPreset`（`tool-cordis` 的 `agents.create`）。
+
+⇒ **所以"专项 vs 通用基底"有两种实现，成本差很多**：
+
+1. **轻（推荐先做）**：**同一个 preset + 每次委派的 `persona` + `toolFilter`**
+   ⇒ 专项面 = **人格 + 工具白/黑名单**；**通用基底 = 不裁剪（或只给编排工具）**。
+   ★ **它直接复用我们今天的测量**：`toolFilter` 裁出来的就是**工具面**，而我们已有 `measure-arm-face.mjs` 去量它
+   ⇒ 只需把它的 `--preset` 扩成 "preset + toolFilter"，就能量"某个专项子代的工具面"。
+2. **重**：**宿主侧**用不同 preset 建子代（不同整套装配）。能力更大，但要写宿主侧代码，且**子代不再自动继承**。
+
+### 8.4 一条顺带得到的"免费读数"
+
+`delegationDepth` **已经是会话里持久化的字段** ⇒ 我们**不必新造**就能知道"这轮跑在第几层"。
+把它并进先前建议的「**上下文指纹**」（首条 `request/header` 的 system 长度 + 消息数 + 有无 `report` + **`delegationDepth`**），
+就能同时支撑两件事：**判"继承与否"**，以及**按 lineage 而不是按 run 统计**。
+
+★ 另注：`child-agent.ts` 里还有一句同族的提醒 —— `origin: 'subagent'` 的注释写着
+*"Navigation classification only; **the descriptor remains the authority for mode and continuation capability**."*
+⇒ **又一次"别拿错字段当判据"**（铁律 #18 的同族：`origin` 只是导航分类，模式与可继续性要看 descriptor）。
+
 
 
 ---
 
-## 6. 对本项目的净结论
+## 7. 对本项目的净结论
 
 1. **形态确认**：子 Agent = **自己的 persona + 自己的 toolFilter + 自己的持久会话** —— 这三件在 DSH 里都是现成的
    （前提：绑 `fork-in-process` 这个 provider）。**我们的"进化落到子 Agent"有现成地基。**
@@ -170,12 +244,16 @@ system 长度 + 消息数 + 是否含 `report` 工具/section），让"继承与
 
 ---
 
-## 7. 未验证 / 没把握
+## 8. 未验证 / 没把握
 
 1. ~~我们 `council` 把 `subagent_fork` 设成 `continuable` 是"有意"还是"历史遗留"~~ ⇒ **已查清：是上游 shipped preset 的默认，我们逐字继承**（见 §5）。
 2. ~~`dsh-tool-subagent-report` 在我们现役 profile/preset 里到底装了没有~~ ⇒ **已查清：在装配树里**（`--profile web --dump-config` 第 272 行，来自 base bundle）。
-3. ★★ **【新的头号未闭合项】host 层与 agent 层同 id 冲突，谁生效？** —— 现有材料判不了（见 §5 的两种解释）。
-   验证法已有：**看 fork 子代请求头里有无 `report` 工具 / `tool:report` 段**。
+3. ~~**【头号未闭合项】host 层与 agent 层同 id 冲突，谁生效？**~~ ⇒ **已判定：agent 层（preset）生效**（§5 末尾的两点对照实验，
+   且我独立复现了四个读数）。剩余小尾巴见下条。
+4. ★ **shipped `code` / `standard` preset 是只读的，它们仍是 `continuable`** —— 我们的评测臂若用 shipped `code`，
+   fork 仍按 preset 侧的值；要改只能用**用户级副本**或 `--patch`。**未处理**。
+5. ★ **嵌套（子代再委派）我只做了源码定案，未实测**：没跑过"子代再起一个孙代、并把 `delegationDepth` 读出来"。
+   验证法很便宜：父 preset 挂委派行 ⇒ 让子代自己再委派一次，读孙代会话的 `delegationDepth`（应为 2）。
 4. **"冷启"的实际行为未实测**（只在源码/文档描述层确认：`cold-resumed from its persisted Session`）。
 5. `capabilities` 表里 `acp` / `dsh-sdk` 的 false 是**源码注释**（可能落后于实现）；未跑测。
 6. 上游那份是**下载树不是 git clone**（无 `.git`）⇒ 行号会漂，引用请回仓库核对。
