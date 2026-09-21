@@ -54,6 +54,47 @@
 3. ⚠️ **硬限制：`persistent-bash` 需要 POSIX 终端底座**，笔记原文写明 **"this preset does not support Windows agents"**
    ⇒ 要用它必须走 **WSL 或容器**（本机 Docker **28.0.4 可用**，见 §4）。
 
+#### 1.1.1 ★ 已核验：`minimal` 的 system prompt 就是**那一句**（46 字符）
+
+上游自测直接断言"**组装出的 system == 环境变量给的那句话**"（**逐字相等，不多不少**）：
+`examples/jsonrpc-agent/tests/sdk.snapshot.ts:41` 定义
+`MINIMAL_SYSTEM_PROMPT = 'You are the environment-selected minimal software engineer.'`，
+`:109` 注入 `environment: { DSH_SYSTEM_PROMPT: MINIMAL_SYSTEM_PROMPT }`，
+`:112` 断言 `expectedSystem: MINIMAL_SYSTEM_PROMPT`。
+⇒ 与 `minimal.cordis.yml` 的 `persona: DSH_SYSTEM_PROMPT ?? '…'` 一致 ⇒
+**默认 persona 只有 46 字符**（`'You are a helpful software engineer assistant.'`.length === 46，已复算）。
+
+**⇒ 46 vs 39 605：差 ≈ 860 倍。** 主张**成立**：
+`exp-base-nodc` **不是**干净的工具面下界。
+
+#### 1.1.2 ★★ 但归因要改：那 39 605 字符里，**compaction / 沙箱 / runtime-context 贡献 0**
+
+`exp-base-nodc` 与 `exp-base`（79 405）的 **39 800** 字符差，我按行级 diff 精确分解过（10 个 hunk）：
+
+| hunk | 位置(A 的行) | 删字符 | 增字符 | 内容 |
+|---|---|---|---|---|
+| 1–2 | 5 / 7 | 991 / 122 | 991 / 122 | **等长替换**（净 0 字符）：身份/模型那两行 |
+| 3 | 87 | 1 061 | 0 | `design_canvas_index` 的 guidance + 类型 |
+| **4** | 179 | **27 350** | 0 | `mcp__design-canvas__*` 的 guidance + `ToolArgsMap`（**最大一块**） |
+| 5–6 | 367 / 431 | 1 645 / 1 881 | 0 | `safe_rename` / `symbol_edit` 的 guidance + 类型 |
+| 7 | 581 | 99 | 0 | 三个 `design_canvas_*: string` 类型行 |
+| 8 | 674 | 7 182 | 0 | 那批 MCP 工具的 `ToolOutputMap` |
+| 9–10 | 1006 / 1048 | 44 / 22 | 0 | `safe_rename`/`self_evolve`/`symbol_edit` 类型行 |
+
+⇒ **8 个"纯删除"块合计 39 284 字符（≈ 净差的 98.7%），全部是工具目录内容**
+（逐工具 guidance + `interface ToolArgsMap` / `ToolOutputMap`）
+；另有 2 处**等长替换（净 0）**。
+
+⇒ **★★ 结论（这条推翻了我一小时前的"2×2"设想）**：
+**在 code(PTC) 模式下，工具目录是被【渲染进 system prompt】的** ——
+所以 **"工具数量" 与 "提示长度" 在这个模式下不是两个可独立操纵的变量，后者是前者的函数**。
+⇒ **我原来打算的「工具多/少 × 提示长/短」2×2，在 code 模式下做不出来**；
+要做只能在 **native 模式**（工具在 `tools[]` 里、只有逐工具 guidance 进 prompt）下做。
+⇒ 而**更诚实的表述**是：**在 code 模式下，"工具面"这个自变量本身就等价于"提示长度"**
+（两者同向变化、且差量 98.7% 是同一个东西）—— 那就不需要 2×2，需要的是**换到 native 模式再做一次**，
+才能把"工具能不能用"与"提示里写了多少"分开。
+
+
 ### 1.2 DSH 上游：**Python SDK + stdio JSON-RPC**（评测驱动可换）
 
 本地就有整套：`examples/jsonrpc-agent/{minimal.cordis.yml, minimal.py, cordis.yml, cordis.snapshot.yml, tests/}`，
@@ -119,18 +160,23 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 且每级都能用同一套判据（`armFaceCheck` + boot 痕迹 + 数量守恒）验证。
 这直接替掉 `docs/eval-independent-variable-plan.md` §2.4 里那套"靠 profile 变体凑梯度"的做法。
 
-### 3.2 ★★ 2×2：**把"工具数"与"提示长度"分开**（上游旋钮让这变便宜）
+### 3.2 ★★（**已修正**）"工具数"与"提示长度"在 code 模式下**拆不开** —— 要拆必须换 native
 
-我之前测到 **A=79 405 字符 / B=39 605 字符**的系统提示差 ——
-**那 4 万字符差值里混着"工具面"与"提示长度"两件事**，所以我此前所有成本面结论都可能是"提示变长"的效应，
-**不一定是工具变多**。
+我原来的设想是：做 {工具多, 工具少} × {提示长, 提示短} 的 2×2，把两个变量分开。
 
-而 `minimal.cordis.yml` 的 `agent-spine-demo` 把这件事**拆成了独立旋钮**：
-`includeHarnessIdentity` / `includeRuntimeContext` / `workspaceContext` / `skills.enabled`。
+**实测把它推翻了**（见 §1.1.2）：**code(PTC) 模式把工具目录渲染进了 system prompt**
+（逐工具 guidance + `ToolArgsMap`/`ToolOutputMap` 占净差的 **98.7%**）
+⇒ **"工具数量"与"提示长度"在这个模式下不是两个自变量，后者是前者的函数。**
 
-⇒ **做 2×2**：{工具多, 工具少} × {提示长, 提示短}。
-**这才能把两个变量分开** —— 而这个混淆在现在的装置上**根本拆不开**。
-（这是本轮最有价值的一条新实验设计，优先级高于再加难一道题。）
+⇒ **修正后的设计（三选一，按成本排）**：
+1. **换到 `native` 模式重做同一对臂** —— 那时工具在 `tools[]` 里、只有逐工具 guidance 进 prompt，
+   "工具能不能用"与"提示里写了多少"才开始可分。**这是唯一真能给 2×2 的路子。**
+2. **承认耦合，改问一个更锋利的问题**：既然 code 模式下"工具面 = 提示长度"，
+   那就**不要再把它当两个变量**，而是直接问：**这 39 800 字符的提示增量，换来了什么？**
+   （成本面：每请求多付 ≈13k token；收益面：oracle/步数/墙钟）—— 这比 2×2 更贴近真实取舍。
+3. **用上游 `minimal` 当参照点**：46 字符 vs 39 605 —— 先把"下界长什么样"钉住，
+   再谈中间各级（§3.1 的 G0…G4）。**但它当前跑不起来，见 §4**。
+
 
 ### 3.3 把"上线的那一份 = 被评过的那一份"变成**判据**
 
@@ -142,21 +188,34 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 ## 4. 立刻可做（半天，且都要么零成本、要么离线）
 
-1. **量上游 minimal 的真实形状**（决定 §1.1 那三条是否成立）：
-   在 **WSL 或容器**里按 `docs/user/guide/python-sdk.md` 起一次 `minimal.py`，
-   量 **system prompt 字符数 + 工具数**，与 `exp-base-nodc`（39 605 字符 / 30 工具）对比。
-   ⇒ **若 minimal 只有几百字符，"我们自制的下界臂不干净"被证实，梯度按 §3.1 重建。**
+1. ⚠️ **"量上游 minimal 的真实形状"——已试，跑不通**（这本身是结论）。
+   确切的阻塞点（已实测）：
+   - PyPI 上 `deepseek-harness-sdk` 只到 **0.1.5rc1**，其 `DeepSeekHarnessConfig` **没有** `session_root`/`cordis` 字段
+     ⇒ 仓库里的 `minimal.py` **领先于已发布包**，原样报错：
+     `TypeError: DeepSeekHarnessConfig.__init__() got an unexpected keyword argument 'session_root'`；
+   - 改走 bundled runtime 又是 profile 制：`dsh --profile minimal --dump-config` → **`Error: dsh: profile "minimal" does not exist`**，
+     且 `DSH_CORDIS_CONFIG` 被忽略；
+   - `wsl.exe -d Ubuntu-24.04` → **`Wsl/Service/HCS_E_CONNECTION_TIMEOUT`**（列表显示 Running 但连不上）。
+   ⇒ **结论：这个"干净下界"在当前已发布载体上不可达** ⇒ 要用它得**从源码构建 DSH**，或等发布对齐。
+   （替代做法：**先静态引用 §1.1.1 的 46 字符**，那个已被上游自测钉死；动态复现留到源码构建之后。）
 2. **离线编译一次 VeRO**（`uv` 与 Docker 都在，编译**不需要凭据**）。
-3. **之后**才谈 cli-0007 要不要写（很可能被 §3.2 的 2×2 取代）。
+3. **之后**才谈 cli-0007 要不要写（很可能被 §3.1 的声明式梯度或 §3.2 的"承认耦合"路线取代）。
+
 
 ---
 
 ## 5. 诚实：没核实 / 没把握
 
-1. **minimal 在本机 WSL/容器里能否真跑通**（它的 POSIX 底座要求、Python SDK 依赖）—— **没试过**。
-2. **"minimal 的 system prompt 会短得多"是预期，不是实测**（§4 步 1 就是去量它）。
+1. **minimal 在本机 WSL/容器里能否真跑通** —— **已试，跑不通**（§4.1 给了确切阻塞点：SDK 版本落后 + profile 不存在 + WSL 连不上）。
+2. ~~"minimal 的 system prompt 会短得多"是预期~~ ⇒ **已升级为静态已证**：上游自测断言
+   "system == 环境变量那句话（逐字）"，默认 persona 46 字符（§1.1.1）。
+   **仍未动态复现**（见 §4.1）。
 3. **VeRO 能否把 target 换成 DSH**：仍是**推断**（未读 `vero/README.md` core guide 与 `harness-opt-bench/CONFIGURATION.md`）。
 4. 上游 `minimal` **不支持 Windows 原生 agent**（笔记原文）—— 这条若成立，意味着**我们的评测臂要搬家到 POSIX**，
-   而**现役评测栈（switchboard + Windows profile）在那一层不通用** ⇒ 这是个需要你自己拍板的架构选择。
+   而**现役评测栈（switchboard + Windows profile）在那一层不通用** ⇒ 这是个需要拍板的架构选择。
 5. 本地 `_research/deepseek-harness-master` 是**下载解压的源码树，不是 git clone**（无 `.git`）
    ⇒ 引用时请回到 `github.com/deepseek-ai/deepseek-harness` 核对版本与行号。
+6. **本轮我（主代理）自己核验中发现子代理一处表述过宽**：它说"差量 **100%** 来自 `tools:sdk` 段、其余 **28 段逐字等长**"。
+   按行级 diff 精确分解，准确说法是：**8 个纯删除块占 39 284 字符（≈净差的 98.7%），另有 2 处等长替换（净 0 字符）**
+   —— 即 98.7% 而非 100%，且**并非只有一段不同**。**结论方向不变，数字要按 §1.1.2 用。**
+
