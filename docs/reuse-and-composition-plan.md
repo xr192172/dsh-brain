@@ -91,7 +91,50 @@
 另外 master 用 `text:`、发布版 0.1.5 用 `prefix:`（schema 也在变）。
 ⇒ **所以"G0 = 2 工具"只对 master 那版成立；对我们现役版本，G0 的工具数要按我们自己的 schema 定。**
 
-#### 1.1.2 ★★ 我们这版 preset 的真实机制（**直接决定 G0 怎么做**）
+#### 1.1.2 ★★★ 动态实测（2026-09-21）：**"干净下界"确实存在，而且它就在我们自己装的那份里**
+
+**先纠正我上一段的一个错误**：我说"我们这版没有文件式 preset"——**找错了包**。
+随附 preset 在 **`node_modules/@deepseek-ai/dsh/config/agent-presets/{code,cordis,minimal,standard}`**
+（不在 `dsh-agent-presets/` 里）。
+
+**用我们现成的装置实测**（`POST /api/agentPreset.select` + **回读** `session.list` 的 `agentPreset` 才算生效；
+`eval-run --traj` 读 `metrics.systemChars`/`toolSetSize`；**我独立复算了留档文件**）：
+
+| preset | systemChars | toolSetSize | 含 `bash`/`pwsh`/`str_replace_editor` |
+|---|---|---|---|
+| `council`（对照，native 模式） | **6 826** | **102** | ✗ / ✓ / ✗ |
+| **随附 `minimal`（只读，`trust=system`）** | **46** | **78** | ✗ / ✓ / ✓ |
+| 我们自建的 `g0`（同内容、换 id） | **46** | **77** | **✓** / ✗ / ✗ |
+
+- **46 字符 = 就是那一句 persona 本身**，`complete:true` + `includeRuntimeContext:false` 确实把
+  harness identity / Web orientation / 工具指引 / runtime context **全挡掉了** ⇒ **上游"干净下界"的说法在运行态成立。**
+- ★★ **但"工具面下界"的真实下限**：三臂里都有一个 **76 个工具的底板**
+  （design-canvas 的 MCP 59 + `design-canvas-bridge`/`capability-bridge`/`tool-evolution` 的原生 17），
+  **preset 只能在这之上做加法**（+1 / +2 / +26）⇒
+  **工具面 = profile 底板 + preset 增量**。**光换 preset 压不到 1–2 个工具；要压低必须换 profile。**
+  ⇒ 我们现役两臂 `102` vs `30` 的差，正是 **profile 底板**的差（design-canvas 那 72 个）。
+
+**★ 两个必须记住的坑（都实测踩到）**：
+
+1. **`minimal` 这个 id 已被随附（只读，`trust=system`）preset 占用** ⇒ 你在
+   `~/.dsh/.agent-presets/minimal/` 建同名 preset 会被**静默遮蔽**：
+   `agentPreset.select {agentPreset:'minimal'}` 返回 **HTTP 200**、**回读也显示 `minimal`**，
+   但**装的是随附那一份**（实测：读数 46 / **78** / 有 `str_replace_editor`、**无 `bash`**）。
+   ⇒ 自建 preset **必须换不撞车的 id**（我们的叫 `g0`）。
+   **这与 `exp-base-nodc` 那类坑同源：回读"成功"不等于"你以为的那份生效了"。**
+2. ⚠️ **我们的 `g0` 在 Windows 上取错了 shell**：它抄了 `council` 的 `tool-bash` 行但**删掉了**
+   `disabled: process.platform === 'win32'`（理由是"只准一行工具，照抄会让本机零 shell"）。
+   结果 `g0` 的工具面里有 **`bash`、没有 `pwsh`** —— 而 `council` 之所以给 `tool-bash` 加那条 gate、
+   并配一行 `tool-pwsh`，正是因为**本机（win32）要靠 pwsh 兜底**；随附 `minimal` 也是
+   `terminal-pwsh`/`persistent-pwsh` 按平台二选一。
+   ⇒ **Windows 上正确的 G0 应当用 `persistent-pwsh`（或保留平台 gate）**；`bash` 那条**能装配、但能不能真跑未验证**。
+   **⇒ 结论：数（77/78）不是重点，"那一行 shell 在本平台是否真能用"才是。**
+
+**⇒ 修正后的 G0 配方**（把两件事叠起来才能压到真下界）：
+**`exp-base-nodc` 那样的 profile（底板 30）+ 随附 `minimal` 那样的 preset（+2，46 字符）**
+⇒ 才是"干净工具面下界"；**只换 preset 只到 77–78。**
+
+#### 1.1.3 ★★ 我们这版 preset 的真实机制（**直接决定 G0 怎么做**）
 
 - 用户级 preset 根目录：**`~/.dsh/.agent-presets/<id>/{agent.cordis.yml, preset.yml}`**
   （随附 preset 是**只读**的，"system trust"；要加能力必须走这个 user 根目录 —— 我们仓库的
@@ -107,7 +150,7 @@
   ⇒ 这一步把"工具面"变成**一份 ~40 行、可 diff、显式枚举**的声明 —— 正是 §3.1 想要的形态。
 
 
-#### 1.1.2 ★★ 但归因要改：那 39 605 字符里，**compaction / 沙箱 / runtime-context 贡献 0**
+#### 1.1.4 ★★ 但归因要改：那 39 605 字符里，**compaction / 沙箱 / runtime-context 贡献 0**
 
 `exp-base-nodc` 与 `exp-base`（79 405）的 **39 800** 字符差，我按行级 diff 精确分解过（10 个 hunk）：
 
@@ -190,7 +233,7 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 | 级别 | 组成 | 备注 |
 |---|---|---|
-| **G0** | **按我们自己的 schema 裁出的最小 preset**：persona(`text:`) + `complete:true` + `includeRuntimeContext:false` + **只留 `tool-bash`**，**不挂 compaction/skills/jobs/goal** | 落成 `~/.dsh/.agent-presets/minimal/`；**不要抄上游文件**（版本 schema 不同，见 §1.1.1/§1.1.2） |
+| **G0** | **两件事叠加**：`exp-base-nodc` 那样的 **profile**（底板 30）+ **随附 `minimal` preset**（+2、system 46 字符） | 见 §1.1.2：**只换 preset 只到 77–78**（preset 只能加，压不掉 profile 的 76 工具底板）。★ **别在用户级建 id 为 `minimal` 的同名 preset —— 会被静默遮蔽** |
 | **G1** | G0 + 文件读写/搜索组（`tool-fs` / `tool-fs-search`） | |
 | **G2** | G1 + `web_search` / 计划 / 目标组 | |
 | **G3** | G2 + `@dsh-brain/design-canvas-bridge`（8 工具） | |
@@ -204,7 +247,7 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 我原来的设想是：做 {工具多, 工具少} × {提示长, 提示短} 的 2×2，把两个变量分开。
 
-**实测把它推翻了**（见 §1.1.2）：**code(PTC) 模式把工具目录渲染进了 system prompt**
+**实测把它推翻了**（见 §1.1.4）：**code(PTC) 模式把工具目录渲染进了 system prompt**
 （逐工具 guidance + `ToolArgsMap`/`ToolOutputMap` 占净差的 **98.7%**）
 ⇒ **"工具数量"与"提示长度"在这个模式下不是两个自变量，后者是前者的函数。**
 
@@ -228,18 +271,17 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 ## 4. 立刻可做（半天，且都要么零成本、要么离线）
 
-1. ⚠️ **"量上游 minimal 的真实形状"——动态仍未取得**（这本身是结论）。
-   - 已试并**堵死**的路：`pip install deepseek-harness-sdk` 只到 **0.1.5rc1**（缺 `session_root`/`cordis`）；
-     `dsh --profile minimal` → **`profile "minimal" does not exist`**（**轴错了 —— 它是 agent preset，不是 profile**）。
-   - 已试并**未打通**的路：起 `dsh --profile web --patch`（把默认 preset 改成 `minimal`）后，
-     unary RPC 全部 **404**（鉴权已过：303 + `set-cookie`；404 出处在 `dsh-client-connection/lib/index.js:582/640`，
-     条件 `!interceptor.matches(endpoint)`）⇒ **没找到正确的请求信封**；且 headless 那次死于缺凭据
-     （`dsh: MISSING_CREDENTIAL …`），**一个 turn 都没起**，所以会话日志里没有 `request/header`。
-   - ★ **但它其实有一条更便宜的已知路**：**我们自己的 `scripts/eval-run.mjs` 里就有能用的信封** ——
+1. ✅ **"量 minimal 的真实形状"——已完成**（见 §1.1.2：**46 字符 / 78 工具**）。
+   以下是**已走过、降级为历史的路**（别再走）：
+   - `pip install deepseek-harness-sdk` 只到 **0.1.5rc1**（缺 `session_root`/`cordis`）；
+   - `dsh --profile minimal` → **`profile "minimal" does not exist`**（**轴错了 —— 它是 agent preset，不是 profile**）；
+   - 起 `dsh --profile web --patch` 改默认 preset 后 unary RPC 全 **404**（鉴权已过：303 + `set-cookie`；
+     404 出处在 `dsh-client-connection/lib/index.js:582/640`，条件 `!interceptor.matches(endpoint)`）；
+     headless 那次还死于缺凭据（`dsh: MISSING_CREDENTIAL …`）⇒ **一个 turn 都没起**。
+   - ★ **正解就是我们自己的信封**：`scripts/eval-run.mjs` 里的
      `rpc('agentPreset.select', { sessionId, agentPreset })` + `POST /api/<method>` 带
-     `{type:'client-request', rpcId, method, payload}`；会话选完 preset 后 `--traj` 直接能读
-     `metrics.systemChars` / `toolSetSize`。⇒ **用我们自己的装置量"某 preset 的 system 长度与工具数"是现成的。**
-   - 另：**会话日志是 `.zstd` 压缩**（`session.v3.jsonl.zstd`），不是裸 JSONL —— 读之前要先解压。
+     `{type:'client-request', rpcId, method, payload}`，再用 `--traj` 读 `metrics.systemChars` / `toolSetSize`。
+   - 另：**会话日志是 `.zstd` 压缩**（`session.v3.jsonl.zstd`），不是裸 JSONL。
 2. ✅ **VeRO：离线编译 + 在 Linux（WSL）上端到端跑通** —— 见 `docs/vero-integration-findings.md` §6.5：
    `command` 后端**可用**（`vero evaluate` 0.60s / `vero run` 0.73s，**离线、无凭据**），
    最小配置就是 **一份 ~40 行的 `vero.toml`** + 干净 git 仓库 + **一个 Node oracle**；
@@ -251,20 +293,25 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 ## 5. 诚实：没核实 / 没把握
 
-1. **minimal 在本机 WSL/容器里能否真跑通** —— **已试，跑不通**（§4.1 给了确切阻塞点：SDK 版本落后 + profile 不存在 + WSL 连不上）。
-2. ~~"minimal 的 system prompt 会短得多"是预期~~ ⇒ **46 字符已由源码定案**（master preset 里 persona 硬编码那一句 +
-   `complete:true` + `includeRuntimeContext:false`，见 §1.1.1）。**但动态仍未取得**（§4.1 给了三条堵死/半通的路，
-   以及一条已知更便宜的现成路）。
-   ★ **且我先前把「例子」当成了「preset」**（`examples/jsonrpc-agent/minimal.cordis.yml` ≠
+1. ✅ **minimal 的干净下界已动态量到**：见 §1.1.2（**46 字符 / 78 工具**，用的是我们**自己装的随附 preset**，不是上游那个 JSON-RPC 例子）。
+   下面这些**已堵死/半通的路降级为历史**（别再走）：SDK 版本落后（PyPI `deepseek-harness-sdk` 0.1.5rc1 缺字段）、
+   `dsh --profile minimal` 轴错（它是 **preset** 不是 profile）、unary RPC 若无我们的信封会 404、会话日志是 `.zstd` 不是裸 JSONL。
+2. ~~"minimal 的 system prompt 会短得多"是预期~~ ⇒ **已静态 + 动态双证 = 46 字符**：
+   静态见 §1.1.1（persona 硬编码那一句 + `complete:true` + `includeRuntimeContext:false`）；
+   **动态见 §1.1.2**（用我们自己装的**随附 `minimal` preset** 实测：**46 字符 / 78 工具**，我独立复算过留档）。
+   ★ **我先前把「例子」当成了「preset」**（`examples/jsonrpc-agent/minimal.cordis.yml` ≠
    `apps/cli/config/agent-presets/minimal/agent.cordis.yml`）⇒ 那句话的依据（`DSH_SYSTEM_PROMPT`）只对例子成立。
    **结论没变（46），依据换了。**
-   ★ **工具数还是版本依赖的**：master=2 工具｜npm 0.1.5-rc.2=**1 工具（只有 shell）**｜我们现役 0.1.1-rc.2 **没有文件式 preset**。
-3. **VeRO 能否把 target 换成 DSH**：仍是**推断**（未读 `vero/README.md` core guide 与 `harness-opt-bench/CONFIGURATION.md`）。
-4. 上游 `minimal` **不支持 Windows 原生 agent**（笔记原文）—— 这条若成立，意味着**我们的评测臂要搬家到 POSIX**，
-   而**现役评测栈（switchboard + Windows profile）在那一层不通用** ⇒ 这是个需要拍板的架构选择。
+   ★ **工具数是版本依赖的，且真正的下限由 profile 决定**：见 §1.1.2 的
+   「**工具面 = profile 底板 + preset 增量**」（preset 只能加，压不掉那 76 个底板工具）。
+3. **VeRO 能否把 target 换成 DSH**：**已在 Linux 上端到端跑通 command 后端**（见 `docs/vero-integration-findings.md` §6.5），
+   **但"把 DSH 本身做成 target"仍未试**（那一层仍是推断）。
+4. ~~上游 `minimal` 不支持 Windows 原生 agent~~ ⇒ **需要区分对象**：上游**笔记**说的是**那个 JSON-RPC 例子**，
+   而我们自己装的**随附 `minimal` preset 在 Windows 上跑通了**（46 字符 / 78 工具，走的是 `persistent-pwsh` 平台分支）
+   ⇒ **"必须搬 POSIX"这条对 preset 不成立**（对 VeRO 的 command 后端仍然成立，已另记）。
 5. 本地 `_research/deepseek-harness-master` 是**下载解压的源码树，不是 git clone**（无 `.git`）
    ⇒ 引用时请回到 `github.com/deepseek-ai/deepseek-harness` 核对版本与行号。
 6. **本轮我（主代理）自己核验中发现子代理一处表述过宽**：它说"差量 **100%** 来自 `tools:sdk` 段、其余 **28 段逐字等长**"。
    按行级 diff 精确分解，准确说法是：**8 个纯删除块占 39 284 字符（≈净差的 98.7%），另有 2 处等长替换（净 0 字符）**
-   —— 即 98.7% 而非 100%，且**并非只有一段不同**。**结论方向不变，数字要按 §1.1.2 用。**
+   —— 即 98.7% 而非 100%，且**并非只有一段不同**。**结论方向不变，数字要按 §1.1.4 用。**
 
