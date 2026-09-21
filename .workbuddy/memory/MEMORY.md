@@ -184,6 +184,22 @@
 | 项目治理 | `topics/project-governance.md` | 资产边界（**别重造**）、文档可信度、设计原则汇总 |
 | 资产拓扑 | `topics/asset-topology.md` | 分不清资产/副本、design-canvas 真身与副本 |
 
+## ★★ 前史与归属：`ai-base` 是**用户的前一个项目**，也是多条设计的先例来源
+
+- **`D:\project_develop\ai-base`**（Go，537 提交，最后 2026-08-26）里有 **`agent-shell`** —— 我们项目"把 agent-shell 工程思路
+  解耦重做成 Cordis 插件"里的那个 agent-shell。
+- ★ **fork 与前缀缓存：设计更早是你的，实现是上游的**（详见 `docs/fork-provenance-ai-base-vs-dsh.md`）：
+  - **实现归属 = 上游**：`@deepseek-ai/dsh-subagent-fork-in-process@0.1.1-rc.2`（`repository` = deepseek-ai/deepseek-harness）；
+    我们 `packages/` 无 fork provider；`patches/` **只 patch 过 `dsh-compaction-basic`**。
+  - **设计归属 = 更早**：ai-base `193eb26a`（**2026-07-14**）`SubagentTool — fork 上下文`；
+    `f8d6a80f`（**2026-08-04**）`API 池轮换按是否依赖前缀缓存区分`。**DSH 公开发布 = 2026-08-13**。
+  - ⇒ **收敛，不是谁抄谁**（DSH 开源前内部开发，无可查证据）。
+- ★★ **从 ai-base 拿来、上游没有的两条**：
+  1. **"前缀缓存敏感的凭据轮换"** ⇒ **实验硬纪律：臂间与轮内都不许轮换凭据/池**，
+     否则**前缀缓存被清 ⇒ 成本面读数漂**（成本面是实验主轴）。现役 `key-pool-proxy(pool=3)` 要确认不轮换，
+     并把**轮换次数**记进成本面元数据。
+  2. `stripTrailingUnpairedToolCalls` 的 7 个用例里，**"尾部多条"与"不污染源"**两个边角值得照抄。
+
 ## ★ 子 Agent = 我们的进化载体（DSH 已有一等地基，2026-09-21 通读上游源码确认）
 
 ### ★★ 嵌套与工具面裁剪：**已实测**（详见 `docs/subagent-nesting-and-toolfilter.md`）
