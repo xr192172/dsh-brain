@@ -490,3 +490,85 @@ skill 声明它需要哪些工具（SkillNode.Tools，已有数据）
 2. **`code` 模式下 SDK 段会因注册变化而重生成** ⇒ 在 `code` 模式下"压缩点合入"**价值最大**（那是唯一免费时刻）；
    在 `native` 模式下"出生时追加"也已足够便宜。**两种模式的最优策略不同，未做对照实验。**
 3. **子代能否自己选 presentation**（`presentAs` 是 per-agent，但子代是否被允许声明与父代不同）—— **未验证**。
+
+---
+
+## 11. ★★★★ 用户提出**更省的一条路**：「**上下文只暴露第一次的初始化，变动由工具内部知道**」
+
+### 11.1 用户的提案（原话）
+
+> "那你就子代不掉这个 `run_code` 呗……**Tool 字段有必要限制的那么严吗？我们只要上下文里面不动**，然后**本身在那个工具里面，它同意（知道）不就可以了**？
+> **为什么一定要追加进上下文里呢？这部分上下文只用暴露第一次的初始化即可呀，后续有什么变动？为什么要在这里变？
+> 工具内部知道，然后上下文后续也追加了不就可以。**"
+
+⇒ 读法：**别去追"让上下文与真实能力集保持同步"。让上下文的脸【固定不变】（= 初始化那一份），
+真实能力长在【工具内部】（运行时解析）；真正需要告知时，只往【消息尾端】**追加**。**
+
+★ **这是我这几轮听到的成本最低的一条路，而且机制上通。**
+
+### 11.2 机制为什么通 —— 因为"能力面"是**投影**，不是权威
+
+| 事实 | 出处（逐字） |
+|---|---|
+| `code` 模式交给模型的是：`run_code` + **`tools:sdk` 段** + "只有 `run_code` 可直接调"的规则 | `dsh-tools/README.md:16` |
+| **SDK 段是 lazy section，每次装配【重新生成】** | `:122` "a **lazy prompt section regenerating** … **at each assembly**" |
+| 它的内容 = **当前 scope 的可见工具集**（`ToolArgsMap` / `ToolOutputMap`，逐工具精确类型） | `:118`，`:122` |
+| ⇒ **所以"工具集变 ⇒ SDK 段变 ⇒ `system` 变"** | 与实测 39284 chars 净差一致 |
+| ★★ **但装配层 listener 可以【替换注册表的贡献】，且"其返回的装配是权威的"** | `:20` "A `system-prompt/assemble` listener **may replace the registry's contributions**; its returned assembly is **authoritative**" |
+| 那个 listener 由它自己负责保住**可用的 Code Mode 协议** | `:20` 同上 |
+| SDK 段对**未变的工具集是逐字节相同**的（lexicographic，缓存友好） | `:122` |
+
+⇒ **结论：SDK 段是"注册表的一个投影"，而投影是可以被我们替换的。** 我们不必让它是"逐工具清单"。
+
+### 11.3 回答"能不能改 `run_code`" —— **改不了，但也不需要改**
+
+`:16` 逐字：**"The reserved transport cannot be registered, shadowed, restricted, or removed"**
+⇒ **`run_code` 这个名字与存在性都动不了**（它是保留传输，任何模式都保留）。
+⇒ **但真正要控制的是 `tools:sdk` 段，而不是 `run_code` 本身** —— 而 SDK 段的正规入口就是装配层 listener（`11.2` 第 5 行）。**⇒ 不需要 patch。**
+
+### 11.4 回答"Tool 字段有必要限制得那么严吗" —— **那不是"权限限制"，是"声明面 = 可调面"的一致性保证**
+
+`:120` 逐字：under `code`，**"a model-direct call naming any other tool resolves to `UNKNOWN_TOOL`** at execution creation,
+before `tools/pre-execute`, approval `ask`, and guards, so nothing observes or approves a call that can only fail"，
+且拒绝信息会**指路**（"only `run_code` is callable directly — call `<name>` from inside a `run_code` program instead"）。
+⇒ 它的目的是**不让你调一个没告诉你、也必然失败的东西**，并在失败时明确告知怎么走对路（因为同一个 prompt 里确实声明了那个工具）。
+⇒ **它不是安全边界**（`dsh-tools/README.md:22`："This is **live visibility composition**, not an authority boundary"）。
+
+**⇒ 而"我们替换 SDK 段"这件事没有破坏这个保证** —— 一致性只是从"**逐工具**"变成"**逐能力名**"：
+**声明面（固定的通用调用面）仍然等于可调面（通用调用面能路由到的那些）。** 我们只是把"精确清单"挪到了运行时。
+
+### 11.5 ★ 落地形状（三段，零 patch）
+
+```
+① 脸：固定不变
+   child-scoped 的 system-prompt/assemble listener 把 tools:sdk 段替换成【固定的通用调用面】
+   （不再逐工具生成 ToolArgsMap）⇒ 工具集变化【不再改 system】⇒ 前缀永不失效
+        ↓
+② 能力：活在运行时
+   真实可用能力集由我们的插件解析；模型在 run_code 程序里通过那个稳定入口调用
+   （"工具内部知道"）—— 与 code 模式"每个 binding 重入完整工具管线"的语义一致（:118）
+        ↓
+③ 告知：只追加消息
+   需要让模型知道"现在有什么"时，往【消息尾端】追加一条（skill catalog 形态：durable user-role 消息、
+   只带 name+description、变化时追加一条完整替换消息）⇒ 代价 0
+```
+
+### 11.6 ⚠️ 代价必须成对量（不能只报收益）
+
+| 换来 | 付出 |
+|---|---|
+| **前缀永不变 ⇒ 工具集可以随时长/缩而不付一次重算** | **放弃逐工具的精确类型**（`ToolArgsMap` / `ToolOutputMap`，实测 `ToolArgsMap` 块约 27350 chars）⇒ 模型失去"精确参数类型"这一层保护 |
+| 上下文变小（不再逐工具列清单） | **错误率可能上升**（参数写错靠运行时校验才发现，而不是写出来就错不了） |
+
+⇒ **必须成对报的判据**：**「零失效省下的 token」 vs 「类型信息缺失带来的错误率/返工次数」。**
+**在拿到这一对之前，这条路只能算"机制可行、账未结"。**
+
+### 11.7 其他硬约束（会直接卡住实现的）
+
+1. **一个 agent 内不能 native/code 混**：`:196` "**within one agent no tool can be native-only while another is code-only**"
+   ⇒ 分身要么**整张脸 native**，要么**整张脸 code**。
+2. **`presentAs` 每个 agent 只能声明一次**，且**从普通 context 调用会抛**（`:21`），同一 scope 第二次声明也抛。
+3. **替换 SDK 段后，"保住可用的 Code Mode 协议"是我们的责任**（`:20` 明文）—— 这条账要认。
+4. **`code` 模式要求 `ctx.codeRuntime` 存在且有 SDK renderer**（TS 随 `dsh-code-runtime-worker-thread`；Python 内置渲染器但后端另交付）：
+   `mode: code/both` 在没有 runtime 时**拒绝装配**，且 `dsh-agent-presets` 会**拒绝挂载并点名该 id**（`dsh-agent-tool-presentation/README.md:15`）。
+5. ★ **且 SDK 段的"通用调用面"具体长什么样、我们的运行时解析怎么接进 `run_code` 的 binding 管线，未设计。**
