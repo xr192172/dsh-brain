@@ -76,6 +76,18 @@
 
 **验收信号（别忘了）**：下一次 pair 的 `diffStat` **必须非空** —— 那是 §2 那批 cwd 修复的唯一实测验收。
 
+**★ 新的操作纪律（跑批前必做）**：两个臂 worktree 是**钉在某个 commit 上的**（`git worktree add --detach`），
+所以**每次提交都会让它们变陈旧**，而新加的 `worktreeHeadState` 会 **fail-fast 拒绝跑**。
+实测（2026-09-21）：我提交 `09bd640`/`d70973d` 之后，`--check-worktree` 立刻从 **2/0 变成 0/2** —— 这条新门真的会咬人。
+⇒ 跑批流程固定为：**先提交 ⇒ 再刷新 ⇒ 再跑**：
+```bash
+HEAD=$(git rev-parse HEAD)
+for w in A B; do git -C "D:/project_develop/_wt/cli0005-$w" checkout --detach "$HEAD"; done
+node scripts/eval-run.mjs --check-worktree D:/project_develop/_wt/cli0005-A --check-worktree D:/project_develop/_wt/cli0005-B
+```
+（这不是缺陷，是"把臂钉在你正在测的那个版本上"的必然要求；fail-fast 比"静默跑旧码"好得多。）
+
+
 ---
 
 # 接手指南（**回执** + 下一项）—— 2026-09-20 15:15（§3.B **已实现并跑通第一对**；下一项 §3.D）
