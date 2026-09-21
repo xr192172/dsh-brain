@@ -35,6 +35,8 @@
 - **状态**：✅ 定。
 
 ### D2 ★ 我们加的能力**不注册进注册表**；脸上只留**一个固定的桥**
+> 🚫 **本条已被 D2′ 取代（2026-09-22）—— 不要按 D2 施工。** 保留在此仅为记录推理过程。
+> 取代原因：D2 会让内层能力绕过管线 ⇒ ★ **打坏 `outputSchema`（O13）**；而 D2′ 能同时解决 O13/O14。见下方 D2′。
 - **依据**：能力面是**投影**，不是权威。`dsh-tools/README.md:122`：SDK 段是 **lazy section，每次装配重新生成**，
   内容 = 当前可见工具集 ⇒ 注册即改 `system`。
 - **两条通道必须同时关**：
@@ -122,7 +124,64 @@
   ⇒ `run_code` 改不了；**但也不必改** —— 要控制的从来是 `tools:sdk` 段（D6）。
 - **状态**：✅ 定。
 
+### D2′ ★★★ **取代 D2**：能力**照常真实注册**（保完整管线），只把**文本投影「钉住」**（保前缀）—— **桥被取消**
+
+> **本条由 2026-09-22 的二次取证产生，取代 D2 的"不注册只留桥"。**
+> 触发原因是 **O13**（D2 会打坏 `outputSchema`），而新证据表明**有一条同时解决 O13/O14 的路**。
+
+**决定性证据（`dsh-tools/lib/index.js:1314-1321` 逐字）：**
+```js
+const functions = Object.create(null);
+for (const schema of registry.schemas(exec.agent)) {      // ★ 每次 run_code 执行时，从【当前注册表】现算
+  if (schema.name === "run_code") continue;
+  Object.defineProperty(functions, schema.name, { enumerable: true, value: binding(schema.name) });
+}
+result = await runtime.run({ program: args.code,
+  bindings: [{ global: "tools", functions, errorClass: { name: "ToolCallError", memberNameProperty: "toolName" } }], … });
+```
+⇒ ★★ **运行时绑定是"每次执行现算"的，【不是 prompt 的一部分】**。
+
+**⇒ 于是"可执行性"与"可见性"是两件可分离的事：**
+| | 由谁决定 | 我们能否控制 |
+|---|---|---|
+| **能不能调**（运行时绑定） | **当前注册表**（每次 `run_code` 现算） | ✅ 只要注册就行 |
+| **prompt 里露不露**（脸） | **`tools:sdk` 段的文本** | ✅ **可遮蔽**（D6，已验） |
+
+**⇒ 新形状（比 D2 严格更好）：**
+```
+① 能力【照常注册】到注册表
+     ⇒ 运行时绑定自动生成 ⇒ 走完整管线（guards / 调度契约 / tools/result / ToolCallError 规范化）
+     ⇒ ★ O13（结构化输出依赖 tools/result）【自动解决】
+     ⇒ ★ O14（pruner 看不到内层结果）【自动解决】
+        ↓
+② 把 `tools:sdk` 段的【取值钉住】：在一段静止期里返回【同一份缓存文本】
+     ⇒ prompt 里的脸与"能力集"彻底解耦 ⇒ 能力可以随时长/缩而【前缀逐字节不变】
+     ⇒ ★ 与 D2 的关键差别：缓存的是【上游渲染出来的那份文本】⇒ **保留全部逐工具精确类型**（不放弃 `ToolArgsMap`）
+        ↓
+③ 新能力的【名字 + args】走【消息尾端】告知（D3 的尾部目录）⇒ 追加式 ⇒ 零代价
+        ↓
+④ 到【压缩点】再让缓存失效、用上游的新渲染重算（D1：唯一免费的时刻）
+```
+
+**实现缝（两个候选，都未实施）**：
+- **(d) 首选**：`system-prompt/assemble` listener **包住 `next()`**，拿到上游装配结果后**只对 `tools:sdk` 那一段取值做"钉住"**，其余原样透传
+  （`:20` 允许替换，并要求替换者负责保住可用协议；**我们只钉一段、不删任何东西，协议按构造保住**）。
+- **(c) 备选**：从会话日志的 `request/header.system` 里**取回上一次渲染出的那段文本**再原样返回（笨重，但完全不碰装配层）。
+
+**⚠️ 必须声明的偏差（新增代价，请记账）**：钉住文本 ⇒ **"声明面 ⊊ 可调面"** ——
+被钉住的新能力**可调但未被宣告**（模型不知道它的名字，除非尾部目录告诉它）。
+★ 这与上游刻意的"**announced surface = callable surface**"一致性**相悖**（`dsh-agent-tool-presentation/README.md:23`）。
+⇒ **必须成对报**：换来"前缀永不为能力集而变"，付出"声明面与可调面暂时不一致"。
+（若判定这条不能接受，则退到 D7：`native` 模式 + 新工具排列表末尾，≈97%。）
+
+**仍然成立的（D2 的这两条保留）**：能力面的两条通道（schema/SDK 段 + `tool:<name>` 指导段）**都不得在静止期内变化**；
+**绝不要"独立注册指导"**（`dsh-system-prompt/README.md:75`：独立注册的指导不随工具消失）。
+⇒ 区别只在于：**D2 靠"不注册"来关通道；D2′ 靠"钉住文本"来关通道，从而保住了管线。**
+
+- **状态**：🟡 **待用户拍板**（因为它主动放弃了上游的 announced=callable 一致性，这属于产品取舍，不是我该单方面定的）。
 ### D9 ★★ 我们的注册必须是 **host-plane 单例 + scope 感知**；**禁止"每个分身/preset 各挂一份"**
+> ⚠️ **与 D2′/D6 不矛盾**：D9 管的是 **setup 类注册**（`registerContinuableSetup`，**不 scope-aware**）；
+> D2′/D6 管的是 **prompt section**（**scope-aware，逐层遮蔽**）。**两者是不同的注册表。**
 - **依据（上游原文，`~/.dsh/.agent-presets/council/agent.cordis.yml:169-172`）**：
   > "`tool-subagent-report` is host-plane for the same reason as the registry, not because a preset may not want it:
   > it registers a **CONTINUABLE SETUP** on that singleton rather than a tool this agent calls, and
