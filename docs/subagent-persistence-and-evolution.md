@@ -14,7 +14,7 @@
 
 | | **`continuable` child** | **`fork` child** |
 |---|---|---|
-| 谁能建 | `spawn`（上游 base bundle 绑 `backgroundMode: continuable`） | `subagent_fork`（上游 base bundle 绑 **`one-shot`**） |
+| 谁能建 | `spawn`（base bundle 与 shipped presets 都绑 `backgroundMode: continuable`） | `subagent_fork`（**`fork` provider 是上游的**；绑定**两层不一致**：host 层 base bundle = **`one-shot`**，agent 层 shipped presets = **`continuable`** —— 见 §5） |
 | 上下文 | **durable**；**不在时从它持久化的 Session 冷启**（cold-resume） | **继承父代"已完成回合"的前缀**，**创建时快照一次** |
 | 持久化语义（原文） | — | *"The fork prefix is captured **ONCE**, at creation: it becomes part of the child's own durable transcript, so a later cold resume **replays that prefix** instead of re-forking the parent's newer history."* |
 | 有 `report` 通道吗 | **有**（`dsh-tool-subagent-report`：`report` 工具 + `tool:report` system-prompt 段） | **shipped 配置里没有**（正是为了让子代请求头与父代逐字节相同） |
@@ -75,7 +75,8 @@
 > 因为"复用止于第一个不同的字节"。
 > 而 `report` 工具 schema 与 `tool:report` system 段**都住在请求头**（system 块与 tool 块**先于所有消息**）
 > ⇒ **continuable 的 forked child 在第一个继承回合之前就作废了复用**，把整份转录重新 prefill 一遍。
-> ⇒ **所以 shipped 配置把 fork 绑成 `one-shot`；`spawn` 保留 `continuable`。**
+> ⇒ **所以 host 层的 base bundle 把 fork 绑成 `one-shot`；`spawn` 保留 `continuable`。**
+> ⚠️ **但 agent 层的 shipped presets 仍写着 `continuable`**（同一个 id）—— 两层谁生效**尚未判定**，见 §5。
 
 ★★ **这段论证与我们今天的实测是同一件事**：我量到 **code 模式下工具目录被渲染进 `system`、占两臂净差的 98.7%**；
 上游说的是 **"工具 schema 与 system 段都在请求头，且先于消息"**。
@@ -112,32 +113,49 @@ system 长度 + 消息数 + 是否含 `report` 工具/section），让"继承与
 
 ---
 
-## 5. ⚠️ 顺带核验出**我们自己的一个偏离**（落在成本面上）
+## 5. ⚠️ 更正：**不是"我方偏离"，是【上游自己两层互相矛盾】**（我先前把归属搞错了）
 
-| 行 | 上游 base bundle | **我们现役 `council` preset** |
+**先纠正我先前写的那句"我方偏离"——错的。** 实测归属：
+
+| 问题 | 答案 | 证据 |
 |---|---|---|
-| `subagent`（spawn） | `backgroundMode: continuable` | `backgroundMode: continuable` ✓ 一致 |
-| **`subagent_fork`（fork）** | **`backgroundMode: one-shot`**（带注释说明原因） | **`backgroundMode: continuable`** ✗ **相反** |
-| `council_architect` | — | `continuable` |
+| `subagent_fork` / `fork` provider 是我们写的吗？ | **不是，是上游的** | 我们 `packages/` 只有 `capability-bridge`/`conveyor-context`/`design-canvas-bridge`/`key-pool-proxy`/`skill-tree`/`subagent-council`/`switchboard`/`tool-evolution`；**没有任何 fork provider**（`subagent-council` 注册的是 `council-architect`）。fork 由 `@deepseek-ai/dsh-tool-subagent` + `@deepseek-ai/dsh-subagent-fork-in-process` 提供 |
+| 我们 `council` 那段是哪来的？ | **逐字继承自上游 shipped preset** | 我们 `council` 的 `tool-subagent-fork` 段与 `node_modules/@deepseek-ai/dsh/config/agent-presets/standard/agent.cordis.yml` **逐字相同**（含 `provider: fork` / `toolName: subagent_fork` / `backgroundMode: continuable`） |
 
-上游为 `subagent_fork` 改成 one-shot 的理由就是 §3.2 那段（**前缀复用被请求头增量作废**）。
-**我们把它改回了 continuable。**
+**真相是：上游两个层用【同一个 loader id `tool-subagent-fork`】，但绑定不同：**
 
-**⇒ 已核验：这个偏离落在"坏的那一侧"**（下面三条都实测过）：
-1. **`tool-subagent-report` 确实在装配树里**：`--profile web --dump-config` 第 **272-273 行**
-   （`- id: tool-subagent-report` / `name: '@deepseek-ai/dsh-tool-subagent-report'`，来自 `@deepseek-ai/dsh-base`，
-   被 `dsh-web-app` patch）。⇒ **子作用域增量（`report` 工具 + `tool:report` system 段）是活的。**
-2. 我们 preset 自己的注释也承认它是 **CONTINUABLE SETUP**：
-   *"it registers a CONTINUABLE SETUP on that singleton… every child gets `report` registered once per live session"*
-   ⇒ 对 **continuable** 子代，`report` **是被装的**（笔记：*"absent from roots and one-shot agents"*）。
-3. 笔记把这种组合判为：*"**wrong only while a child-scope delta precedes inherited history**"*，
-   而那种组合的后果是 *"**pays fork's duplication cost and collects none of its benefit**"*。
+| 层 | 文件 | `backgroundMode` | 附注 |
+|---|---|---|---|
+| **host / deployment 层** | `packages/bundle/base/cordis.patch.yml` | **`one-shot`** | **带三行注释写明理由**：*"Fork stays one-shot: a continuable child's `report` tool and prompt section precede the inherited history a fork exists to reuse; one-shot fork children install neither, keeping the parent's request prefix."* |
+| **agent / 会话层** | shipped presets `standard` / `code` / `cordis` | **`continuable`** | 同一个 id，**没有**注释 |
+| （我们的） | `~/.dsh/.agent-presets/council` | `continuable` | = 继承 `standard` 那一层 |
 
-⇒ **结论（待你拍板）**：我们的 fork 子代大概率在**"付 fork 的复制成本、拿不到复用收益"** —— 这是**纯成本回归**，
-而且**成本面正是我们实验的一根主轴**（`wallMs` / `tokens` / `callsTotalMs`）。
-**建议改回 `one-shot`**；但这是**行为/语义变更**（fork 子代将不再是 continuable、`send_message` 也不再寻址它们），
-**所以我没有擅自改**，先报给你。
-（合法例外：若某个部署**故意要长期存活的 fork 子代**，那就该接受这份成本 —— 但那要写清是**有意的**。）
+**⇒ 而架构笔记自己列的是**：*"Every shipped composition binds the fork delegation tool to `backgroundMode: one-shot`: [the base bundle], [the ACP example], [the headless example]"*
+—— **它列了 bundle 与两个 example，【没列 agent presets】**。⇒ 两种解释，**我无法从现有材料判定**：
+- (i) 那次改动**漏改了 presets**（上游的遗漏/bug），或
+- (ii) 两层各管一段、**preset 层对该 agent 生效** ⇒ 那笔记那句 *"no shipped composition creates a continuable forked child"* 就是**不准确的**。
+
+### ★ 这直接影响你的设计意图（而且你的意图是对的）
+
+你说：*"我当时设计这个 fork 的时候，是希望**主进程直接 fork 自己的上下文进去**，这样就能**省掉一笔让子进程理解上下文的开支**。"*
+
+**这正是 fork 的用途**（上游笔记原话：*"its one concrete payoff is **provider-side prefix reuse**"*）。
+⇒ **而满足这个意图的配置恰恰是 `one-shot`**：不装 `report`，子代请求头与父代**逐字节相同** ⇒ 前缀可复用、不必重新 prefill；
+**`continuable` 会装 `report` 工具 + `tool:report` system 段，在第一个继承回合之前就把复用作废**
+（笔记：*"pays fork's duplication cost and collects none of its benefit"*）。
+⇒ **你的意图 = 上游 base bundle 的立场；与该立场冲突的是 upstream presets 那一层。**
+⇒ **所以要改的是 `preset` 那层**（或先确认"到底哪层生效"）—— **不是"我们改错了"。**
+
+### ★ 新问题（可验证，且正是铁律 #18 的同族）：**两层同 id，谁生效？**
+
+这与我今天记的"多根配置、同 id 静默遮蔽"是同一族问题，**而我目前【没有】这条判据**。可验证路径：
+
+1. **便宜**：读 mount 语义 —— agent preset 的行是否**覆盖** host 层的行？（`packages/preset/agent-presets` 的 mount/`isolate` 逻辑、cordis 的 scoped realm 语义）
+2. **经验（推荐，且我们已有工具）**：**看一个 fork 子代的请求头里有没有 `report` 工具 / `tool:report` 段**
+   —— **有 ⇒ `continuable` 生效；无 ⇒ `one-shot` 生效。**
+   实现方式与我们现有 `measure-arm-face.mjs` 同路（读子代会话的 `request/header` 的 `tools[]` 与 `system`）。
+   ★ **这正好是我先前建议要加的"上下文指纹读数"的第一个真实用例**，而且它**同时**回答了"哪层生效"。
+
 
 ---
 
@@ -154,8 +172,12 @@ system 长度 + 消息数 + 是否含 `report` 工具/section），让"继承与
 
 ## 7. 未验证 / 没把握
 
-1. **我们 `council` 把 `subagent_fork` 设成 `continuable` 是"有意"还是"历史遗留"** —— 未查（见 §5 待办）。
-2. **`dsh-tool-subagent-report` 在我们现役 profile/preset 里到底装了没有** —— 未查；这决定 §5 的组合是"合法"还是"纯成本回归"。
-3. **"冷启"的实际行为未实测**（只在源码/文档描述层确认：`cold-resumed from its persisted Session`）。
-4. `capabilities` 表里 `acp` / `dsh-sdk` 的 false 是**源码注释**（可能落后于实现）；未跑测。
-5. 上游那份是**下载树不是 git clone**（无 `.git`）⇒ 行号会漂，引用请回仓库核对。
+1. ~~我们 `council` 把 `subagent_fork` 设成 `continuable` 是"有意"还是"历史遗留"~~ ⇒ **已查清：是上游 shipped preset 的默认，我们逐字继承**（见 §5）。
+2. ~~`dsh-tool-subagent-report` 在我们现役 profile/preset 里到底装了没有~~ ⇒ **已查清：在装配树里**（`--profile web --dump-config` 第 272 行，来自 base bundle）。
+3. ★★ **【新的头号未闭合项】host 层与 agent 层同 id 冲突，谁生效？** —— 现有材料判不了（见 §5 的两种解释）。
+   验证法已有：**看 fork 子代请求头里有无 `report` 工具 / `tool:report` 段**。
+4. **"冷启"的实际行为未实测**（只在源码/文档描述层确认：`cold-resumed from its persisted Session`）。
+5. `capabilities` 表里 `acp` / `dsh-sdk` 的 false 是**源码注释**（可能落后于实现）；未跑测。
+6. 上游那份是**下载树不是 git clone**（无 `.git`）⇒ 行号会漂，引用请回仓库核对。
+7. ★ **一处我自己的归属错误（已改正）**：我先前把"preset 里 fork=`continuable`"写成**我方偏离**，
+   实际是**上游两层互相矛盾、我们只是继承**。教训与铁律 #17 同族：**先说清"这东西是谁的"再谈"谁错了"。**

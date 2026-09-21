@@ -132,6 +132,13 @@
       当天实例：`armFaceCheck`（上游 registry 级"恰好固定 prompt + 两工具"断言已有）、
       靶场隔离（**VeRO** 用 "isolation holds *by construction, not by instruction*" 解掉了）。
     · **证据必须分级**：**直接读过** / **二手汇总** / **推断** —— 引用时标明，**二手不许当结论**。
+    · ★★ **先搞清楚"这东西是谁的"，再谈"谁错了"**（2026-09-21 实证翻车）：
+      我把"preset 里 `subagent_fork=continuable`"直接写成**"我方偏离"**，
+      实际是 **`fork` 是上游的、我们的 preset 逐字继承自上游 `standard`**，
+      真相是 **上游 host 层（base bundle=`one-shot`）与 agent 层（shipped presets=`continuable`）自己打架**。
+      ⇒ **纪律**：判定"这是不是我们改坏的"之前，**先做归属核验**——
+      **① 我们自己的 `packages/` 里有没有这个实现？② 我们那份配置与上游 shipped 的那份是否逐字相同？**
+      两步都做完再下结论，否则会把**上游的矛盾**写成**自己的罪状**（方向反了，代价是去改不该改的地方）。
 18. **★ "回读成功" ≠ "生效的是你以为的那份"**（2026-09-21 实测）：
     在 `~/.dsh/.agent-presets/minimal/` 建同名 preset **会被随附（只读，`trust=system`）那份静默遮蔽** ——
     `agentPreset.select` 返回 **HTTP 200**、**回读 `session.list` 也显示 `minimal`**，但**装的是随附那份**
@@ -193,9 +200,16 @@
 - ★★ **上游的论证与我今天的实测是同一件事**：笔记说 `report` 工具 schema 与 `tool:report` system 段**都住在请求头且先于消息**
   ⇒ 任何"加在继承历史之前"的子作用域增量**作废前缀复用**；
   我量到 **code 模式下工具目录被渲染进 system、占两臂净差 98.7%**。**两条独立证据同一机制。**
-- ⚠️ **我方偏离（待用户拍板）**：上游 `subagent_fork` 绑 **`one-shot`**，**我们 `council` preset 绑的是 `continuable`**；
-  而 `tool-subagent-report` **确实在装配树里**（`--profile web --dump-config` 第 272 行）
-  ⇒ 这正是上游刻意移除的"坏组合" ⇒ **fork 子代付复制成本却拿不到复用收益 = 纯成本回归**（成本面是我们的主轴）。
+- ⚠️ **上游自己两层互相矛盾（**不是**我方偏离 —— 我先前的归属写错了）**：
+  fork 是**上游的**（我们 `packages/` 里没有 fork provider）；我们的 `council` 那段与 shipped `standard` **逐字相同** ⇒ 只是继承。
+  **同一个 loader id `tool-subagent-fork` 两层绑定不同**：
+  · **host 层** `packages/bundle/base/cordis.patch.yml` = **`one-shot`**（**带注释写明理由**）；
+  · **agent 层** shipped presets `standard`/`code`/`cordis` = **`continuable`**（无注释）。
+  ⇒ 而架构笔记只列了 bundle + 两个 example 为 `one-shot`，**没列 presets** ⇒ 要么**漏改**，要么**preset 层对该 agent 生效**。
+  · ★ **用户的 fork 设计意图（"fork 自己的上下文进去，省掉子进程理解上下文的开支"）正是 fork 的用途**
+    （上游原话 "its one concrete payoff is provider-side prefix reuse"）⇒ **满足它的是 `one-shot`，`continuable` 反而作废复用**。
+  ⇒ **待验证：两层同 id 谁生效**；判据 = **看 fork 子代请求头里有无 `report` 工具 / `tool:report` 段**
+    （有 ⇒ continuable 生效；无 ⇒ one-shot 生效）—— **这也是我建议加的"上下文指纹读数"的第一个真实用例**。
 - ★ **可贡献的上游切口**：上游写明 *"**The restriction is composition, not code**"*（`prepareContinuable` 还在、`--patch` 即可重开），
   重开条件 = **issue #2124「子代的 system prompt 与 tool schemas 能与其父代逐字节相同」**
   —— **而这正是 `scripts/measure-arm-face.mjs` 能去证明的东西**。
