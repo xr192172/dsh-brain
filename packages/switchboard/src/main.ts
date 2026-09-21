@@ -26,7 +26,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { existsSync, readFileSync } from 'node:fs'
 import { FrontDoor } from './proxy.js'
-import { Coordinator, type CoordinatorConfig } from './coordinator.js'
+import { Coordinator, allocGenPort, type CoordinatorConfig } from './coordinator.js'
 import { AdminClient } from './adminclient.js'
 import { spawnGen } from './spawner.js'
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -43,8 +43,14 @@ function boot(config: CoordinatorConfig): void {
   const front = new FrontDoor()
 
   // bootstrap：spawn 初始 active gen A
-  const genId = 'gen-' + String(config.portBase + 1)
-  const port = config.portBase + 1
+  // ★ 2026-09-21 修（回执 §A3）：bootstrap 代原先写死 `portBase + 1`，**绕过了保留端口跳号**
+  //   ⇒ 只要 `GEN_PORT_BASE=3100`，bootstrap 代就是 **3101**（= key-pool-proxy 的保留端口）
+  //   ⇒ **栈直接起不来，且无任何保护**。而 handover 代早就走 `allocGenPort` 了（`coordinator.ts:296`）
+  //   ⇒ **两条路径的"端口→代"映射必须一致**，所以这里也走同一个函数（slot 1 = bootstrap 代）。
+  //   实测依据：`scripts/test-gen-port-alloc.mjs` 已扫 slot 1..60（含 slot 1），
+  //   并带红向用例（"把朴素分配喂进去必须报 3101 —— 否则这道门只是句口号"）。
+  const port = allocGenPort(config.portBase, 1)
+  const genId = 'gen-' + String(port)
   const adminPort = config.adminBase + 1
   const genDir = join(config.workDir, genId)
   const nodeBin = config.nodeBin
