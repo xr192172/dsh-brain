@@ -124,6 +124,14 @@
     实测三条 B 会话**都读了 `check.mjs`**（含判据实现与期望值），题面 README 还把陷阱逐条印出来
     ⇒ 任何"陷阱"都被降级成"照抄规格" ⇒ **区分度归零**。
     违反 `evals/README.md` **R1** ⇒ `cli-0004`/`cli-0005` 同病；**配新题前必须先解这一条**。
+17. **★★ 做任何"功能组模块"之前，先查三处；否则不许自造**（2026-09-21 用户定，当天两次打脸）：
+    ① **本地有没有已经 clone 的源码**（最便宜、最常被跳过 —— `D:\project_develop\_research\` 里**就有完整 DSH 源码**）；
+    ② **GitHub**（同义词 + `topic:` + star 数）；③ **arXiv**（2026 年这个方向多半已经有名字）。
+    · 判据：**「造格子」还是「造房子」** —— 只有**这一格确实没人做**才自造。
+    · **红线**：*同一件事，开源已经做出了更好的版本，而我还在自己写*。
+      当天实例：`armFaceCheck`（上游 registry 级"恰好固定 prompt + 两工具"断言已有）、
+      靶场隔离（**VeRO** 用 "isolation holds *by construction, not by instruction*" 解掉了）。
+    · **证据必须分级**：**直接读过** / **二手汇总** / **推断** —— 引用时标明，**二手不许当结论**。
 18. **★ 判据要证明"修复真的在起作用" ⇒ 用【消融自证】：撤掉修复，判据必须变红**（2026-09-21 定型）：
     · 光"写了测试且它通过"**不够** —— 那可能是**测试与被检对象一起错**。
     · 强的形式：**逐个撤回补丁 ⇒ 对应断言必须变红**。
@@ -160,6 +168,18 @@
   公开榜只当"不许退化"的地板。`npm run eval:validate` 证"打 seed 后 oracle 必须变红"（否则假题）。
 - `docs/upstream-defects.md`（归属）/ `docs/upstream-drift-2026-09-20.md`（漂移体检）。
 - `docs/two-service-custody-review.md` —— 拆服务评审：能替"部署"层、**替不掉"判据"层**。
+- ★★ **`docs/oss-arena-landscape-2026-09.md` —— 靶场地基的开源现实（2026-09-21）**：
+  **VeRO/HarnessOpt-Bench**（Scale AI，MIT：evaluator 持 case 与评分、沙箱外、20/40/40、预算网关）、
+  **HarnessDev**（把评测单位换成"可运行的 harness"）、**DGM/HGM**（直接用 SWE-bench 当判据）、
+  **DSH 社区**（200K+ star、Discord、`dsh-plugin`）。**含证据分级（直接读过/二手/推断）与未核实清单。**
+- ★★ **`docs/reuse-and-composition-plan.md` —— 复用与组合 + 三条新想法（2026-09-21）**：
+  ① **上游 `minimal` = DSH 自己的 RL harness**（恰好 2 工具、无 compaction、无 runtime-context、
+  env 参数化）⇒ **我们的"关掉工具"臂不干净，梯度要以它为 G0 重建**；
+  ② **四块拼一个闭环**：DSH（target）+ 上游 minimal（下界臂）+ **VeRO**（判据/隔离/搜索）+
+  **我们的 switchboard**（蓝绿换代 = 别人没做的那一格）；
+  ③ ★ **2×2 实验**（工具多/少 × 提示长/短）—— 把"工具面"与"提示长度"这个**当前拆不开的混淆**分开。
+- `docs/eval-discrimination-plan.md` —— cli-0005 为什么零区分度（含 **S4：判据可读 ⇒ 难度折价**）+ cli-0007 设计稿
+  + **步 0 结果**（行为面叶子工具直方图：两臂 `byTool` 同形但叶子层分化）。
 
 ## ⏭ 交接
 
