@@ -117,7 +117,63 @@
 
 ---
 
-## 6. 未验证 / 没把握（诚实清单）
+## 6.5 ★★★ 已在 Linux 上端到端跑通（WSL，2026-09-21 下午；我核验过产物）
+
+**WSL 修好后**（见 `docs/wsl-recovery-2026-09-21.md`），在 `Ubuntu-24.04` 里真跑了一次完整评测：
+
+| 结果 | 值 |
+|---|---|
+| 判定 | **`command` 后端在 Linux 上可用** ✅ |
+| `vero evaluate` | **0.60 s** |
+| `vero run`（含 1 次 produce + 2 次 evaluate） | **0.73 s**，输出 `Baseline: 00b64189…（0.0）` → `Best: 9861d58f…（1.0）` |
+| 是否要凭据/网络 | **都不要**；`unshare -n`（只剩 `lo`）下 `vero evaluate` 仍成功 |
+| 推荐依赖装法 | `uv sync --extra harbor --no-dev`（**别用 `--all-extras`**）+ `uv run --no-sync …` |
+
+**最小可用配置就是一份 ~40 行的 `vero.toml`**（我读了原文）：
+
+```toml
+[target]
+root = "./target"          # 一个干净的 git 仓库（≥1 commit、无未提交）
+ref = "HEAD"
+[backend]
+id = "node-oracle"; kind = "command"; harness_root = "./harness"
+command = ["/usr/bin/node", "oracle.js",
+           "--workspace","{workspace}", "--request","{request}",
+           "--report","{report}", "--artifacts","{artifacts}"]
+[[evaluations]]            # 用例集
+name = "smoke"; agent_can_evaluate = true; agent_visible = true; agent_selection = "arbitrary"; disclosure = "full"
+[protocol]
+selection_evaluation = "smoke"; timeout_seconds = 120; max_proposals = 1
+[objective]
+metric = "pass"; direction = "maximize"
+[[objective.constraints]]
+metric = "pass"; operator = "=="; value = 1.0
+[session]
+id = "…"; directory = "./.vero/baseline"
+```
+再加 5 行 `[optimizer] kind="command"; root="./producer"; command=["/usr/bin/node","fix.js","--workspace","{workspace}"]`
+⇒ **优化器也只是一个命令**（我们自己的 Node producer 就能当）。
+
+**产物结构（核验过真在）**：`.vero/<session>/evaluations/<eval-id>/{evaluation.json,cases/,artifacts/}`、
+`.vero/<session>/candidates/{records/,repository.git/}` ⇒ **每个候选被提交进一个 git 仓库**（"版本化 artifact"属实）。
+`evaluation.json` 里有 `schema_version:1`、`lifecycle:"complete"`、candidate 的 `id/version/parent_id`、
+evaluation_set 的 `partition`/`selection`、以及 `limits`（`timeout_seconds`/`case_timeout_seconds`/`max_concurrency`/
+`error_rate_threshold`/`retry{max_attempts, retry_on_timeout, retry_status_codes:[429,503,529]}`）。
+
+**Node oracle 的四个限制（实测）**：① `PATH` 被钉成 `os.defpath`（oracle 实测拿到 `env_path=/bin:/usr/bin`）
+⇒ **node 用绝对路径**；② 环境只注入 `PATH/LANG` + `TMPDIR/TMP/TEMP/SYSTEMROOT`，其余靠 `[backend.environment]`
+/`passthrough_environment`；③ 协议是 **argv + 文件**（不是 stdin/stdout）；④ cwd = `harness_root`。
+另：report 里的 artifact 路径是**相对 `{artifacts}` 目录**的（写 `"oracle.log"` 而非 `"command/oracle.log"`；`command/{stdout,stderr}.log` 是后端自己加的）。
+
+### 对我们的结论
+
+**L2（隔离/拆档）+ L3（version→evaluate→select）现在可以整层交给 VeRO**，我们只需提供：
+**① 一个干净的 git 仓库当 target（放我们的 profile/preset 声明）+ ② 一个 Node oracle（我们的判据）+ ③ 一份 ~40 行 `vero.toml`**。
+离线、亚秒级、无凭据 ⇒ 可以进 CI。
+
+---
+
+## 7. 未验证 / 没把握（诚实清单）
 
 1. **`uv sync --all-extras` 未完成** ⇒ `optimize` 相关代码路径（`vero` agent / `openai-agents`）**未验证**。
 2. **`harbor build` 只验证了"编译"**，**未跑 `vero harbor run`**（需 Modal 凭据；内层 harness 要 Linux + `run_as`）。

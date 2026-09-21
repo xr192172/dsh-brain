@@ -54,18 +54,58 @@
 3. ⚠️ **硬限制：`persistent-bash` 需要 POSIX 终端底座**，笔记原文写明 **"this preset does not support Windows agents"**
    ⇒ 要用它必须走 **WSL 或容器**（本机 Docker **28.0.4 可用**，见 §4）。
 
-#### 1.1.1 ★ 已核验：`minimal` 的 system prompt 就是**那一句**（46 字符）
+#### 1.1.1 ★ 已核验（**但机制我先前引错了，且数字依赖版本轴**）
 
-上游自测直接断言"**组装出的 system == 环境变量给的那句话**"（**逐字相等，不多不少**）：
-`examples/jsonrpc-agent/tests/sdk.snapshot.ts:41` 定义
-`MINIMAL_SYSTEM_PROMPT = 'You are the environment-selected minimal software engineer.'`，
-`:109` 注入 `environment: { DSH_SYSTEM_PROMPT: MINIMAL_SYSTEM_PROMPT }`，
-`:112` 断言 `expectedSystem: MINIMAL_SYSTEM_PROMPT`。
-⇒ 与 `minimal.cordis.yml` 的 `persona: DSH_SYSTEM_PROMPT ?? '…'` 一致 ⇒
-**默认 persona 只有 46 字符**（`'You are a helpful software engineer assistant.'`.length === 46，已复算）。
+**⚠️ 我先前把两个不同的对象混为一谈 —— 这是本轮实测纠正的：**
 
-**⇒ 46 vs 39 605：差 ≈ 860 倍。** 主张**成立**：
-`exp-base-nodc` **不是**干净的工具面下界。
+| 对象 | 文件 | 关键差异 |
+|---|---|---|
+| **例子**（JSON-RPC 示例） | `examples/jsonrpc-agent/minimal.cordis.yml`（82 行） | 用 `@deepseek-ai/dsh-agent-spine-demo`；**有 `DSH_SYSTEM_PROMPT`**；有 `includeHarnessIdentity`/`workspaceContext`/`skills` 那几个旋钮 |
+| **真正的 agent preset** | `apps/cli/config/agent-presets/minimal/agent.cordis.yml`（62 行，master） | 用 `@deepseek-ai/dsh-persona` + `complete: true`；**没有 `DSH_SYSTEM_PROMPT`**；persona **硬编码** |
+
+⇒ 我先前那句"上游自测断言 system == 环境变量那句话"**只对「例子」成立**，对「preset」不成立。**结论仍是 46 字符，但要换依据**：
+
+**master 的 preset 原文（我逐字读过）**：
+```yaml
+# The `minimal` agent preset: a fixed-prompt, two-tool coding-agent composition.
+# The persona is the complete system prompt, so global identity, Web orientation,
+# tool guidance, and later assembly listeners cannot add prompt text. ...
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are a helpful software engineer assistant.
+    complete: true
+    includeRuntimeContext: false
+```
+⇒ persona **硬编码**就是那一句，**46 字符**（我复算过 `'You are a helpful software engineer assistant.'.length === 46`），
+且 `complete: true` + `includeRuntimeContext: false` ⇒ 别的段落加不进去。
+
+**★ 但工具数是【版本依赖】的（这条是新的）**：
+
+| 版本 | 注释自称 | 工具 |
+|---|---|---|
+| **master 源码**（`package.json` = 0.1.0-rc.5） | *"a fixed-prompt, **two-tool** … composition"* | `persistent-bash` + `str_replace_editor`（+ `fs-local` 组）= **2** |
+| **npm 发布 0.1.5-rc.2**（我们在 WSL 里装的） | *"a fixed-prompt, **single-tool** … composition"* | **只有 shell**（`persistent-bash` / `persistent-pwsh` 二选一）= **1**；**无 `str_replace_editor`、无 fs 组** |
+| **我们自己装的 0.1.1-rc.2** | — | **`node_modules/@deepseek-ai/dsh-agent-presets/` 里根本没有 `presets/` 目录** ⇒ 我们这版的 preset 不走"文件式发布" |
+
+另外 master 用 `text:`、发布版 0.1.5 用 `prefix:`（schema 也在变）。
+⇒ **所以"G0 = 2 工具"只对 master 那版成立；对我们现役版本，G0 的工具数要按我们自己的 schema 定。**
+
+#### 1.1.2 ★★ 我们这版 preset 的真实机制（**直接决定 G0 怎么做**）
+
+- 用户级 preset 根目录：**`~/.dsh/.agent-presets/<id>/{agent.cordis.yml, preset.yml}`**
+  （随附 preset 是**只读**的，"system trust"；要加能力必须走这个 user 根目录 —— 我们仓库的
+  `scripts/add-preset-council.mjs` 头注释就写了这一条）。
+- 我们现役的 `council` preset 有 **263 行**：**显式逐行列出工具**（`tool-bash`/`tool-pwsh`/`tool-fs`/
+  `tool-fs-search`/`tool-jobs`/`tool-skill`/`tool-goal`/…），**并挂 `compaction`**，persona 用 `text:`。
+- ⇒ **这就解释了为什么我们的下界臂 `exp-base-nodc` 还有 39 605 字符**：
+  它只是"少装了一个 profile 层的包"，**preset 那一层仍带着 compaction + 全部工具行 + harness identity + Web orientation**。
+- ⇒ **G0 的正确做法**：**照着我们自己的 schema，从 `council` 裁出一个小 preset**
+  （persona `text:` + `complete: true` + `includeRuntimeContext: false`；**只留 `tool-bash`**；
+  **不挂 compaction / skills / jobs / goal**），落成 `~/.dsh/.agent-presets/minimal/`。
+  **不需要抄上游的文件**（版本 schema 不同，抄过来反而会错）。
+  ⇒ 这一步把"工具面"变成**一份 ~40 行、可 diff、显式枚举**的声明 —— 正是 §3.1 想要的形态。
+
 
 #### 1.1.2 ★★ 但归因要改：那 39 605 字符里，**compaction / 沙箱 / runtime-context 贡献 0**
 
@@ -150,8 +190,8 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 | 级别 | 组成 | 备注 |
 |---|---|---|
-| **G0** | **上游 `minimal`**：`bash` + `str_replace_editor` | 上游 RL 参考运行时，2 工具 |
-| **G1** | G0 + 文件读写/搜索组 | |
+| **G0** | **按我们自己的 schema 裁出的最小 preset**：persona(`text:`) + `complete:true` + `includeRuntimeContext:false` + **只留 `tool-bash`**，**不挂 compaction/skills/jobs/goal** | 落成 `~/.dsh/.agent-presets/minimal/`；**不要抄上游文件**（版本 schema 不同，见 §1.1.1/§1.1.2） |
+| **G1** | G0 + 文件读写/搜索组（`tool-fs` / `tool-fs-search`） | |
 | **G2** | G1 + `web_search` / 计划 / 目标组 | |
 | **G3** | G2 + `@dsh-brain/design-canvas-bridge`（8 工具） | |
 | **G4** | G3 + MCP insert（+64 工具） | = 现役 `web` 的形态 |
@@ -188,24 +228,22 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 ## 4. 立刻可做（半天，且都要么零成本、要么离线）
 
-1. ⚠️ **"量上游 minimal 的真实形状"——已试，跑不通**（这本身是结论）。
-   确切的阻塞点（已实测）：
-   - PyPI 上 `deepseek-harness-sdk` 只到 **0.1.5rc1**，其 `DeepSeekHarnessConfig` **没有** `session_root`/`cordis` 字段
-     ⇒ 仓库里的 `minimal.py` **领先于已发布包**，原样报错：
-     `TypeError: DeepSeekHarnessConfig.__init__() got an unexpected keyword argument 'session_root'`；
-   - 改走 bundled runtime 又是 profile 制：`dsh --profile minimal --dump-config` → **`Error: dsh: profile "minimal" does not exist`**，
-     且 `DSH_CORDIS_CONFIG` 被忽略；
-   - `wsl.exe -d Ubuntu-24.04` → **`Wsl/Service/HCS_E_CONNECTION_TIMEOUT`**（列表显示 Running 但连不上）。
-   ⇒ **结论：这个"干净下界"在当前已发布载体上不可达** ⇒ 要用它得**从源码构建 DSH**，或等发布对齐。
-   （替代做法：**先静态引用 §1.1.1 的 46 字符**，那个已被上游自测钉死；动态复现留到源码构建之后。）
-2. ✅ **离线编译一次 VeRO**（`uv` 与 Docker 都在，编译**不需要凭据**）—— **已做，结果见
-   `docs/vero-integration-findings.md`**。三条关键结论：
-   · **`command` 后端语言无关 ⇒ 可以是本地 Node/CLI，且不用容器**（我们自己的 node oracle 可直接当 evaluator）；
-   · ⚠️ **但它在 Windows 上直接失败**（`LocalSandbox` 的 POSIX 假设），而在 Windows 上真能用的
-     `DockerSandbox` **没被接到 CLI**（`vero optimize` 无 `--sandbox` 选项）；
-   · ⇒ **和上游 `minimal` 卡在同一处：我们需要一个 POSIX 底座**（WSL 或 Linux 容器）。
-   **`uv sync --all-extras` 会卡死**（litellm 的 sdist 要拉 Rust 工具链）；用
-   **`uv sync --extra harbor --no-dev`** + **`uv run --no-sync …`** 绕过。
+1. ⚠️ **"量上游 minimal 的真实形状"——动态仍未取得**（这本身是结论）。
+   - 已试并**堵死**的路：`pip install deepseek-harness-sdk` 只到 **0.1.5rc1**（缺 `session_root`/`cordis`）；
+     `dsh --profile minimal` → **`profile "minimal" does not exist`**（**轴错了 —— 它是 agent preset，不是 profile**）。
+   - 已试并**未打通**的路：起 `dsh --profile web --patch`（把默认 preset 改成 `minimal`）后，
+     unary RPC 全部 **404**（鉴权已过：303 + `set-cookie`；404 出处在 `dsh-client-connection/lib/index.js:582/640`，
+     条件 `!interceptor.matches(endpoint)`）⇒ **没找到正确的请求信封**；且 headless 那次死于缺凭据
+     （`dsh: MISSING_CREDENTIAL …`），**一个 turn 都没起**，所以会话日志里没有 `request/header`。
+   - ★ **但它其实有一条更便宜的已知路**：**我们自己的 `scripts/eval-run.mjs` 里就有能用的信封** ——
+     `rpc('agentPreset.select', { sessionId, agentPreset })` + `POST /api/<method>` 带
+     `{type:'client-request', rpcId, method, payload}`；会话选完 preset 后 `--traj` 直接能读
+     `metrics.systemChars` / `toolSetSize`。⇒ **用我们自己的装置量"某 preset 的 system 长度与工具数"是现成的。**
+   - 另：**会话日志是 `.zstd` 压缩**（`session.v3.jsonl.zstd`），不是裸 JSONL —— 读之前要先解压。
+2. ✅ **VeRO：离线编译 + 在 Linux（WSL）上端到端跑通** —— 见 `docs/vero-integration-findings.md` §6.5：
+   `command` 后端**可用**（`vero evaluate` 0.60s / `vero run` 0.73s，**离线、无凭据**），
+   最小配置就是 **一份 ~40 行的 `vero.toml`** + 干净 git 仓库 + **一个 Node oracle**；
+   **优化器也只是一个命令**（我们自己的 Node producer 即可）。⇒ **L2+L3 可以整层交给它。**
 3. **之后**才谈 cli-0007 要不要写（很可能被 §3.1 的声明式梯度或 §3.2 的"承认耦合"路线取代）。
 
 
@@ -214,9 +252,13 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 ## 5. 诚实：没核实 / 没把握
 
 1. **minimal 在本机 WSL/容器里能否真跑通** —— **已试，跑不通**（§4.1 给了确切阻塞点：SDK 版本落后 + profile 不存在 + WSL 连不上）。
-2. ~~"minimal 的 system prompt 会短得多"是预期~~ ⇒ **已升级为静态已证**：上游自测断言
-   "system == 环境变量那句话（逐字）"，默认 persona 46 字符（§1.1.1）。
-   **仍未动态复现**（见 §4.1）。
+2. ~~"minimal 的 system prompt 会短得多"是预期~~ ⇒ **46 字符已由源码定案**（master preset 里 persona 硬编码那一句 +
+   `complete:true` + `includeRuntimeContext:false`，见 §1.1.1）。**但动态仍未取得**（§4.1 给了三条堵死/半通的路，
+   以及一条已知更便宜的现成路）。
+   ★ **且我先前把「例子」当成了「preset」**（`examples/jsonrpc-agent/minimal.cordis.yml` ≠
+   `apps/cli/config/agent-presets/minimal/agent.cordis.yml`）⇒ 那句话的依据（`DSH_SYSTEM_PROMPT`）只对例子成立。
+   **结论没变（46），依据换了。**
+   ★ **工具数还是版本依赖的**：master=2 工具｜npm 0.1.5-rc.2=**1 工具（只有 shell）**｜我们现役 0.1.1-rc.2 **没有文件式 preset**。
 3. **VeRO 能否把 target 换成 DSH**：仍是**推断**（未读 `vero/README.md` core guide 与 `harness-opt-bench/CONFIGURATION.md`）。
 4. 上游 `minimal` **不支持 Windows 原生 agent**（笔记原文）—— 这条若成立，意味着**我们的评测臂要搬家到 POSIX**，
    而**现役评测栈（switchboard + Windows profile）在那一层不通用** ⇒ 这是个需要拍板的架构选择。
