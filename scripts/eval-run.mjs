@@ -1181,20 +1181,46 @@ if (has('--pair')) {
 
   const A = pair.arms.A
   const B = pair.arms.B
-  const fixedCount = (x) => x.runs.filter((r) => r.verdict === 'FIXED').length
-  const g = (x, key) => agg(x.runs, (r) => r[key])
-  const gTraj = (x, key) => agg(x.runs, (r) => r.trajectory?.[key])
+  // ★★ 2026-09-21 修：**污染轮必须排除出 delta**（此前被计入 ⇒ 假数据）
+  //   实测（cli-0005，--repeat 3）：A 第 1 次的 `handoverDuringRun.contaminated === true`
+  //   （跑期间发生换代 gen-3091→gen-3092，脚本自己标了 contaminated）⇒ 那次 NOT-FIXED
+  //   **是环境造成的失败，不是臂的能力** ⇒ 计入 delta 会把 A 从 2/2 压成 2/3。
+  //   ⚠️ 两条纪律：
+  //     ① **排除要显式可见**（打印"排除 k 轮 + 原因"），不许默默过滤 —— 那又是一类假绿；
+  //     ② 排除后**有效 n 可能小于 REPEAT**，表头必须显示两个 n（设计 n / 有效 n）。
+  const usable = (x) => x.runs.filter((r) => r.handoverDuringRun?.contaminated !== true)
+  const droppedOf = (x) => x.runs.filter((r) => r.handoverDuringRun?.contaminated === true).length
+  const Ause = usable(A)
+  const Buse = usable(B)
+  const dropped = { A: droppedOf(A), B: droppedOf(B) }
+  const fixedCount = (runs) => runs.filter((r) => r.verdict === 'FIXED').length
+  const g = (runs, key) => agg(runs, (r) => r[key])
+  const gTraj = (runs, key) => agg(runs, (r) => r.trajectory?.[key])
   const rows = [
-    ['FIXED 次数（地板）', `${fixedCount(A)}/${A.runs.length}`, `${fixedCount(B)}/${B.runs.length}`, '两臂都要尽量高'],
-    ['toolCalls', fmtAgg(gTraj(A, 'toolCalls')), fmtAgg(gTraj(B, 'toolCalls')), '越少越好'],
-    ['outputTokens', fmtAgg(g(A, 'tokenDelta')), fmtAgg(g(B, 'tokenDelta')), '越少越好'],
-    ['uncachedInput', fmtAgg(g(A, 'uncachedInputDelta')), fmtAgg(g(B, 'uncachedInputDelta')), '越少越好'],
-    ['steps', fmtAgg(g(A, 'stepDelta')), fmtAgg(g(B, 'stepDelta')), '辅助'],
-    ['wallMs', fmtAgg(g(A, 'wallMs')), fmtAgg(g(B, 'wallMs')), '越少越好'],
-    ['dangerous', fmtAgg(agg(A.runs, (r) => r.trajectory?.dangerous?.length)), fmtAgg(agg(B.runs, (r) => r.trajectory?.dangerous?.length)), '越少越好，非 0 即显著'],
+    ['FIXED 次数（地板）', `${fixedCount(Ause)}/${Ause.length}`, `${fixedCount(Buse)}/${Buse.length}`, '两臂都要尽量高'],
+    ['toolCalls', fmtAgg(gTraj(Ause, 'toolCalls')), fmtAgg(gTraj(Buse, 'toolCalls')), '越少越好'],
+    ['outputTokens', fmtAgg(g(Ause, 'tokenDelta')), fmtAgg(g(Buse, 'tokenDelta')), '越少越好'],
+    ['uncachedInput', fmtAgg(g(Ause, 'uncachedInputDelta')), fmtAgg(g(Buse, 'uncachedInputDelta')), '越少越好'],
+    ['steps', fmtAgg(g(Ause, 'stepDelta')), fmtAgg(g(Buse, 'stepDelta')), '辅助'],
+    ['wallMs', fmtAgg(g(Ause, 'wallMs')), fmtAgg(g(Buse, 'wallMs')), '越少越好'],
+    ['dangerous', fmtAgg(agg(Ause, (r) => r.trajectory?.dangerous?.length)), fmtAgg(agg(Buse, (r) => r.trajectory?.dangerous?.length)), '越少越好，非 0 即显著'],
   ]
   console.log('─'.repeat(84))
-  console.log(`成对 delta（A=${armA}  vs  B=${armB}）  单元格 = mean [min–max]，n=${REPEAT}`)
+  console.log(`成对 delta（A=${armA}  vs  B=${armB}）  单元格 = mean [min–max]`)
+  console.log(`  设计 n=${REPEAT} ｜ **有效 n：A=${Ause.length}  B=${Buse.length}**` +
+    (dropped.A || dropped.B
+      ? `（已排除污染轮：A ${dropped.A} 轮 / B ${dropped.B} 轮 —— 跑期间发生了换代，脚本判 contaminated:true）`
+      : ''))
+  if (dropped.A || dropped.B) {
+    console.log(`  ⚠️ 被排除的轮（**不计入任何统计**）：`)
+    for (const [L, droppedRuns] of [['A', A.runs.filter((r) => r.handoverDuringRun?.contaminated === true)], ['B', B.runs.filter((r) => r.handoverDuringRun?.contaminated === true)]]) {
+      for (const r of droppedRuns) {
+        const hits = r.handoverDuringRun?.hits ?? []
+        console.log(`     ${L}: verdict=${r.verdict} 换代事件 ${hits.length} 条` +
+          (hits[0] ? `（首条 ${hits[0].at} ${hits[0].note}）` : ''))
+      }
+    }
+  }
   console.log(`  ${'指标'.padEnd(24)} ${'A'.padStart(20)} ${'B'.padStart(20)}  说明`)
   for (const [name, a, b, note] of rows) {
     console.log(`  ${String(name).padEnd(24)} ${String(a).padStart(20)} ${String(b).padStart(20)}  ${note}`)
@@ -1209,12 +1235,12 @@ if (has('--pair')) {
     ['wallMs', (r) => r.wallMs],
     ['dangerous', (r) => r.trajectory?.dangerous?.length],
   ]) {
-    const a = agg(A.runs, pick)
-    const b = agg(B.runs, pick)
+    const a = agg(Ause, pick)
+    const b = agg(Buse, pick)
     if (!a || !b) continue
     console.log(`    ${label.padEnd(16)} ${(b.mean - a.mean).toFixed(0).padStart(8)}   （A ${a.mean.toFixed(0)} → B ${b.mean.toFixed(0)}）`)
   }
-  const bothAllFixed = fixedCount(A) === A.runs.length && fixedCount(B) === B.runs.length
+  const bothAllFixed = fixedCount(Ause) === Ause.length && fixedCount(Buse) === Buse.length
   console.log('')
   console.log(bothAllFixed ? '⇒ 两臂每次都过地板（差异看成本/路径）' : '⇒ **有跑没过地板** ⇒ 先看那几跑，别急着解读均值')
   pair.bothAllFixed = bothAllFixed
