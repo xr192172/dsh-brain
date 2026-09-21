@@ -28,8 +28,18 @@
 
 | 臂 | profile | 预期做法 | 预期结果 |
 |---|---|---|---|
-| A（能力**开**） | `web` | `design_canvas_index` 建索引 → `safe_rename`/`symbol_edit`（AST 级、带 preflight） | 少量调用、精确命中 3 处标识符、自动放过局部变量与字符串 |
-| B（能力**关**） | `web-nodc` | 只能 grep + 手改 | 调用更多；**易踩**：把局部变量一起改（③ 红）或把字符串一起改（④ 红），或漏掉注释（③ 红） |
+| A（能力**开**） | `exp-base`（≡ `web`） | `design_canvas_index` 建索引 → `safe_rename`/`symbol_edit`（AST 级、带 preflight） | 少量调用、精确命中 3 处标识符、自动放过局部变量与字符串 |
+| B（能力**关**） | `exp-base-nodc` | 只能 grep + 手改 | 调用更多；**易踩**：把局部变量一起改（③ 红）或把字符串一起改（④ 红），或漏掉注释（③ 红） |
+
+> ★ **臂名已更正（2026-09-21）**：原先这里写 `web` / `web-nodc`。现统一为 canonical 两臂
+> **`exp-base` / `exp-base-nodc`**（`scripts/eval-run.mjs` 的 `PROFILE_TOOL_FORBID` / `PROFILE_EXPECT` 已登记这两臂）。
+> **`web-nodc` 这个名字已退役**（同名旧变体引用过已删的 `conveyor-context`）⇒ **不要再建它**。
+> 两臂的差别与坐实过程：`docs/eval-independent-variable-plan.md` §2.1。
+
+> ★ **为何本靶子能落在夹具上**：`safe_rename` 的入参是
+> `project_dir`（"项目根目录，缺省取最近已预热工作区"）+ `file` + `symbol` + `to`
+> ⇒ **它不被 `kernelDir` 绑死**（`kernelDir` 指的是 design-canvas **内核**所在，
+> 不是被改的目标项目）⇒ 可以作用于 `evals/pilot/rename-target`。
 
 ## 复现（人工）
 
