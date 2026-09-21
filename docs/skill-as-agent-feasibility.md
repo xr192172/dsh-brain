@@ -727,3 +727,77 @@ sdkSection() {
    ★ **这是 B 路线唯一真正的技术缺口，未设计。**
 3. **同名冲突的准确边界未实测**：全局注册 vs per-scope 注册（`presentAs`）在**遮蔽**与**重复抛错**上的区别，
    我只从文档推断，**未做实验**。
+
+---
+
+## 14. ★★★★ 用户问「压缩时的那次模型调用算不算钩子？桌面显示正在压缩，能不能监听那个回报？」—— **都能，且订阅 API 已定位**
+
+### 14.1 压缩**确实是一次带标记的模型调用** —— 实测 payload
+
+扫我们自己 **181 个会话**的 `compaction/*` 事件（`out/compaction-signal.txt`）：
+
+| 事件 | 次数 | 载荷 |
+|---|---|---|
+| `compaction/start` | **132** | `{ compactionId, turn }` |
+| `compaction/end` | **130** | `{ compactionId, turn }`（`error?` 可选） |
+| `compaction/summary` | 89 | ★ `{ compactionId, summary, rawOutput, **llmStreamCall**, shadowedRange, shadowedSeqs, shadowedTokenCount, **provider, model, maxTokens, usage** }` |
+| `compaction/prune` | 72 | `{ shadowedRange, shadowedSeqs, shadowedTokenCount }`（**无模型调用**） |
+
+⇒ **`compaction/summary` 带着 `llmStreamCall` + `provider`/`model`/`maxTokens`/`usage`** ⇒
+**"压缩会调一次模型"是事实**，而且那一次调用**是被标记的**（`dsh-compaction/lib/types/types.d.ts` 对该字段的注释：
+"Identifies exactly one call through this context's `ctx.llm.stream()`"）⇒ **不需要猜"这次调用是不是压缩"。**
+
+### 14.2 桌面那个「正在压缩…」的源头 = `compaction/start`（所以**不用抓 UI**）
+
+`dsh-client-ui-conversation/lib/client.js` 逐字：
+- `:8447` 与 `:8502` —— 过滤 `event.type === "compaction/start" \|\| "compaction/summary" \|\| "compaction/end"`，并以 `event.data.compactionId` 为键
+- `:6229` —— 文案 `"message.compaction.running": "正在压缩…"`（还有 `:6228` "上下文已压缩"、`:6230` "已压缩 {items} 条历史记录（约 {tokens} tokens）"）
+
+⇒ **桌面上看到的那个指示器，就是这几个 durable 事件的渲染器之一。**
+⇒ **监听"回报"不需要碰 UI —— 订阅事件源即可，而且更早（`start` 就够）、更全（带 compactionId/turn/usage）、更可靠（不依赖前端状态）。**
+
+### 14.3 ★ 订阅 API 定位到了：`session/event`
+
+`dsh-session/README.md` 逐字：
+- `:11` —— "**plugins subscribe to `session/event`**, flush on `session/flush`"
+- `:91` —— "Persistence plugins: **subscribe to `session/event`** (write-behind)"
+- `:33` —— "publishes **post-commit append notifications** with **per-listener containment**"
+- `:39` —— `session.append(...)` "commits synchronously, then **notifies observers** with independent failure containment"
+
+⇒ **我们这侧可以订阅 `session/event`，拿到 post-commit 的 `compaction/end` / `compaction/prune` 并触发刷新。**
+⇒ ★ **`per-listener containment`（一个 listener 抛错不影响别人）**⇒ 我们的刷新逻辑出问题**不会拖垮持久化**。
+（具体签名与 scope 语义在生成区 `docs/subsystems/session.md#cordis-surface` —— **未逐字读，见 14.6**。）
+
+### 14.4 ★★ 顺带：上游自己那句话**证成了"压缩点免费"**（§10/§13 的前提）
+
+`dsh-session/README.md:109` 逐字：
+> "**A `replace` operation invalidates reuse from the first shadowed message** even though the underlying event log stays append-only."
+
+⇒ **压缩（`replace`）本来就让"从第一个被遮蔽的消息起"的复用失效** ——
+**所以复用已经在压缩点断掉了，在那里刷新脸【不额外付费】。**
+★ 这不再是我的推演，**是上游自己的机制陈述**。§10.3 / §13 的设计前提成立。
+
+### 14.5 ★ 触发判据（这就补上了 §13.5 那个缺口）
+
+**判据：`compaction/end`（且无 `error`）**，**或** **`compaction/prune`** —— 两者都是"**历史被重写过**"的事实。
+
+三条纪律（都有实测支撑）：
+1. ★ **不要挂在 `compaction/start` 上**：实测 **132 个 start vs 130 个 end** ⇒ **存在没正常收尾的压缩**；
+   挂 `start` 会在**失败的压缩**上白刷一次脸（而且刷新本身有代价）。
+2. ★ **`compaction/prune` 也必须触发**：它**不走模型**（model-free），但它**同样 `replace` 了历史节点**
+   （实测 72 次）⇒ **它也改前缀** ⇒ 漏掉它会造成"prune 了但脸没刷"的不一致。
+3. ★ **判据要能报"它为真的历史次数"**（铁律 #11）：本机实测该判据在历史里为真 **130 + 72 = 202 次**
+   ⇒ **不是"从未为真的假绿"**。落地时把这两个计数**打进日志**，为 0 就报警。
+
+**次选判据**：`compaction/summary.shadowedSeqs` —— 它直接告诉你**被替换掉的是哪些节点**，
+可以用来判断"脸里描述的那个旧能力是否已经被压掉了"。
+
+**兜底判据**（不依赖事件）：在 `text` 闭包里比较**上一次装配用的工具集指纹**。
+⚠️ 但注意它测的是"**脸变了没**"，不是"**压缩发生没**" —— **两者不可互相替代。**
+
+### 14.6 未闭合（本轮）
+
+1. **`session/event` 订阅的准确签名与 scope 语义**未逐字读（在生成区 `docs/subsystems/session.md#cordis-surface`）；
+   ★ **能否从「某个子代的 scope」只订阅该子代的事件，未验证** —— 若不 scope 化，会订阅到所有会话的压缩。
+2. **`compaction/end` 带 `error` 时的策略未定**：失败的压缩**也**可能已经写了部分替换 ⇒ 刷还是不刷？
+3. **压缩的 `usage`（现在落盘了）可以顺带做一件事**：把"压缩这次模型调用花了多少"纳入我们的成本账 —— **未做**。
