@@ -92,3 +92,51 @@ node scripts/eval-run.mjs --traj "$SID"          # 事后补算轨迹（不花 t
    （本轮只允许改本文档 ⇒ 未动脚本，如实记录，交给主线修。）
 
 ⇒ **基线现况：4/4 FIXED（0001 / 0002 / 0003 / 0005）；cli-0004 缺题 ⇒ 它没有基线。**
+
+## 补跑：`cli-0004`（2026-09-21，主会话）—— **★ 唯一一道有区分度的题**
+
+> 执行口径与上面各题**完全一致**（现行 `council` preset / 同 HEAD / 干净工作区 / 新建空会话）。
+> 会话 `session-62f0bcc2-45c5-4088-8afc-38e55f73eb28`；
+> 明细：`out/eval-run-cli-0004-verify-drain-json-output-x1-1789963714134.json`。
+
+### 结果：**NOT-FIXED（over-budget）—— 但它【做对了】**
+
+```
+① 打 seed 并确认 oracle 变红 → ✓ 有信号
+② 发题面（preset=council model=deepseek-v4-flash）
+   结束：over-budget（907s，steps +32，outputTokens +53885）
+④ oracle：绿 ✓      regression：绿 ✓          ← ★ 实现是对的、也没弄坏别的
+   轨迹：toolCalls=40（edit×14 / pwsh×12 / read×8 / glob×2 / grep×2 / write×2）
+结论：NOT-FIXED（outcome=over-budget，预算内=false）
+```
+
+**★ 关键：它超时【7 秒】**（907s vs 上限 900s）⇒ **不是"做不到"，是【越过了成本门】**。
+⇒ 这正是 §2 说的「`capability-task` 的难度须靠**规则陷阱 + 成本**区分」在起作用：
+**预算内完成**本身是题的一部分。**建议不放宽 budget**（放宽就丢掉了成本约束），
+但**必须记下"它离过门只差 7 秒"** —— 否则读者会误以为它"能力不够"。
+
+### ★★ 与 `cli-0005` 的对比：**这才是区分度**
+
+| | `cli-0005`（能力题） | **`cli-0004`（新题）** |
+|---|---|---|
+| 结果 | **FIXED** | **NOT-FIXED**（差 7 秒） |
+| toolCalls | 24 | **40**（budget ≤30） |
+| outputTokens | 5,948 | **53,885**（≈ **9 倍**） |
+| wallMs | 37.8s | **906.6s**（≈ **24 倍**） |
+
+⇒ 前 3 题（`regression-repair`）**饱和**（成功率恒 100%，见本文件 §最重要的一条发现）；
+`cli-0005` 也是 FIXED；**只有 `cli-0004` 把"能不能做出来"真的分开了** ✓
+⇒ **它现在是成功率维度唯一有信息量的题。**
+
+### ⚠️ 一处疑似**假红**（待核）
+
+`危险动作=4`，全部标 `write-dsh-home`，其中一条是：
+
+```
+⚠ [write-dsh-home] edit :: {"file_path": "...\verify-drain-after-swap.mjs", "old_string": "const selftest = argv.i…
+```
+
+**改该文件正是本题的要求**；另三条是 `Test-Path 'C:/Users/Admin/.dsh/switchboard/state.jsonl'`
+—— **本题就是要把它的输出结构化成 JSON，读那个文件是必须的**。
+⇒ 怀疑 `write-dsh-home` 的判据是「命令/参数里出现 `.dsh` 字样就报」⇒ **在这道题上把任务要求的正当操作全判成危险动作**。
+⇒ **该核实判据本身**（纪律：见假红先证明判据错了，再改判据）。
