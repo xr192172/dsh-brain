@@ -226,6 +226,41 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 ## 3. ★ 新想法（三条，都可执行）
 
+### 3.0 ★★★ 轴现在是**可分离**的（2026-09-21 实测，这条推翻了我 §3.2 的悲观结论）
+
+`g0` 修好（shell 用**平台 gate**：win32 得 `pwsh`、POSIX 得 `bash`，各恰好 1 个）之后，
+**两个新脚本**（都在仓库里）：
+- `scripts/make-g0-preset.mjs` —— 幂等装配 G0（`--force` / `--check`，`--check` 用**面指纹**而非名字判定）
+- **`scripts/measure-arm-face.mjs`** —— **profile × preset 的面读数**（换代 + 选 preset + 回读 + 读 `systemChars`/`toolSetSize`；
+  带 `--expectToolCount` 断言）。这是此前缺的那件工具（`arm-probe` 只管 profile、不管 preset）。
+
+**实测矩阵**（我独立重跑过第一行，数字一致）：
+
+| profile × preset | systemChars | toolSetSize | 工具 |
+|---|---|---|---|
+| `exp-base-nodc` × `g0` | **46** | **5** | `capability_report` `list_capabilities` `pwsh` `tool_apply` `tool_score` |
+| `exp-base` × `g0` | **46** | **77** | 上面 5 个 + design-canvas 那 72 个 |
+| `exp-base` × 随附 `minimal` | 46 | 78 | `pwsh` + `str_replace_editor` |
+
+**⇒ 三条结论：**
+
+1. ★★ **`profile` 只动工具底板，不改 system 一个字**（5 vs 77，差 **72 = design-canvas**；`systemChars` **都是 46**）
+   ⇒ **「工具数量」与「提示长度」这两个变量现在是【可分离】的。**
+   这与 §1.1.4 的发现（**code 模式**下工具目录被渲染进 system、占净差 98.7%）**并不矛盾**：
+   那种耦合是 **code/PTC 模式 + 非 `complete` persona** 的产物；**native 模式 + `complete:true` persona 下它消失了。**
+   ⇒ **实验的主对比就该这样做**：**固定 preset=`g0`，只变 profile ∈ {`exp-base-nodc`(5), `exp-base`(77)}**
+   —— 这是一个**纯粹的工具数量操纵**，提示面完全不动。
+2. ★ **真 G0 = `exp-base-nodc` × `g0` = 46 字符 / 5 工具。** 但它**不是零工具**：剩下 4 件是
+   `capability-bridge`（2）+ `tool-evolution`（1）+ `tool_apply`（1）的原生工具 —— **preset 只能加不能减**
+   ⇒ **想再往下压必须改 profile，改 preset 没用。**
+3. ★ **`g0` 的 shell 真跑了**（不只是"在名单里"）：强制它执行 `echo g0-ok` ⇒ `pwsh` 返回 `g0-ok`，
+   用**结构判据**（`lib-tool-failure.mjs` 的 `rule`，非 `isError` 位）判成功。
+
+**⇒ 于是 §3.2 那个"2×2 做不出来"的悲观结论，现在有条件成立**：只要**把 preset 的 persona 换成
+`complete:true` + 更长/更短的 `text:`**，就能在**固定 profile** 下单独拉长提示，得到真正的
+{工具 5/77} × {提示 46/长} 2×2。（**前提**：`complete:true` 必须保住 —— 一旦不 complete，
+harness identity / 工具指引又会加回来，提示就跟着工具数走了。）
+
 ### 3.1 把"工具面"做成**声明式组合族**，而不是"丢包"
 
 `minimal.cordis.yml` 给了我们一个新范式：**一个臂 = 一份完整的 `*.cordis.yml`**（自包含、可 diff、环境变量参数化、
@@ -233,7 +268,7 @@ eval 平台停在给人看报告，部署工具不懂 LLM 质量。"**
 
 | 级别 | 组成 | 备注 |
 |---|---|---|
-| **G0** | **两件事叠加**：`exp-base-nodc` 那样的 **profile**（底板 30）+ **随附 `minimal` preset**（+2、system 46 字符） | 见 §1.1.2：**只换 preset 只到 77–78**（preset 只能加，压不掉 profile 的 76 工具底板）。★ **别在用户级建 id 为 `minimal` 的同名 preset —— 会被静默遮蔽** |
+| **G0**（**已实测**） | **`exp-base-nodc` profile + `g0` preset** = **system 46 字符 / 5 工具**（`capability_report` `list_capabilities` `pwsh` `tool_apply` `tool_score`） | 见 §3.0。★ 不是零工具：剩的 4 件来自 `capability-bridge`/`tool-evolution`/`tool_apply`，**preset 只能加不能减 ⇒ 再往下压要改 profile**。★ **别在用户级建 id 为 `minimal` 的同名 preset（会被静默遮蔽）** |
 | **G1** | G0 + 文件读写/搜索组（`tool-fs` / `tool-fs-search`） | |
 | **G2** | G1 + `web_search` / 计划 / 目标组 | |
 | **G3** | G2 + `@dsh-brain/design-canvas-bridge`（8 工具） | |
