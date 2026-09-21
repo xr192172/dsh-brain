@@ -177,6 +177,29 @@
 | 项目治理 | `topics/project-governance.md` | 资产边界（**别重造**）、文档可信度、设计原则汇总 |
 | 资产拓扑 | `topics/asset-topology.md` | 分不清资产/副本、design-canvas 真身与副本 |
 
+## ★ 子 Agent = 我们的进化载体（DSH 已有一等地基，2026-09-21 通读上游源码确认）
+
+- **形态**：子 Agent 的 **persona（提示词）+ toolFilter（工具集）+ 自己的持久会话**都是**一等字段**
+  （`ContinuableSubagentDescriptorData{ persona?, toolFilter? }`；`SubagentCapabilities{outputSchema,depthLimit,toolFilter,persona}`）。
+  **但能力因 provider 而异**：**`fork-in-process` 支持 persona+toolFilter**；`acp`/`dsh-sdk` **全不支持**（会被拒）⇒ **绑错 provider 会静默退化**。
+- **两种上下文，别混**：
+  · **`continuable`（`spawn` 默认）**：**durable**，不在时**从持久化的 Session 冷启**（cold-resume）；
+    子代树是 **session-backed**，`listTree` 可枚举（带 `parentId`/`depth`）。
+  · **`fork`（shipped 绑 `one-shot`）**：只把**父代已完成回合的前缀**播种一次（快照进子代自己的转录），
+    **唯一收益是 provider 侧前缀复用**。
+- ★ **对进化的意义**：`continuable` 才有"同一个主体跨任务积累"的载体，且**每次唤醒都是一份 append-only 会话 ⇒ 进化可审计**。
+- ★★ **对判据的毒性**：带上下文的两次跑**不是同一输入分布** ⇒ `pass^k` 测的是"重复"、臂间**跨轮污染**、且**污染不可见**（不在工具面里）。
+  ⇒ **评测必须 `backgroundMode: one-shot`；进化用 `continuable` 并按 lineage 统计**；并给 `armFaceCheck` 一族**加一条"上下文指纹"读数**。
+- ★★ **上游的论证与我今天的实测是同一件事**：笔记说 `report` 工具 schema 与 `tool:report` system 段**都住在请求头且先于消息**
+  ⇒ 任何"加在继承历史之前"的子作用域增量**作废前缀复用**；
+  我量到 **code 模式下工具目录被渲染进 system、占两臂净差 98.7%**。**两条独立证据同一机制。**
+- ⚠️ **我方偏离（待用户拍板）**：上游 `subagent_fork` 绑 **`one-shot`**，**我们 `council` preset 绑的是 `continuable`**；
+  而 `tool-subagent-report` **确实在装配树里**（`--profile web --dump-config` 第 272 行）
+  ⇒ 这正是上游刻意移除的"坏组合" ⇒ **fork 子代付复制成本却拿不到复用收益 = 纯成本回归**（成本面是我们的主轴）。
+- ★ **可贡献的上游切口**：上游写明 *"**The restriction is composition, not code**"*（`prepareContinuable` 还在、`--patch` 即可重开），
+  重开条件 = **issue #2124「子代的 system prompt 与 tool schemas 能与其父代逐字节相同」**
+  —— **而这正是 `scripts/measure-arm-face.mjs` 能去证明的东西**。
+
 **入口级 / 关键文档**：
 - ★ **`docs/revised-architecture-2026-09-20.md` —— 当前架构权威记录**：
   两层（顶层=**专家评审团**多模型讨论 / 下层=**子 agent 层**，进化在此发生，来源=skill）。
