@@ -350,3 +350,129 @@ T4  此后子代 header = 窄面（与父代不同头，但前缀反正刚被重
    机制上：listener 每次装配都会跑 ⇒ **"何时切换"要靠它自己读状态**（如该子代的压缩计数/`delegationDepth`）⇒ **需要设计一个"切换条件"**，**未设计**。
 2. **`surface replace` 事件的订阅名与载荷**未核（只知道有 `surfaceOp` 字段）。
 3. **本方案 A（扩压缩器）与 B（listener + 压缩事件触发）的取舍** —— **我建议 B**，但**待用户拍板**。
+
+---
+
+## 11. ★★★ 裁决：「扩压缩器改写 system」**做不到**，但你想要的效果**已经有了**，且复用问题**已被实测**（2026-09-21）
+
+> 起因：用户指令「扩展压缩器吧，写一个子 agent 专用的压缩器。就是在原基础上加一个改写 system 的功能。」
+> 核实结论：**这条指令的前提不成立**。下面是证据，以及替代路线。
+
+### 11.1 ❌ **压缩器没有 system 段可改** —— 三条逐字证据
+
+1. **压缩的操作面是「会话事件」，不是 prompt。**
+   `node_modules/@deepseek-ai/dsh-compaction/lib/types/types.d.ts:126-129`：
+   > `shadowedSeqs` — "The seqs of all shadowed **surface nodes**, in surface order."
+   压缩结果 `CompactionResult` 的字段全是 `startSeq/summarySeq/endSeq/shadowedRange/shadowedSeqs` ⇒ **动的是历史节点，不是 prompt 段**。
+2. **压缩的产物落在【消息面】，是"一条 user 消息"。**
+   `dsh-compaction/lib/types/checkpoint.js:3`：
+   > "every backend uses for its **replacement user message**"
+3. **system 是【每步装配出来的派生物】，根本不进会话事件。**
+   `dsh-system-prompt/README.md:5`：
+   > "The loop **assembles once per step** and renders the result as the complete model prompt."
+
+⇒ 让压缩器"改写 system"，等于让它去改一个**不在它视野里的对象**。**A 不是"更麻烦"，是"对象不存在"。**
+⇒ 我上一轮的 T3（压缩点清掉前面的脸）**同样作废**：历史里**没有**"前面那段工具面"可清（见 11.5，脸在 system 与 tools 两个**派生化**的位置，不在 messages）。
+
+### 11.2 ✅ 你要的「子代知道自己当前的工具面」**上游已经做了**，而且比改 system 更彻底
+
+`dsh-subagent/lib/types/child-agent.js:126-135` `applyChildComposition(childCtx, parent, composition)` 逐字：
+
+```js
+childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx);          // 子代【加入】父代的 preset
+childCtx.systemPrompt.context({ name: 'subagent:delegation', order: 120, text: SUBAGENT_DELEGATION_CONTEXT }); // ← 运行时上下文，不是 system 段
+if (composition.persona !== undefined) childCtx.systemPrompt.section({ name: 'deployment:persona', order: 0, text: composition.persona });  // ← 人格 shadow
+if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter);  // ← 工具限制
+```
+
+且注释说这些 "all owned by the child's scope and therefore **invisible to its parent and siblings**" ⇒ **天然 scope 隔离**，不会污染父代。
+`child-agent.d.ts:68-72` 明说那句委派声明是 "A **runtime-context contribution rather than a system-prompt section**"。
+
+**⇒ 上游已按你的构想在走**：脸走"运行时上下文（落在消息面）+ 工具限制"，**不**去改 system。
+（这也说明：**你原构想里的"尾部注入一条告知"= 上游现役行为**，不是我上一轮设计的"权宜之计"。）
+
+**你问"能不能硬阻断工具面外的调用"** ⇒ **能，已经是硬的**，四路一起限制：
+`dsh-subagent-in-process-driver/README.md:55`：
+> "...**restricts global tool schemas, lookup, execution, and Code Mode SDK bindings** in the unpublished child's fresh scope"
+
+⇒ 不只是"不告诉"，是真的不能再调。**你的判断对：不需要额外负累。**
+（`toolFilter` / `persona` 还是 provider 的**公开能力位**：`dsh-subagent/README.md:41-42`。）
+
+### 11.3 ⚠️ 但你的构想里**确实缺一格**，缺的不是压缩器
+
+上游 `ChildComposition` **只有两个字段**（`child-agent.d.ts:61-66`）：`persona?: string`（**覆盖**）+ `toolFilter?: ToolRestriction`（**裁剪**）。
+⇒ **上游只会"裁"，不会"加"**；而你要的是"**子代 = 父代 + 增加**"。
+
+**"增加"的正解 = 在子代 scope 里注册工具**，上游自己就是这么干的：
+`dsh-subagent-in-process-driver/README.md:39-44` `attachStructuredRuntime(childCtx, schema)` —
+> "A `structured_output` tool registered with the requested schema… **Both contributions are ordinary child-scoped registrations**."
+⇒ **这就是"父代 + 专有工具"的现成范式**。现成钩子：`dsh-subagent/README.md:23`
+> `registerContinuableSetup(contribution)` — "Compose an optional deployment capability into **each continuable child's unpublished scope**, with immediate revocation from resident children."
+
+⇒ **要做的组件是「子代创建钩子」，不是「压缩器」。**
+
+### 11.4 ★★★ 实测：**复用由"前缀是否逐字一致"决定，不由 fork/spawn 决定**
+
+仪器：`scripts/measure-delegation-reuse.mjs`（新）。数据源 = **真实会话日志的 `assistant/message.usage`**，
+含服务端读数 `cacheReadTokens`（`dsh-llm-deepseek/lib/index.js:933` 把 `prompt_cache_hit_tokens` 映射进来）。
+样本：**181 个会话 / 15 对父子**（子会话的 `subagent/descriptor` 事件逐字记着 `provider:"fork"|"spawn"` ⇒ 归因可做）。
+
+| 因子 | 高命中(≥50%) | 中(5~50%) | 低(≤5%) | 判定 |
+|---|---|---|---|---|
+| **`system` 与父代逐字完全一致** | **6** | 0 | 0 | ★ **最强**（6/6 全高，缓存读 24576–41088） |
+| `system` 不一致 | 2 | 2 | 4 | 8 例里 6 例中/低 |
+| **子/父工具数相同** | 8 | 0 | 1 | ★ 次强 |
+| **子/父工具数不同** | **0** | 2 | 3 | 5 例**无一高** |
+| preset 相同 | 8 | 0 | 3 | 相关但非决定 |
+| **provider = fork** | 3 | 0 | **1** | ❌ **非决定因子** |
+| **provider = spawn** | 3 | 2 | 2 | ❌ fork 也有低、spawn 也有高 |
+
+⇒ **"fork 省一笔"这个说法本身不够精确**；正确表述是：
+> **省不省，取决于子代首个请求的 `[system + tools]` 是不是父代最近一次请求的逐字前缀。**
+> fork 提供了"父代刚把这段前缀烧进缓存"的**时机**，但**能否吃到，由脸是否一致决定**。
+
+### 11.5 ★★★ 因果链闭合：一个 `report` 工具，把 98.6% 打成 2.8%
+
+仪器：`out/probe-tools-insert.mjs`（新）。对照三例：
+
+| 子 | 工具数 | `report` 在哪 | system 公共前缀 | 子首请求 |
+|---|---|---|---|---|
+| `1df6c839`(**one-shot**) | 102 = 102 | **无** | **6826/6826 = 100%** | 缓存读 **40576**（**98.6%**） |
+| `436fde97`(continuable) | **103 vs 102** | **工具列表第 88/103 位**（`read_image` 与 `safe_rename` 之间） | 6162/6880 = 89.6% | 缓存读 **1152**（**2.8%**），未缓存 40103 |
+| `b7327cc6`(continuable) | **103 vs 102** | 第 88/103 位（同上） | 6527/7245 = 90.1% | 缓存读 **1152**（**2.8%**） |
+
+**两处破坏来自同一个原因**：continuable 子代多一个 `report` 工具 ⇒
+① 它**被写进 system**（断点原文即 `"Deliver your result with the report tool before you finish: call it once with a …"`）；
+② 它按**字典序插进工具列表第 88 位**（不是末尾）。
+⇒ 严格前缀缓存在**第一个差异处截止** ⇒ 其后的 15 项 schema **+ fork 继承来的整段父代历史**全部重新计费。
+这**实证**了上游那句 `dsh-tools/README.md:145`：
+> "Registration, disposal, or **scoped restriction may invalidate reuse from the first changed schema token**."
+
+**★ 反证（很强）**：`8ac9ffef`(depth2←depth1) 与 `8314ffa9`(depth3←depth2) 都是 **continuable**，但
+**子父都是 103 个工具（都带 `report`）** ⇒ 命中 **99.6% / 99.0%**。
+⇒ **代价不来自"多一个工具"，来自"与父代不同"。链式委派里每层都是 continuable ⇒ 脸一致 ⇒ 复用照样 99%。**
+
+### 11.6 ⇒ 设计规则（这是你说的"子类是父类的增加而非裁剪"的**物理原因**）
+
+> **append 保前缀；crop / shadow 砸前缀。**
+
+- `persona` shadow 落在 **order 0**（`system-prompt/README.md:34`：`-100` 是 identity、`0` 是 persona）⇒
+  它是 **system 里最前面的字节之一** ⇒ 一改就把 LCP 砍到开头。**不能用来做"个性化"，除非它也放在尾部。**
+- `toolFilter` / 新增工具**落在 system 之后的工具块** ⇒ 只要**插在中段**（字典序），其后的 schema 与**全部 messages** 一起作废。
+- ⇒ **要同时拿到"子代有自己的脸"和"吃到父代前缀"，子代的脸必须是父代脸的【逐字前缀扩展】**：
+  ① 人格不覆盖 order 0，改走**尾部**（上游 `subagent:delegation` 这条 runtime-context 就是对的形态）；
+  ② 新增工具**排到工具列表末尾**（用 `dsh-system-prompt` 的 `toolOrder` + `<unlisted-tools>` rest entry，`README.md:14`）
+     ⇒ 代价可能从"全损"降到"只重算尾部"。**这是下一步最便宜、最可测的实验。**
+
+### 11.7 未闭合（本轮新增）
+
+1. **一个未解释的反例**：agnes 的两例（`3333bdd5`/`85fcf47d`，`code-council`）`system` 公共前缀**仅 2%**，
+   命中却 **89.6% / 89.8%** ⇒ **严格 LCP 模型对 agnes 不成立**（provider 侧缓存粒度不同？还是同形 sibling 预热？）
+   ⇒ **"前缀一致"是【必要】但可能【不充分】的因子**。别把 11.4 的表当因果定论。
+2. **本表是假设生成，不是受控实验**：样本 15 对、因子共线（"工具数不同"的样本恰好多是 continuable）、
+   且"父末请求→子首请求间隔"这项我算错了（取的是父会话**最后**一条消息，父代在委派后还继续跑 ⇒ 出现负值），**需修**。
+3. **下一步受控 A/B（只改一个变量）**：同一父会话、同一提示，对比
+   (a) 脸完全一致 vs (b) 只多一个 `report` 且**插在中段** vs (c) 只多一个 `report` 且**排在末尾**
+   ⇒ 直接量 `cacheReadTokens`。**这是把 11.6 从"假设"变"定论"的唯一办法。**
+4. **"增加工具"落地为子代创建钩子**（不是压缩器）：挂在 `registerContinuableSetup`，
+   在 child scope 里 `childCtx.tools.register(...)`，并把新工具**排在末尾**。
