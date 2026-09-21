@@ -57,6 +57,11 @@
   ⇒ ★ **`prune` 也必须触发**（它无模型调用，但**同样 replace 历史节点 ⇒ 同样改前缀**）。
 - **判据必须能报"历史为真次数"**：本机为真 **130 + 72 = 202 次** ⇒ 不是假绿；**落地时把这两个计数打进日志，为 0 就报警**。
 - **次选**：`compaction/summary.shadowedSeqs`（被替换掉的是哪些节点）。
+- **★ 关于 `end` 带 `error` 时刷不刷（O4 的答案）**：**不看 `error`，看"历史是否真的被 replace 过"** ——
+  即 **`shadowedSeqs` 非空**才是事实证据。理由：`error` 是"这次尝试的结果"，而**我们关心的是"surface 动没动"**
+  （实测 132 start vs 130 end ⇒ 存在未正常收尾的压缩，而**未收尾 ≠ 没动过**）。
+  ⇒ **判据写成「`shadowedSeqs.length > 0` ⇒ 刷」**，`error` 只记日志、不参与决策。
+  ⇒ 这条把**不可靠的状态信号**换成了**可验证的事实信号**（也符合反模式第 7、8 条）。
 - **兜底**：`text` 闭包内比较工具集指纹 —— ⚠️ 它测的是"**脸变了没**"，**不是"压缩发生没"**，两者**不可互替**。
 - **状态**：✅ 定。
 
@@ -89,6 +94,17 @@
   ⇒ `run_code` 改不了；**但也不必改** —— 要控制的从来是 `tools:sdk` 段（D6）。
 - **状态**：✅ 定。
 
+### D9 ★★ 我们的注册必须是 **host-plane 单例 + scope 感知**；**禁止"每个分身/preset 各挂一份"**
+- **依据（上游原文，`~/.dsh/.agent-presets/council/agent.cordis.yml:169-172`）**：
+  > "`tool-subagent-report` is host-plane for the same reason as the registry, not because a preset may not want it:
+  > it registers a **CONTINUABLE SETUP** on that singleton rather than a tool this agent calls, and
+  > **the setup list is not scope-aware — one copy per mounted preset means every child gets `report`
+  > registered once per live session, which throws on the second.**"
+- **⇒ 这就是"并发"的真实雷**：**分身的会话不会互相覆盖**（各是独立 session + 独立 UUID），
+  **但"按 preset 各挂一份"的注册会重复 ⇒ 第二个就抛错**。上游的 `report` 正是因此被挪到 host plane。
+- **⇒ 施工含义**：**"桥"（S2）与任何 setup 类注册，必须注册在 host plane 一次，并按 scope 分派；绝不许每分身/每 preset 各注册一次。**
+- **状态**：✅ 定。
+
 ---
 
 ## 3. 术语（施工统一口径）
@@ -101,6 +117,20 @@
 | **尾部目录** | 往**消息尾端**追加的能力清单（skill catalog 形态） |
 | **native / code** | `dsh-agent-tool-presentation/README.md:5`："`native` (every schema)" / "`code` (only `run_code` plus a generated TypeScript SDK)" / `both` |
 | **压缩点** | 一次 `compaction/end`（无 error）或 `compaction/prune`。**唯一可以免费动车的地方** |
+
+### 3.1 ★ "分身是 skill" 与 "它有持久化" —— 不矛盾，说的是两件事
+
+| 层次 | 是什么 | 落盘否 |
+|---|---|---|
+| **调用形态** | 像 skill：**投一次、拿结果、主体不直接上手**（父代只拿到最终文本，中间步骤不进父代） | — |
+| **会话** | 分身**有自己的 `Session`**（append-only 真相源，"an agent's whole interaction history"，`docs/subsystems/session.md`） | ★ **落盘**（`~/.dsh/sessions/.../session.jsonl.zstd`） |
+| **可达性** | `continuable` ⇒ 可**冷唤醒续派**（`send_message`）⇒ 这才是"有下次"的含义；`one-shot` **没有下次** | 由 descriptor 的 `mode` 决定 |
+
+⇒ **"持久化"指的是"这个分身自己的对话记录留在磁盘上"，不是"skill 的状态"。**
+**实测佐证**：我们自己扫到 **depth=1 有 12 个会话、depth=2 有 1 个、depth=3 有 1 个** ⇒
+**子代的会话确实独立落盘**（这也是我们事后复盘它的唯一途径）。
+⇒ **并发**：分身各是**独立 session + 独立 UUID**，**不会互相覆盖**；
+真实的并发雷只有一处 —— **"按 preset 各挂一份"的注册会重复**（见 D9）。
 
 ---
 
@@ -180,6 +210,11 @@
 | O5 | 全局注册 vs per-scope 注册在**遮蔽/重复抛错**上的准确边界 | D6 | 一次最小实验：同 scope 同名 section 两次声明 |
 | O6 | 内层能力要不要**补回**上游的调度契约与 `tools/result` 观察者 | S6 | 产品决定 + 一次 A/B |
 | O7 | 子代能否声明与父代**不同的 presentation** | D7/S3 | 未验证 |
+| O8 | **"压缩点刷新"本身会不会引入额外模型调用**（若会，必须计入成本账） | S5/S6 | 设计时确认；若走 D6 的纯文本重渲染则**不引入** |
+| O9 | **父代被中断时，在飞的分身如何收**（`drainContinuableDescendants` / 父代取消的传播） | S5 正确性 | 读 `dsh-subagent/README.md` 的 drain 段 + 一次中断实验 |
+| O10 | **分身的失败判据**：父代只看到 `Error: <stop reason>` ⇒ 如何区分"任务失败"与"能力不足" | S6 的"错误率"列 | 读 driver 的 result 段；设计一个归类口径 |
+| O11 | **按分身拆账的读数**：`tokenUsage` 是 per-session 的 ⇒ 需要按 session 拆出"每个分身花了多少" | S6 | 复用 `scripts/measure-delegation-reuse.mjs` 的口径扩写 |
+| O12 | **深度上限**：默认 `maxDepth = 3`（depth 4 运行时被拒）⇒ "分身再分身"的层数是否够 | 架构 | 产品决定 |
 
 ---
 
