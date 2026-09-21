@@ -197,9 +197,9 @@ L.push('=== ★ 交叉表：哪个因子真正决定复用 ===')
 const real = pairs.filter((x) => x.child.prov) // 排掉非委派的"新会话"配对
 const bucket = (h) => (h === null ? 'n/a' : h >= 0.5 ? '高(≥50%)' : h > 0.05 ? '中(5~50%)' : '低(≤5%)')
 
-function crosstab(name, keyFn) {
+function crosstab(name, keyFn, subset) {
   const m = new Map()
-  for (const { child } of real) {
+  for (const { child } of subset) {
     const k = keyFn(child)
     if (!m.has(k)) m.set(k, { hi: [], mid: [], lo: [], na: [] })
     const b = m.get(k)
@@ -218,27 +218,48 @@ function crosstab(name, keyFn) {
   L.push('')
 }
 
-crosstab('子/父工具数是否相同', (c) => {
-  const p = byId.get(c.parent)
-  if (!p || c.toolsCount === null || p.toolsCount === null) return '(不可比)'
-  return c.toolsCount === p.toolsCount ? `相同(${c.toolsCount})` : `不同(${c.toolsCount} vs ${p.toolsCount})`
-})
-crosstab('委派 provider', (c) => c.prov)
-crosstab('mode', (c) => c.mode ?? '(无)')
-crosstab('子/父 preset 是否相同', (c) => {
-  const p = byId.get(c.parent)
-  return p ? (c.preset === p.preset ? '相同' : '不同') : '(不可比)'
-})
-crosstab('system 逐字完全一致', (c) => {
-  const p = byId.get(c.parent)
-  if (!p || !c.system || !p.system) return '(不可比)'
-  if (c.system === p.system) return '完全一致'
-  const k = lcp(c.system, p.system)
-  return `不一致(公共${(k / c.system.length * 100).toFixed(0)}%)`
-})
+const FACTORS = [
+  ['子/父工具数是否相同', (c) => {
+    const p = byId.get(c.parent)
+    if (!p || c.toolsCount === null || p.toolsCount === null) return '(不可比)'
+    return c.toolsCount === p.toolsCount ? `相同(${c.toolsCount})` : `不同(${c.toolsCount} vs ${p.toolsCount})`
+  }],
+  ['委派 provider', (c) => c.prov],
+  ['mode', (c) => c.mode ?? '(无)'],
+  ['子/父 preset 是否相同', (c) => {
+    const p = byId.get(c.parent)
+    return p ? (c.preset === p.preset ? '相同' : '不同') : '(不可比)'
+  }],
+  ['system 逐字完全一致', (c) => {
+    const p = byId.get(c.parent)
+    if (!p || !c.system || !p.system) return '(不可比)'
+    if (c.system === p.system) return '完全一致'
+    const k = lcp(c.system, p.system)
+    return `不一致(公共${(k / c.system.length * 100).toFixed(0)}%)`
+  }],
+]
+
+// ★ 用户裁定（2026-09-21）：**agnes 免费、只跟次数有关 ⇒ 它的命中率读数没有经济意义，不能当判据**。
+//   ⇒ 结论必须只看 **deepseek-v4-flash**（有真实计费）的样本。下面两表并列，谁被 agnes 带偏一眼可见。
+const DS_MODEL = 'deepseek-v4-flash'
+const dsOnly = real.filter((x) => x.child.model === DS_MODEL)
+const others = real.filter((x) => x.child.model !== DS_MODEL)
+
+L.push('=== ★ 交叉表：哪个因子真正决定复用 ===')
+L.push(`（A）全部样本 n=${real.length}：`)
+for (const [n, f] of FACTORS) crosstab(n, f, real)
+L.push(`（B）★ 只看 DeepSeek（model=${DS_MODEL}）n=${dsOnly.length} —— 有真实计费，才是判据：`)
+for (const [n, f] of FACTORS) crosstab(n, f, dsOnly)
+L.push(`（C）被剔除的非 DeepSeek 样本 n=${others.length}（免费/按次数，命中率无经济意义）：`)
+for (const { child: c } of others) {
+  L.push(`    ${pad(String(c.id ?? c.dir ?? '?').slice(0, 8), 10)} model=${pad(c.model, 22)} preset=${pad(c.preset, 14)} ` +
+    `首命中=${pad(pct(c.firstHit), 8)} 缓存读=${c.firstCacheRead}  ← 不计入结论`)
+}
+L.push('')
 
 L.push('说明：本表是【假设生成】，不是受控实验。因子之间可能共线（例如"工具数不同"的样本恰好都是 continuable）。')
 L.push('')
+
 
 // ── 全量按 depth ──────────────────────────────────────────────
 L.push('=== 全量一览（depth 升序；只列有 usage 的）===')
