@@ -186,6 +186,23 @@
 
 ## ★ 子 Agent = 我们的进化载体（DSH 已有一等地基，2026-09-21 通读上游源码确认）
 
+### ★★ 嵌套与工具面裁剪：**已实测**（详见 `docs/subagent-nesting-and-toolfilter.md`）
+
+- **嵌套成立且预算为真**：`delegationDepth` 0/1/2/3 四级会话（父链逐级对上，**四层 preset 全是 `council`** ⇒ 子代继承父 preset）；
+  **第 4 层被运行时拒绝**，原样 `Error: subagent depth 4 exceeds maxDepth 3`（且 L3 有真实 `tool/call` ⇒ 不是模型自己停）。
+  `maxDepth` **默认 3**（`tool-subagent/src/index.ts:98`）。**字段位置：会话头记录的顶层**（不在 `data` 里）。
+- **★ `toolFilter` 真能裁，且只裁子代**（实测 103 → **3** / **98** / **1**）：
+  `allow:[read,glob]` ⇒ `["glob","read","report"]`；`deny:[5个]` ⇒ 103−5；**`allow:[]` ⇒ 只剩 `["report"]`（1 个，不是 0）**
+  —— 因为 `dsh-tools` 的 `view()` 把**own-scope 工具无条件放进可见集**，不受 `restrict()` 约束
+  ⇒ **源码那句"空数组=全拒"只对【全局工具】成立。**
+- ⇒ **三层工具面模型（完整图景）**：**`profile` 定底板 → `preset` 定该 agent 的增量 → `toolFilter` 定【这一次委派】给子代的裁剪。**
+  **"专项 vs 通用基底" = 同一套机制的两个配置**（专项 = `persona` + `toolFilter` 收窄；通用 = 不裁剪或只留编排工具），
+  **不需要两套 preset**；"拆解到别的专项" = **子代自己再委派**（前提：那份 preset 挂了委派行），由 `maxDepth` 兜住。
+- ⇒ **判据侧直接可用**：`delegationDepth` 是**可从会话头读出的持久字段** ⇒ "按 lineage 统计"不必另造机制，
+  把它并进**上下文指纹**（system 长度 + 消息数 + 有无 `report` + `delegationDepth`）即可。
+
+### 其余地基事实
+
 - **形态**：子 Agent 的 **persona（提示词）+ toolFilter（工具集）+ 自己的持久会话**都是**一等字段**
   （`ContinuableSubagentDescriptorData{ persona?, toolFilter? }`；`SubagentCapabilities{outputSchema,depthLimit,toolFilter,persona}`）。
   **但能力因 provider 而异**：**`fork-in-process` 支持 persona+toolFilter**；`acp`/`dsh-sdk` **全不支持**（会被拒）⇒ **绑错 provider 会静默退化**。
