@@ -71,6 +71,13 @@ export const AbsorbOutcome = {
   RejectedValidation: 2,
   /** 两个 ID 有一个不在 Nodes 里 */
   RejectedNotFound: 3,
+  /**
+   * ★★【本移植自行补的，Go 里没有】：`absorb(x, x)` 自环。
+   * Go 无此检查 ⇒ 节点把自己标成 absorbed + AbsorbedBy=自己 ⇒ **自锁死**
+   * （`isAbsorbed()` 为真 ⇒ 三级查找 / FindSimilar 全部看不见它），且 Fix 被自我拼接一遍。
+   * 判据是「确定的坏」而非「行为差异」⇒ 补。枚举值接着 iota 序取 4。
+   */
+  RejectedSelfAbsorb: 4,
 } as const
 export type AbsorbOutcome = (typeof AbsorbOutcome)[keyof typeof AbsorbOutcome]
 

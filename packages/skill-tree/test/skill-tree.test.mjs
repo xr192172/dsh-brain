@@ -511,5 +511,105 @@ test('★ 吸收后 Tier-1 索引仍指向 into（同 principle 互吸会把索�
   assert.equal(t2.findByPrinciple('pdf'), x.ID)
   t2.absorb('skill-dup', 'skill-into')
   assert.equal(x.Status, SkillStatus.Active, 'into 仍活着、未被吸收')
-  assert.equal(t2.findByPrinciple('pdf'), undefined, '⚠️N3：into 的索引被误删 ⇒ Tier-1 落空')
+  // ★ 本轮（第二轮）定夺：N3-b 是「确定的坏」⇒ **已补**（D4：只删指向 absorbed 的那一条索引）。
+  //   上面这条断言原为 `undefined`（钉的是 Go 的坏行为），补完翻成 `x.ID` —— **有意的口径变更**。
+  assert.equal(t2.findByPrinciple('pdf'), x.ID, 'D4：into 自己的索引必须活着')
+})
+
+// ── ★★ 第二轮补的四处（D1/D2/D3a/D3b）—— 判据「确定的坏」而非「行为差异」 ──
+//  ★ 纪律：先写断言（补之前必红），再改实现；断言是判据，不为了消红去改断言。
+
+test('★补 D3a：absorb(x, x) 自环 ⇒ RejectedSelfAbsorb，节点不被自锁死', () => {
+  const t = new SkillTree()
+  const x = t.create('user', 'validate user input', 'fix-x', ['a'], '')
+  const fixBefore = x.Fix
+  const scoreBefore = x.Score
+  assert.equal(t.absorb(x.ID, x.ID), AbsorbOutcome.RejectedSelfAbsorb, '自环必须被拒')
+  assert.equal(x.Status, SkillStatus.Active, '不得把自己标成 absorbed')
+  assert.equal(x.AbsorbedBy, '', '不得写成 AbsorbedBy=自己')
+  assert.equal(x.Fix, fixBefore, 'Fix 不得自我拼接一遍')
+  assert.equal(x.Score, scoreBefore)
+  assert.deepEqual(x.MergedFrom, [], 'MergedFrom 不得记自己')
+  // 自锁死的实质危害：节点从此查不到 ⇒ 这里钉住「仍然可用」
+  assert.equal(t.findByPrinciple('validate user input'), x.ID)
+  assert.equal(t.findSimilar('validate user input form', 0.3, 5).length, 1)
+})
+
+test('★补 D1：Tier-2 平票 ⇒ 取 ID 字典序最小者（与插入序 / 遍历序无关）', () => {
+  // 两个节点与候选的 jaccard **都是 0.6**（真平票），ID 故意让「插入序」与「字典序」相反。
+  const P = {
+    'skill-zz': 'validate user input email',
+    'skill-aa': 'validate user input phone',
+  }
+  const q = 'validate user input form'
+  const qt = tokenizePrinciple(q)
+  assert.equal(jaccard(qt, tokenizePrinciple(P['skill-zz'])), 0.6, 'zz 确实是 0.6')
+  assert.equal(jaccard(qt, tokenizePrinciple(P['skill-aa'])), 0.6, 'aa 确实是 0.6（平票）')
+
+  const build = (order) => {
+    const t = new SkillTree()
+    for (const id of order) mk(t, id, { Principle: P[id] })
+    return t
+  }
+  // 两种插入序 ⇒ 同一个赢家（字典序最小的 skill-aa）
+  assert.equal(build(['skill-zz', 'skill-aa']).findByPrinciple(q), 'skill-aa')
+  assert.equal(build(['skill-aa', 'skill-zz']).findByPrinciple(q), 'skill-aa')
+  // 再过一轮 load()（快照 key 顺序反转 ⇒ Nodes 插入序变）⇒ 结果仍不变
+  const snap = build(['skill-zz', 'skill-aa']).save()
+  const t3 = new SkillTree()
+  t3.load({ nodes: Object.fromEntries(Object.entries(snap.nodes).reverse()), meta: snap.meta })
+  assert.equal(t3.findByPrinciple(q), 'skill-aa')
+  // 同一棵树连查两次结果相同
+  const t4 = build(['skill-zz', 'skill-aa'])
+  assert.equal(t4.findByPrinciple(q), t4.findByPrinciple(q))
+})
+
+test('★补 D1：Tier-3 多个命中 ⇒ 同样取 ID 字典序最小者', () => {
+  const q = '校验用户输入的边界情况啊'
+  const P = {
+    'skill-z3': '校验用户输入的边界情况啊以及更多',
+    'skill-a3': '我说校验用户输入的边界情况啊对吧',
+  }
+  const build = (order) => {
+    const t = new SkillTree()
+    for (const id of order) mk(t, id, { Principle: P[id] })
+    return t
+  }
+  assert.ok(byteLen(normalizePrinciple(q)) > TIER3_MIN_NORM_BYTES)
+  assert.equal(build(['skill-z3', 'skill-a3']).findByPrinciple(q), 'skill-a3')
+  assert.equal(build(['skill-a3', 'skill-z3']).findByPrinciple(q), 'skill-a3')
+})
+
+test('★补 D2：FindSimilar 同分 ⇒ 按 ID 字典序升序（与插入序无关）', () => {
+  const P = {
+    'skill-zz': 'validate user input email',
+    'skill-aa': 'validate user input phone',
+    'skill-mm': 'validate user name', // 0.4，垫在后面
+  }
+  const build = (order) => {
+    const t = new SkillTree()
+    for (const id of order) mk(t, id, { Principle: P[id] })
+    return t
+  }
+  const q = 'validate user input form'
+  const want = ['skill-aa', 'skill-zz', 'skill-mm']
+  assert.deepEqual(build(['skill-zz', 'skill-aa', 'skill-mm']).findSimilar(q, 0.3, 5).map((n) => n.ID), want)
+  assert.deepEqual(build(['skill-mm', 'skill-zz', 'skill-aa']).findSimilar(q, 0.3, 5).map((n) => n.ID), want)
+})
+
+test('★补 D3b：同 principle 互吸后 into 的 Tier-1 索引必须活着', () => {
+  const t2 = new SkillTree()
+  mk(t2, 'skill-dup', { Principle: 'pdf' })
+  const x = mk(t2, 'skill-into', { Principle: 'pdf' }) // 后写 ⇒ prinIndex['pdf'] = skill-into
+  assert.equal(t2.findByPrinciple('pdf'), x.ID)
+  assert.equal(t2.absorb('skill-dup', 'skill-into'), AbsorbOutcome.Succeeded)
+  assert.equal(x.Status, SkillStatus.Active, 'into 仍活着、未被吸收')
+  assert.equal(t2.findByPrinciple('pdf'), x.ID, 'D3b：不得误删 into 的索引')
+  // 反向护栏：索引键指向 absorbed 时**仍然要删**（该删的别漏）
+  const t3 = new SkillTree()
+  const into2 = t3.create('user', 'validate user input', '', [], '')
+  const abs2 = t3.create('learned', 'sanitize html output', '', [], '')
+  assert.equal(t3.findByPrinciple(abs2.Principle), abs2.ID)
+  t3.absorb(abs2.ID, into2.ID)
+  assert.notEqual(t3.findByPrinciple(abs2.Principle), abs2.ID)
 })

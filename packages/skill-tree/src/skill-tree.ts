@@ -23,11 +23,23 @@
  *   W3 `create`                 ：`sanitizeID` 与 `sanitizeName` 两套净化器不同构
  *   W4 `findByPrinciple` T1/T3  ：`normalizePrinciple` 是朴素子串替换，会误伤词尾
  *   W5 `findByPrinciple` Tier-2 ：Go 注释自称能捕获的改写，实测 jaccard=0.5，被 `>0.5` 漏掉
- *   N1 Tier-2 平票 / Tier-3 首个命中：Go 是 map 随机序 ⇒ **平票结果不可复现**（本次新增）
- *   N2 `findSimilar` 平票排序  ：Go `sort.Slice` 不稳定，JS `Array.sort` 稳定 ⇒ 平票顺序不同（新增）
- *   N3 `Absorb` 收尾删 prinIndex：同 principle 互吸时会把 `into` 自己的索引删掉（新增）
  *
  *    搜索 `⚠️ 移植告警：` 可跳到每一处的落点行。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ★★【第二轮定夺：本移植自行补的 4 条（Go 里没有）】—— 搜索 `★★补` 可跳到落点行。
+ *    判据：**「确定的坏」补，「只是行为差异」照搬**。
+ *      · W1~W5 只是行为差异（Go 那样也能跑）⇒ 照搬，本轮不动。
+ *      · N1/N2/N3a/N3b 是确定的坏（不可复现 / 自锁死 / 误删）⇒ **补掉**，编号改 D* 以示
+ *        「这是我们定的，Go 里没有」：
+ *
+ *   D1 Tier-2 平票 / Tier-3 多命中：Go 是 map 随机序 ⇒ 结果不可复现
+ *      ⇒ 补**确定性 tie-break：平票取 ID 字典序最小者**（理由见落点注释，别只看这句）
+ *   D2 `findSimilar` 平票排序：Go `sort.Slice` 不稳定 ⇒ 同分顺序不定 ⇒ 同 D1 规则
+ *   D3a `Absorb` 自环：`absorb(x, x)` 会把节点自锁死 ⇒ 补 `AbsorbOutcome.RejectedSelfAbsorb`
+ *   D3b `Absorb` 收尾删索引：可能误删 `into` 自己的索引 ⇒ 补「只删指向 absorbed 的那一条」
+ *
+ *    ★ 每处都有「补之前必红、补之后必绿」的双向用例（test/skill-tree.test.mjs 末尾一节）。
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -279,9 +291,17 @@ export class SkillTree {
     //    （只剩 Tier-3 子串兜底，而 Tier-3 又要求 >20 字节）。照搬，改动会改既有判定。
     const candidate = tokenizePrinciple(principle)
     if (candidate.size >= MIN_FUZZY_TOKENS) {
-      // ⚠️ 移植告警 N1（本次新增）：平票时 Go 取的是 **map 随机迭代序的第一个**，
-      //    本实现取的是 **JS Map 插入序的第一个** ⇒ 同分场景下两边可能选中不同节点，
-      //    且 Go 自己两次运行结果也可能不同 —— **Tier-2 平票结果在 Go 侧本就不可复现**。
+      // ★★补 D1（**这是我们定的规则，Go 里没有**）—— 平票取 **ID 字典序最小者**。为什么是这条：
+      //   ① Go 取的是 map **随机迭代序**的第一个，本实现取的是 JS Map **插入序**的第一个 ——
+      //      两者都不可复现：插入序**不持久化**（§5⑪ prinIndex 不落盘，`load()` 后 Nodes 的
+      //      插入序来自快照 key 顺序，而快照又是从 Go 的 map 序列化出来的 ⇒ 顺序本就随机）。
+      //      ⇒ 只有「**由数据本身**决定的规则」才可复现，遍历序/插入序都不算；可持久化的稳定
+      //        身份只有 ID。
+      //   ② 字典序是**全序**且 ID 在 Nodes 里唯一 ⇒ 不存在二次平票，也不依赖任何遍历顺序与
+      //      语言实现（Go 侧将来要对齐，照抄同一条即可）。
+      //   ③ 平票意味着相似度**相同**，不该再暗含质量偏好 —— 所以**不**按 Score / UseCount /
+      //      CreatedAt 挑（那等于凭空造一个「谁更好」的语义，是我们自己的漂移）。选字典序最小
+      //      = 只为保证「谁都一样时，永远选同一个」。
       let bestID = ''
       let bestScore = 0
       for (const [id, node] of this.Nodes) {
@@ -294,7 +314,7 @@ export class SkillTree {
         //    但实测这对改写 jaccard **恰好 = 0.5**，而这里的判据是**严格 >** 0.5
         //    ⇒ 注释里点名的那句改写**命中不了**（已被 tokenize.test.mjs 钉死为 0.5）。
         //    想让它命中就得放宽到 `>=`（那是 FindSimilar 的 minJaccard 语义，两套阈值别混）。
-        if (score > TIER2_JACCARD_GT && score > bestScore) {
+        if (score > TIER2_JACCARD_GT && (score > bestScore || (score === bestScore && id < bestID))) {
           bestScore = score
           bestID = id
         }
@@ -304,15 +324,20 @@ export class SkillTree {
 
     // ── Tier 3：双向子串包含（两边 norm 都要 > 20 字节）─────────────────────
     // ⚠️ 移植告警 W4（同上）：输入同样过 `normalizePrinciple`（D1 误伤在这里二次生效）。
-    // ⚠️ 移植告警 N1（本次新增）：命中即 return ⇒ 谁先被遍历到谁赢，同样是 Go map 随机序。
+    // ★★补 D1（同一条规则，理由见 Tier-2 落点注释）：Go 是「命中即 return」⇒ 谁先被遍历到谁赢
+    //    （map 随机序，不可复现）。这里改成「**扫完全集再取 ID 字典序最小者**」。
     //    ⚠️ 长度是**字节**口径：7 个汉字（21 字节）能进 Tier-3，7 个英文字母不能。
     if (byteLen(norm) > TIER3_MIN_NORM_BYTES) {
+      let bestID = ''
       for (const [id, node] of this.Nodes) {
         if (isAbsorbed(node)) continue
         const np = normalizePrinciple(node.Principle)
         if (byteLen(np) <= TIER3_MIN_NORM_BYTES) continue
-        if (norm.includes(np) || np.includes(norm)) return id
+        if (norm.includes(np) || np.includes(norm)) {
+          if (bestID === '' || id < bestID) bestID = id
+        }
       }
+      if (bestID !== '') return bestID
     }
 
     return undefined
@@ -344,10 +369,15 @@ export class SkillTree {
       if (s >= minJaccard) scored.push({ node, score: s })
     }
 
-    // ⚠️ 移植告警 N2（本次新增）：Go 用 `sort.Slice`（pdqsort，**不稳定**），
-    //    JS `Array.prototype.sort` 自 ES2019 起**稳定** ⇒ 分数相同的节点，两边顺序可能不同。
-    //    「同分谁在前」在 Go 侧本就不可复现，这里不额外打补丁。
-    scored.sort((a, b) => b.score - a.score)
+    // ★★补 D2（**这是我们定的规则，Go 里没有**）：Go 用 `sort.Slice`（pdqsort，**不稳定**），
+    //    「同分谁在前」在 Go 侧本就不可复现；JS 侧稳定的 `Array.sort` 保的是**插入序**，
+    //    而插入序不持久化（见 D1 理由①③）⇒ 同样不可复现。
+    //    ⇒ 显式补一条完全比较子：**分数降序，同分按 ID 字典序升序**（与 D1 同一条规则，
+    //      理由见 Tier-2 落点注释）。ID 唯一 ⇒ 全序 ⇒ 结果只取决于数据集本身。
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score
+      return a.node.ID < b.node.ID ? -1 : a.node.ID > b.node.ID ? 1 : 0
+    })
     return scored.slice(0, topN).map((c) => c.node)
   }
 
@@ -378,9 +408,11 @@ export class SkillTree {
     const into = this.Nodes.get(intoID)
     if (!into) return AbsorbOutcome.RejectedNotFound
 
-    // ⚠️ 移植告警 N3-a（本次新增）：Go **没有**自环检查。`absorb(x, x)` 会走到最后，
-    //    把 x 自己标成 absorbed + AbsorbedBy=x ⇒ **节点自锁死**，且 MergedFrom 里记自己。
-    //    照搬（不加检查），调用方别传同一个 ID。
+    // ★★补 D3a（**这是我们补的，Go 里没有**）：Go **没有**自环检查，`absorb(x, x)` 会走到最后
+    //    ⇒ x 自己标成 absorbed + AbsorbedBy=x（`isAbsorbed()` 为真 ⇒ 三级查找 / FindSimilar
+    //    全部看不见它，且没有反操作 ⇒ **自锁死**），Fix 还会被自我拼接一遍、MergedFrom 记自己。
+    //    这是「确定的坏」而非行为差异 ⇒ 补一个显式拒绝（新枚举 `RejectedSelfAbsorb`）。
+    if (absorbedID === intoID) return AbsorbOutcome.RejectedSelfAbsorb
 
     // 不合并检查 1：用户钉住不许合并。
     if (into.Exclusive) return AbsorbOutcome.RejectedExclusive
@@ -421,13 +453,14 @@ export class SkillTree {
     // 标记被吸收方：status + AbsorbedBy + 从 prinIndex 摘掉。
     absorbed.Status = SkillStatus.Absorbed
     absorbed.AbsorbedBy = intoID
-    // ⚠️ 移植告警 N3-b（本次新增）：这里删的是「**当前** absorbed.Principle 归一化后的键」，
-    //    而该键指向谁取决于最后一次 `setPrinIndex/rebuild` 的写入顺序 —— 不检查它到底指向谁。
-    //    若两节点 principle 相同、且索引键此刻指向 **into**，这个 delete 会把 **into 自己的
-    //    索引删掉** ⇒ 之后 Tier-1 查该 principle 落空。
-    //    ★ 观测上常被 Tier-2 掩盖（同 principle 时 jaccard=1 会兜住），只有当该 principle
-    //      的 token 数 < 2（进不了 Tier-2）时才暴露为「查不到」。Go 的既有行为，照搬。
-    this.prinIndex.delete(normalizePrinciple(absorbed.Principle))
+    // ★★补 D3b（**这是我们补的，Go 里没有**）：Go 这里**不检查**该键当前指向谁，
+    //    直接 `delete(prinIndex, norm(absorbed.Principle))` ⇒ 两节点 principle 相同、
+    //    且索引键此刻指向 **into** 时，会把 **into 自己的索引删掉**（Tier-1 落空）。
+    //    ★ 复现（见 test/skill-tree.test.mjs「D3b」）：principle 取 `'pdf'`（1 token、≤20 字节）
+    //      让 Tier-2/Tier-3 都兜不住 ⇒ `findByPrinciple('pdf')` 从 `skill-into` 变成 `undefined`。
+    //    这是「确定的坏」（误删活节点的索引）⇒ 补成**只删确实指向 absorbed 的那一条**。
+    const absorbedKey = normalizePrinciple(absorbed.Principle)
+    if (this.prinIndex.get(absorbedKey) === absorbedID) this.prinIndex.delete(absorbedKey)
 
     return AbsorbOutcome.Succeeded
   }
