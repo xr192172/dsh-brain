@@ -57,11 +57,17 @@
   ⇒ ★ **`prune` 也必须触发**（它无模型调用，但**同样 replace 历史节点 ⇒ 同样改前缀**）。
 - **判据必须能报"历史为真次数"**：本机为真 **130 + 72 = 202 次** ⇒ 不是假绿；**落地时把这两个计数打进日志，为 0 就报警**。
 - **次选**：`compaction/summary.shadowedSeqs`（被替换掉的是哪些节点）。
-- **★ 关于 `end` 带 `error` 时刷不刷（O4 的答案）**：**不看 `error`，看"历史是否真的被 replace 过"** ——
-  即 **`shadowedSeqs` 非空**才是事实证据。理由：`error` 是"这次尝试的结果"，而**我们关心的是"surface 动没动"**
-  （实测 132 start vs 130 end ⇒ 存在未正常收尾的压缩，而**未收尾 ≠ 没动过**）。
-  ⇒ **判据写成「`shadowedSeqs.length > 0` ⇒ 刷」**，`error` 只记日志、不参与决策。
-  ⇒ 这条把**不可靠的状态信号**换成了**可验证的事实信号**（也符合反模式第 7、8 条）。
+- **★ 判据的准确形状（已由 W1 取证修正，2026-09-22）**：
+  实测/源码事实 —— **`compaction/end` = `{compactionId, turn, error?}`，【没有】`shadowedSeqs`**；
+  **`compaction/summary` 才有 `[]{compactionId, shadowedSeqs, shadowedRange, shadowedTokenCount, llmStreamCall, …}`**；
+  **`compaction/prune` 有 `{shadowedRange, shadowedSeqs, shadowedTokenCount}` 但【没有】`compactionId`**。
+  ⇒ **正确判据 = `compaction/summary`（其 `shadowedSeqs` 非空）或 `compaction/prune`** ——
+  这两者各在一条路径上（摘要 / 剪枝），**都携带"哪些节点被替换"的事实**。
+  ⇒ **`compaction/end` 只用于收尾配对，不参与"刷不刷"的决策。**
+- **★ 关于"`end` 带 `error`"**：**不看 `error`，看"历史是否真的被 replace 过"**（即上一条的 `shadowedSeqs`）。
+  理由：`error` 是"这次尝试的结果"，我们关心的是"**surface 动没动**"（132 start vs 130 end ⇒ 存在未正常收尾的，
+  而**未收尾 ≠ 没动过**）。⇒ 把**不可靠的状态信号**换成**可验证的事实信号**。
+- ⚠️ **附带发现（W1）**：`docs/subsystems/compaction.md:17` 的表格把 `end` 简写为 `{ turn, error? }`，**与源码不一致**（源码含 `compactionId`）。
 - **兜底**：`text` 闭包内比较工具集指纹 —— ⚠️ 它测的是"**脸变了没**"，**不是"压缩发生没"**，两者**不可互替**。
 - **状态**：✅ 定。
 
@@ -74,13 +80,35 @@
   **我们的刷新逻辑抛错不会拖垮持久化**（`:807` 亦明文 "observer failures are logged and contained"）。
 - **状态**：✅ 定（**签名只需按 `session.md:#ctxsessions` 段写**）。
 
-### D6 若要让"脸"由我们掌控：**必须自写一套 presentation**
-- **依据**：`dsh-system-prompt/README.md:20` —— **"Duplicate names within one layer … throw"**；
-  而 `tools:sdk` 已由 preset 的 `tool-presentation` 行在**子代自己的 scope**注册一份（子代继承 preset ⇒ 重跑那行）。
-- **可用的实现位**：`dsh-tools/lib/index.js:2635` —— `PromptSection.text` **可以是 `(context) => string`**，
-  且该段**按调用 scope 求值**（`:2625` 注释 "registered globally … **and per scope by `presentAs`**"、
-  "**The body regenerates from the CALLING scope**"）⇒ **冻结 = 在函数里返回同一缓存串；压缩点 = 让缓存失效。**
-- **状态**：✅ 定（**细节见 O1**）。
+### D6 ★ **只需在【目标 agent 自己的 scope】注册一条同名 `tools:sdk` section（跨层遮蔽，安全）** —— 不必自写 presentation
+> **本条已由 W3 取证降级（2026-09-22）**：原判"同 scope 同名 throw ⇒ 必须自写一套 presentation"**前提错了**。
+- **依据一：`composeFrom` 是 `bind` 不是 `mount`。** `dsh-agent-presets/lib/index.js:988-995` 逐字：
+  ```js
+  composeFrom(agentCtx, parentCtx) {
+    const agentKey = scopeOf(agentCtx);
+    if (agentKey === void 0) throw new Error("agent-presets: refusing to compose an unscoped context; …");
+    const standing = standingMountFor(parentCtx);
+    if (standing === void 0) return void 0;
+    this.bindings.set(agentKey, bindScopeParent(agentKey, standing.key));   // ★ 只 bind
+    return standing.presetId;
+  }
+  ```
+  ⇒ **子代不重跑 preset 的各行**（所以 `tool-presentation` 不会被跑第二遍）。
+- **依据二：跨层同名 ⇒ 遮蔽（最近者胜），且【被遮蔽的 `text` 不会被调用】。**
+  `dsh-scope/lib/index.js:177-181`（`merge()` 按 `chainLayers` 逐层 `set`）；
+  `packages/core/system-prompt/tests/scoped.spec.ts:66-79`：`expect(globalText).not.toHaveBeenCalled()`。
+- **依据三：上游自己就这么干** —— `packages/subagent/subagent/src/child-agent.ts:170-174`
+  在**子代自己的 scope** 里注册 `deployment:persona`（order 0）来遮蔽父代的同名字段，即"同名、跨层、遮蔽"的官方范例。
+- **依据四（上游原话）**：`packages/core/tools/src/index.ts:964-966` ——
+  "Under a deployment that already defaults to a code mode this **shadows** the global registration with an identical body, **which costs nothing**…"
+- **★ 边界（这才是 D9 真正该担心的）**：**同层**才抛错；**注册到【共享的 standing scope】会撞 `presentAs` 那份**
+  ⇒ **所以必须注册在目标 agent 自己的 scope。**
+- **★ 代价**：遮蔽是**逐层**的 —— 父代与子代都要生效，就**两处各注册一条**。
+- **★ 不要碰** `run_code` 传输（原文：`a scoped registration must not shadow it`）。
+- **实现位**：`PromptSection.text` 可为 `string | ((context: AssembleContext) => string)`
+  （`dsh-system-prompt` 类型：`types/index.d.ts:61`；`AssembleContext = {scope?, signal?}`，被 `dsh-agent` 扩为含 `agent?`）
+  ⇒ **冻结 = 在函数里返回同一缓存串；压缩点 = 让缓存失效。**
+- **状态**：✅ 定（**比原判更简单**）。
 
 ### D7 兜底路线：**native 模式 + 新工具排到工具列表末尾**
 - **依据（实测）**：脸 ≈ **40.5K token ≈ 首次请求的 99%**（服务端读数众数 **40832**，未缓存仅 219；
@@ -228,3 +256,43 @@
 6. ❌ **别把"历史里那段脸"当可清理对象** —— 脸是每步装配的派生物，**压缩器里没有它**。
 7. ❌ **别为让判据变绿去改被检对象**；**假绿 > 假红**。
 8. ❌ **别写"看不到 ⇒ 没有"的判据**；"通道不可用 ≠ 读数为 0"。
+9. ❌ **别把 `compaction/end` 当"历史被替换"的证据**（它没有 `shadowedSeqs`）—— 见 D4。
+10. ❌ **别把 D6 与 D9 搞混**：**section 要逐层注册**（跨层遮蔽安全，D6）；**setup 类注册只能一次**（不 scope-aware，D9）。两者是**不同的注册表**。
+
+---
+
+## 8. 六路取证汇总（2026-09-22，六个并发子代理；**每条已由我独立复核**）
+
+> 原始产出：`out/w1-o3-session-event.md`、`out/w2-o2-bridge.md`、`out/w3-o5-section-shadowing.md`、
+> `out/w4-o8-o6-cost-and-bypass.md`、`out/w5-o11-o10-metrics.md`、`out/w6-o9-o12-cancel-depth.md`
+
+### 8.1 ✅ 已关闭 / 已更正
+
+| 项 | 结论 | 我的复核 |
+|---|---|---|
+| **O4** | ✅ 关闭 —— 正确判据是 `compaction/summary`(shadowedSeqs 非空) **或** `compaction/prune`；`end` 没有该字段 | ✅ 我方实测日志亦证 `prune` 无 `compactionId`、`end` 无 `shadowedSeqs` |
+| **O5** | ✅ 关闭 —— **跨层同名 ⇒ 遮蔽（安全，被遮蔽的 text 不评估）；同层 ⇒ 抛** | ✅ 逐字核验 `composeFrom`（bind 非 mount，`agent-presets/lib/index.js:988-995`）+ 上游测试 |
+| **O6** | ✅ 关闭（代价确认）—— ★ **`attachStructuredRuntime` 依赖 `tools/result`** ⇒ 桥内绕过会**直接打坏 `outputSchema` 回执** | ✅ 逐字核验 `dsh-subagent-in-process-driver/lib/index.js:85` `childCtx.on("tools/result", …)` + `README.md:44` |
+| **O2** | ✅ 关闭 —— ★ **不存在"注册了但不上脸"的工具** ⇒ **桥内路由只能是直接函数调用（绕过管线）**，sub-dispatch **抵不掉**该代价；泛化 schema `{name,args}` 在 native 下无契约问题；桥名不能是 `run_code`、不能同层重名、不能是 `<unlisted-tools>`；**code 模式下不能把桥写进 `toolOrder`** | ✅ 抽查通过 |
+| **O8** | ✅ 关闭 —— **纯文本重渲染 = 0 次模型调用**；压缩本身 **1~2 次**（`compactionRetries` 默认 1）；`prune` 0 次；**"压缩后再发请求"只发生在 overflow 路径** | ✅ 抽查通过 |
+| **O11** | ✅ 关闭（附**对我自己脚本的修正**）—— ★ **`scripts/measure-delegation-reuse.mjs` 会漏账**（只读 `assistant/message`；chunk-usage 与 message.usage 是**同一 step 的两阶段**，投影按 `(turn,step)` **替换而非相加**；本机 18 个样本只有 chunk）★ **fork 子的日志含父代 seed 深拷贝 ⇒ 父子相加会把父代历史计两遍** ⇒ **必须按最后一个 `session/end-seed` 切开** | ✅ 采纳（**这条要改脚本**） |
+| **O10** | ✅ 关闭 —— stop reason **恰 5 个**（`completed/aborted/error/max-tokens/refusal`）且可扩展；`Error: <stop reason>` 后**只跟部分文本、不跟 provider diagnostic**；★ **"缺工具/权限被拒"多数表现为【成功】**；★ **结构化输出没提交会被 driver 主动改写成 `error`** ⇒ **四种情况里只有"取消"真可辨** | ✅ 抽查通过 |
+| **O12** | ✅ 关闭 —— `maxDepth` 是**绝对深度**（无递减）；默认 3 **够用**（S1–S5 只需 depth 1 + 可选 depth 2）；混用 `provider-managed` 会让深度**失去单一权威** | ✅ 抽查通过 |
+| **O3** | ✅ 关闭 —— 订阅**不是** `ctx.sessions` 的方法，而是 cordis `ctx.on('session/event', (session, event) => …)`；**scope 判定键 = "谁调用了 `enter()`"** ⇒ 子代 `agent.ctx` 上挂 ⇒ **只收该子代**（唯一"多收"方向是**祖先**）；★ **必须在创建窗口挂**（append 前先快照 listener，挂晚即漏） | ✅ 采纳 |
+
+### 8.2 ⚠️ 新增未闭合（由取证产生）
+
+| # | 未闭合 | 挡住 |
+|---|---|---|
+| **O13** | ★ **`attachStructuredRuntime` 依赖 `tools/result`** ⇒ 若走 D2 的桥，**`outputSchema` 回执会坏**。要么桥自己补发等价的 `tools/result` 观察语义，要么**放弃"能力藏桥后"的路**（回到 D6/D7） | **S2/S6 —— 这条可能改变 D2 的走向，是当前最大风险** |
+| **O14** | ★ **内层结果不产出 `tool/result` 持久事件** ⇒ `compaction-tool-result-pruner` **永不剪它** ⇒ **token 账偏低**（账要显式加这一项） | S6 |
+| **O15** | ★ **fork 子的 seed 深拷贝会让父子拆账重复计父代历史** ⇒ 拆账脚本必须按 `session/end-seed` 切分 | S6 |
+| **O16** | `out/o5-shadow-probe.mjs` 的实验只覆盖 section 注册；**`presentAs` 的注册落在哪一层**（`ctx.inject(['codeRuntime'], cb)` 里的 `runtimeCtx` 是否仍带 standing tag）**未实测** | D6 的"注册在哪一层" |
+| **O17** | **顶层父代被替换 ⇒ continuable 子代"自动被收"没有证据** ⇒ **若 S5 依赖这个假设，是错的** | S5 |
+| **O18** | 克隆版本（`0.1.0-rc.5`）与已装产物（`0.1.1-rc.2`）**行号可能不同** ⇒ 引用克隆行号时需回落到已装产物复核 | 全部取证的引用 |
+
+### 8.3 ★ 由此产生的两条**即时行动**
+
+1. **改 `scripts/measure-delegation-reuse.mjs`**（O11）：usage 来源改为**投影侧**（含 chunk），
+   并在拆账时**按 `session/end-seed` 切开 seed 与"分身自己"** —— 否则 S6 的两列数字都不可信。
+2. **先解 O13**（`tools/result` 依赖）再动 S2 —— 否则可能白写一个桥。
