@@ -572,3 +572,89 @@ before `tools/pre-execute`, approval `ask`, and guards, so nothing observes or a
 4. **`code` 模式要求 `ctx.codeRuntime` 存在且有 SDK renderer**（TS 随 `dsh-code-runtime-worker-thread`；Python 内置渲染器但后端另交付）：
    `mode: code/both` 在没有 runtime 时**拒绝装配**，且 `dsh-agent-presets` 会**拒绝挂载并点名该 id**（`dsh-agent-tool-presentation/README.md:15`）。
 5. ★ **且 SDK 段的"通用调用面"具体长什么样、我们的运行时解析怎么接进 `run_code` 的 binding 管线，未设计。**
+
+---
+
+## 12. ★★★★ 用户第三次追问 —— **"前缀为何会永不变？"** 我上一条说满了，**更正**；并给出更干净的形状
+
+### 12.1 ❌ 更正：**"前缀永不变"是错的**，准确说法是"**脸不再随能力集变化**"
+
+**前缀会变的情形（都不受"冻结投影"影响）：**
+
+| 会改变前缀的事 | 是否可避免 |
+|---|---|
+| **压缩** | ❌ 设计如此（它本来就要重写前缀）—— 也正是**唯一免费的时刻** |
+| **人格 / 模式（presentation）/ 其他 `system` 段变化** | ⚠️ 可控但非零 |
+| 动态运行时上下文（落**消息面**，追加式） | ✅ 追加不破坏前缀 |
+| **能力集变化** | ✅ **只要不让它进注册表，就完全不影响前缀** ← **"冻结"真正买到的只有这一条** |
+
+⇒ 准确表述：**"能力集不再影响脸"**。**不是"前缀永不变"。** 我上一轮那句话把"能力维的稳定"说成了"全局的静止"。
+
+### 12.2 ★★ 而且我漏了**第二条通道**：`tool:<name>` 指导段
+
+`dsh-system-prompt/README.md:75` 逐字：
+> "**Sections and schema providers are separate assembly inputs**, so a tool restriction **does not remove independently registered guidance**."
+
+`dsh-system-prompt/README.md:42` 逐字：
+> "Section providers: **tool packages own their cross-call guidance** (`tool:bash`, `tool:read`, …)"
+
+`dsh-tool-subagent/README.md:40` 逐字（对照）：
+> "While the tool is visible in an assembly's scope, a `tool:<toolName>` system-prompt section tells the model …; **a tool restriction removes both its schema and this guidance**."
+
+⇒ **两个后果**：
+1. **指导段与 schema 是两套独立输入** ⇒ **冻结 SDK 段【不会】自动关掉指导段那条通道** ⇒ 我 §11.5 的"替换 SDK 段 ⇒ 脸固定"**只是半句**。
+2. **"独立注册的指导"是最脏的一种**：它**不随工具消失**（`:75`），却永远占着 `system`。
+   ⇒ **纪律：我们自己加的能力，绝不要用"独立注册指导"这条路**（要么不给指导，要么走 `systemPrompt.context()` 落消息面）。
+
+### 12.3 ★★ 用户的三点，直接落成**比 §11.5 更干净**的形状
+
+用户原话："**在此模式下这个插件就禁用，只能投影**"、"**再重启就是在压缩上下文的时候，你再把它追加进去**"、
+"**你不能重新整一个插件，或者是重新整一套这个配置流程吗？**"
+
+⇒ **全部成立，而且合起来比我 §11.5 的方案更好：**
+
+```
+① 脸：只保留【一个固定的桥】—— 启动时注册一次，此后永不变化
+        ⇒ 该桥的 schema 与 SDK 文本逐字节不变 ⇒ 能力集与脸彻底解耦
+        （★ 不需要写 listener 去替换 tools:sdk 段 ⇒ 不承担"保住 Code Mode 协议"的责任，:20）
+        ↓
+② 能力：活在【我们插件内部】，【不注册进注册表】
+        ⇒ 不产生 schema、也不产生 guidance 段 ⇒ ★ 两条通道同时关掉（正是用户说的"只能投影/插件禁用"）
+        ↓
+③ 告知：往【消息尾端】追加（skill catalog 形态：durable user-role 消息、只带 name+description、变化时追加完整替换）
+        ⇒ 追加式 ⇒ 前缀不受影响
+        ↓
+④ 压缩点：唯一免费的重写时刻 —— 若要把累积的能力"物化"进脸，就在这里做
+```
+
+**⇒ 为什么这比 §11.5 好**：§11.5 是"先注册、再把投影换掉"（要写 listener、要担协议责任）；
+本节是"**根本不注册**"（不碰协议、不写 listener、两条通道一起关）。
+**⇒ 用户"重新整一个插件 + 重新整一套配置流程"就是正解形状。**
+
+### 12.4 ⚠️ 但这条路有一笔**必须声明的代价**：内层能力绕过了上游的管线
+
+`:118` 逐字（工具在 code 模式下的调用语义）：
+> "**Each lossless-JSON binding call re-enters the complete tool pipeline under the native scheduling contract**
+> (concurrency-safe calls may overlap up to `maxParallelSubCalls`; exclusive calls run alone as ordering barriers) …
+> Denials and other failed results reject with the real program-visible `ToolCallError`"
+
+⇒ 若能力藏在**一个桥**后面：**只有"桥那一次调用"走过上游管线**（`tools/pre-execute`、approval `ask`、guards、
+`tools/result` 观察者、调度契约、`ToolCallError` 的规范化）。**内层的真实能力不再经过它们。**
+
+| 代价 | 后果 |
+|---|---|
+| 绕过 `tools/pre-execute` / approval / guards | 内层能力**没有上游那道门**（我们得自己实现，或接受没有） |
+| 绕过 `tools/result` 观察者 | 依赖该观察者的机制（如 `attachStructuredRuntime` 的"提交已暂存值"）**看不到内层调用** |
+| 绕过调度契约（并发上限 / 独占顺序屏障） | 并发安全与调用顺序要**我们自己管** |
+| 绕过 `ToolCallError` 规范化 | 错误形状要我们自己对齐 |
+
+⇒ **必须成对报的第三对判据**：「**前缀零失效 + 装配零责任**」 vs 「**内层能力丧失上游的审批/守卫/调度/错误规范**」。
+（用户此前已明确定过"不需要严格权限审批"（要度量不要审批流）⇒ 这一项与既有决定**一致**；
+但**调度契约与 `tools/result` 观察者**这两项是**独立的**，不能跟着一起放弃，需单独决定。）
+
+### 12.5 未闭合（本轮）
+
+1. **"固定的桥"的接口形状**（一个泛化 `call(name, args)`？还是若干稳定入口？）与**运行时解析怎么接进 `run_code` 的 binding 管线** —— **未设计**。
+2. **内层能力要不要补回上游那四样**（审批/守卫/调度/错误规范）—— **未定**。
+3. **"在压缩点物化进脸"到底值不值**：物化后脸的规模会涨（回到"逐工具清单"），
+   而它换来的只是"模型能在脸上直接看到能力" ⇒ 与"尾部目录"重复。**倾向不做**，但**未验证**。
