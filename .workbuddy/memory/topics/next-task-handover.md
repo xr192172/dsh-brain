@@ -87,6 +87,46 @@ node scripts/eval-run.mjs --check-worktree D:/project_develop/_wt/cli0005-A --ch
 ```
 （这不是缺陷，是"把臂钉在你正在测的那个版本上"的必然要求；fail-fast 比"静默跑旧码"好得多。）
 
+---
+
+## ★★★ 更上层的转向（2026-09-21 晚）：**靶场的「地基」开源已经做完 —— 先别写 cli-0007**
+
+> 用户质问「为什么还在这里自造靶场？是不是必须适配 DSH？DSH 社区有没有？」
+> 查证结论：**"没人做"是错的。我们有一层在重造，而且重造得比开源差、还踩了 R1。**
+> 完整证据（含**证据分级**）见新增的 **`docs/oss-arena-landscape-2026-09.md`**。
+
+**三句结论**
+1. **有人做，且 2026 年成题**：**VeRO / HarnessOpt-Bench**（Scale AI，**MIT**，`github.com/scaleapi/vero`；
+   定位 = "**a harness for agents to optimize programs, text, and agents**"，target 可以是 agent 的 scaffold/tools/prompts；
+   **ICML 2026**）+ **HarnessDev**（arXiv 2609.01437，"把评测单位换成可运行的 harness"）+ **DGM/HGM**（直接用 SWE-bench 当判据）。
+2. **不是"必须适配 DSH"**：变量长在 DSH 上，但**题库/判据层不用适配**；VeRO 的 evaluator 走**命令协议、target 不必是 Python**。
+3. **DSH 社区有且很大**：`deepseek-ai/deepseek-harness`，MIT，20 万+ star，Discord + Discussions + `dsh-plugin`(421 仓)。
+   ★ **上游自带 `minimal` 模式（bash + str_replace_editor，明写 "for benchmarking models in bare environments"）
+   = 我们手工造的"关掉工具"那一臂的上游原版** ⇒ **对照臂应优先用它**。
+
+**分层归属（修正后）**：L1 题库（已在用）｜**L2 隔离+dev/val/test 拆档（VeRO 已解决 ⇒ 不该自造）**｜
+**L3 version→evaluate→select（VeRO 已解决 ⇒ 不该自造）**｜**L4 自变量=工具集装配开关（只有我们有）**｜
+**L5 题源与判据（只有我们有）**。
+
+★ **VeRO 把我们踩的坑当架构解了**：`The evaluator owns the cases and the scoring` + **no-bind-mount 沙箱** +
+**inference gateway 持 key 并按 scope 计量预算** ⇒ 原话 **"isolation holds *by construction, not by instruction*"**。
+三档协议 = 我们缺的"判据预算"：**dev 逐例反馈 → val 只给聚合分 → test 只有最终 evaluator 能看**，**20/40/40 不可变**，
+钉在 `baseline/build.yaml`。同一族事故也是真的（二手）：有 eval agent **逃出沙箱去 Hugging Face 取 benchmark 答案**。
+
+**⏭ 顺序（先做步 0/1，再决定 cli-0007 要不要写）**
+- **步 0**：离线编译一次 VeRO（**编译不需要凭据**）：
+  `uv run vero harbor build --config ../harness-opt-bench/terminal-bench/baseline/build.yaml --param inner_env=<env> --output <dir>`
+- **步 1**：读 `vero/README.md`(core guide) + `harness-opt-bench/CONFIGURATION.md`，回答"**target 能不能是本地 Node/CLI 的 harness**"
+- **步 2**：能接 ⇒ **L2+L3 换 VeRO**，我们只交 `target/` + `partitions/` + `baseline/build.yaml`
+- **步 3**：不能接 ⇒ **只借协议**（三档 + 20/40/40 + 外置预算 + `--pin-harness` 式记账）
+- **步 4**：**上游 `minimal` 纳入对照臂**
+- ⚠️ **理由**：cli-0007 设计稿本质在**重造 L2 的一部分**（"判据搬到 agent 够不到的地方"）；
+  若 VeRO 能接，那件事**已经解决了** ⇒ 写它就是重复劳动。
+
+**未核实（别当结论用）**：HarnessDev 项目页抓取失败 ⇒ 其协议与"是否开源"未核实；VeRO 能否承接 DSH 作 target 是**推断**；
+DSH 的 star/仓库数为二手。
+
+
 
 ---
 
