@@ -385,3 +385,52 @@ prompt 里没有任何地方声明它 ⇒ **不产生"声明了却失败"的困�
 1. **改 `scripts/measure-delegation-reuse.mjs`**（O11）：usage 来源改为**投影侧**（含 chunk），
    并在拆账时**按 `session/end-seed` 切开 seed 与"分身自己"** —— 否则 S6 的两列数字都不可信。
 2. **先解 O13**（`tools/result` 依赖）再动 S2 —— 否则可能白写一个桥。
+
+---
+
+## 9. ★★★ (d) 路线验证结论：**可行，已实测**（2026-09-22；子代理执行 + 我独立复核）
+
+**问题**：能否用 `system-prompt/assemble` waterfall 的 listener **包住 `next()`**，只把 `tools:sdk` 那一段换成缓存文本、其余原样透传？
+
+**结论：① 可行。** 探针 `out/w7-pin-probe.mjs`（可复跑）+ 报告 `out/w7-pin-feasibility.md`。
+**我独立复核的方式**：① 亲手重跑探针（exit 0，输出与报告一致）；② 逐字读实现（`dsh-system-prompt/lib/index.js:258-289`）；
+③ 检查其"作用域计数"断言是否**循环论证**（结论：**不是**，计数器在 listener 体内**无条件递增**）。
+
+**四个验收门（探针原始输出）**：
+
+| 门 | 实测 |
+|---|---|
+| ① 能看到 `tools:sdk` | `{"name":"tools:sdk","order":150,"textType":"function"}` |
+| ② 只改一段、**其余逐字节不变** | 三处 digest 全等（替换前 / 替换后 / 跨装配） |
+| ③ **注册表变了，钉住的文本不变** | 两次装配间 `register(gamma)` ⇒ 原值 1890→**2072** 字符变了，而 `sdk1.text === sdk2.text` = **true** |
+| ④ 返回值**确实被采纳** | `=== pinned ? true` / `=== raw ? false` |
+| ★⑤ **负对照（消融自证）** | 关闭钉住（A3）⇒ 文本 2072→**2252** ⇒ **证明是"钉住"在起作用，不是别的东西恰好稳定** |
+
+★ 探针用的是**真**上游 `tools:sdk`（真 `sdkSection()` / 真 `renderToolsSdk` / 真 `ToolRuntime.register()`），
+只有 `codeRuntime` **后端**用 `ctx.provide('codeRuntime', { language: 'typescript' })` 顶替（`requireCodeRuntime` 只从中读 `language`）—— **没有退到"自注册同名段"的退路**。
+
+### 9.1 ★★ 三条实施前提（**必须遵守**，都经我逐字复核）
+
+1. **`AssembledSection` 只有 `{name, text}`，【没有 `order`】**（`lib/index.js:269-275`：`order` 只用于排序，随后被丢弃）
+   ⇒ **listener 只能按 `name` 认段**，不能按 order。✅ 复核通过。
+2. **★★ `complete: true` 的段会在 waterfall【之后】整体覆盖 `sections`**（`lib/index.js:283-289`）：
+   ```js
+   const transformed = await this.ctx.waterfall(scopeTarget(this, scope), "system-prompt/assemble", assembly, context, () => Promise.resolve(assembly));
+   if (completeSection === void 0 && !runtimeContextSuppressed) return transformed;
+   return { ...transformed, sections: completeSection === void 0 ? transformed.sections : [completeSection], … };
+   ```
+   ⇒ ★ **`complete` 段一生效，我们的钉住就被【静默作废】**（实测 `a6.sections === ["w7:complete"]`，`tools:sdk` 连同钉住一起消失）。
+   ⇒ ★ **而且 `completeSection` 是在 waterfall【之前】捕获的** ⇒ **连"改 complete 段本身"也没用**（我读源码发现的，报告未提）。
+   ⇒ **必须做成【启动期断言】：目标 scope 里不得存在生效的 `complete` 段**（否则钉住无效且无告警）。
+3. **必须挂在【目标 agent 自己的 scope】**：实测 scoped listener **只收自己的装配**；而**全局 listener 会收到每个 scope 的装配**
+   ⇒ 全局挂会**违反 I3**（污染别的 agent）。
+   ★ 官方背书：`packages/core/system-prompt/tests/scoped.spec.ts:214` 逐字用了同一签名并在该处调 `next()`。
+
+### 9.2 影响
+
+- ⇒ **D2′ 的实现缝 (d) 选定**（(c) 降为备选）。
+- ⇒ **O16（`presentAs` 注册在哪一层）不再阻塞** —— 钉住不依赖它。
+- ⚠️ **新增未闭合 O19**：**我们的 preset / 目标 scope 里到底有没有生效的 `complete` 段**（现场态未验）—— 这是 (d) 的**硬前置**，必须有启动期断言。
+- ⚠️ **新增未闭合 O20**：报告与探针的**作用域断言表述含糊**（打印的是"GLOBAL 装配【之后】的累计值"，
+  而非 before/after 两个原始值）⇒ 断言有效但**可读性差**，后续复用它时应改成打印两个原始值。
+- ⚠️ **未跑成本读数**：本轮**没有**测 `cacheReadTokens`（探针是进程内装配，不产生请求）⇒ **"省了多少"仍未实测**（属 S6）。
