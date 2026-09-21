@@ -658,3 +658,72 @@ before `tools/pre-execute`, approval `ask`, and guards, so nothing observes or a
 2. **内层能力要不要补回上游那四样**（审批/守卫/调度/错误规范）—— **未定**。
 3. **"在压缩点物化进脸"到底值不值**：物化后脸的规模会涨（回到"逐工具清单"），
    而它换来的只是"模型能在脸上直接看到能力" ⇒ 与"尾部目录"重复。**倾向不做**，但**未验证**。
+
+---
+
+## 13. ★★★★ 用户的自由度提示「**这是子 Agent，重新写一套插件都行**」—— 而且我挖到了让"只在压缩点刷新"可控的实现位
+
+### 13.1 ★ 关键发现：`PromptSection.text` **可以是函数**，而且按 **scope** 求值
+
+`dsh-tools/lib/index.js:2625-2645` 逐字（`sdkSection()`）：
+```js
+/**
+* The generated-SDK prompt section, registered globally by a code-mode
+* deployment and per scope by {@link presentAs}.
+*
+* The body regenerates from the CALLING scope, and renders empty for an
+* agent presenting natively — an agent that opted out under a code-mode
+* deployment still sees the global registration, and an empty section is dropped from the rendered prompt.
+*/
+sdkSection() {
+  return { name: "tools:sdk", order: 150,
+    text: (context) => { const mode = this.modeFor(context.scope); if (mode === "native") return ""; … return render(this.sdkSchemas(context.scope)); } };
+}
+```
+
+⇒ **两个后果，直接支撑用户的两段式：**
+1. **`text` 可以是 `(context) => string`**（`dsh-system-prompt/README.md:34` 的类型简写没写这一层，实证有）
+   ⇒ ★ **"冻结"不需要依赖"工具集没变"这个巧合 —— 冻结就是我们在那个函数里返回同一个缓存字符串。**
+   ⇒ ★ **"只在压缩点刷新" = 只在那时让缓存失效** ⇒ **可控，而不是碰运气。**
+2. **该段按【调用 scope】求值**（"regenerates from the CALLING scope"）⇒ **同一个段名，按 scope 给出不同文本**
+   —— 这正是"子代有自己的脸"的机制位置。
+
+### 13.2 ★★ 而且 `composeFrom` 让这件事**天然只影响子代自己**
+
+`applyChildComposition` 是 `agentPresets.composeFrom(childCtx, parent.ctx)`（`child-agent.js:127`）⇒
+**子代在【它自己的 scope】里逐行跑一遍父代的 preset** ⇒ 子代的 `tools:sdk` 是**它自己 scope 里注册的那一份**，
+与其他 scope 的注册互不可见（`dsh-system-prompt/README.md:20`："The layer is the calling context's scope:
+`agent.ctx` contributes to that agent alone"）。
+
+⇒ ★ **直接回答用户那句"为什么要影响别的呢"：不影响别的。**
+**子代刷新自己的脸 = 只改子代自己的装配；父代与兄弟的注册看不到、也不受影响。** 这是 scope 隔离给的，不是我们额外做的。
+
+### 13.3 ⚠️ 但有一处硬约束：**同一个 scope 内同名重复会 throw**
+
+`dsh-system-prompt/README.md:20`："Duplicate names within one layer … **throw**"。
+而 `docs/skill-to-agent-feasibility` 所依赖的那个 `tools:sdk` 在我们的 preset 里已由 `tool-presentation` 行在**子代自己的 scope**注册了一份
+（子代继承 preset ⇒ 重跑那一行）。
+⇒ **⇒ 要自己掌控这个段的文本，就得【自己实现一套 presentation】**（= 用户说的"重新写一套 code 模式的插件"），
+**不能既挂上游那行、又叠一份自己的。** 这也解释了用户那句话为什么必要，不只是"可以"。
+
+### 13.4 ★ 于是"实现的思路有很多" —— 至少四条，代价不同（用户说得对）
+
+| 路线 | 做法 | 前缀代价 | 我们担的责任 |
+|---|---|---|---|
+| **A 不注册** | 能力活在插件内部（不进注册表），脸上只留一个**固定的桥**；告知走**消息尾端** | **0** | 内层绕过上游管线（`pre-execute`/guards/调度/`ToolCallError`），见 §12.4 |
+| **B 自己写 presentation 插件** | 自己拥有 `tools:sdk` 的 `text` 函数（§13.1）⇒ **冻结 + 只在压缩点失效**；规则段同样自持 | **0**（冻结期间） | 要把"可用的 Code Mode 协议"自己写对 |
+| **C 装配层 listener 替换** | `:20` 明文允许，返回值权威 | **0** | ★ 明文要担"保住可用的 Code Mode 协议"；且与 B 存在同名冲突风险 |
+| **D native + 工具排末尾** | 不碰 `system`，新工具追加在**工具列表末尾** | **≈97%** | 无（最土最稳），但脸更大 |
+
+⇒ **B 与 A 的组合最贴用户的描述**：**B 负责"脸由我们冻结、只在压缩点刷新"；A 负责"能力不注册、只在尾部告知"。**
+⇒ **两者都在子代自己的 scope 里做 ⇒ 互不干扰、不影响父代。**
+
+### 13.5 未闭合（本轮）
+
+1. **B 路线要写多少**：`tools:sdk` 的 `text` 函数 + `tools:code-only` 规则段 + 与 `run_code` 保留传输的配合
+   —— **具体接口未设计**。
+2. **"压缩点失效"的判据**：`text` 是纯函数（每次装配被调用），**它怎么知道"已经过了一次压缩"？**
+   可选：读该子代的压缩计数 / 订阅 `surfaceOp` 事件 / 由我们自己的压缩后端在结束时翻一个标志。
+   ★ **这是 B 路线唯一真正的技术缺口，未设计。**
+3. **同名冲突的准确边界未实测**：全局注册 vs per-scope 注册（`presentAs`）在**遮蔽**与**重复抛错**上的区别，
+   我只从文档推断，**未做实验**。
