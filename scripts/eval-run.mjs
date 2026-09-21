@@ -195,6 +195,14 @@ function extractMetrics(recs) {
   const hdr = recs.find((r) => r.type === 'request/header')
   const tools = (hdr?.data?.header?.tools ?? []).map((t) => t?.name).filter(Boolean)
   const turnEnds = recs.filter((r) => r.type === 'turn/end').map((r) => r?.data?.reason ?? null)
+  // ★★ 2026-09-21 加：**系统提示**口径（臂自证的**主通道**）。
+  //   为什么：code（PTC）模式下 `request/header.tools` **恒为 `['run_code']` 一个**
+  //   （实测：A/B 两臂的工具面都报 1）⇒ 用"工具条数"判臂在 code 模式下**必然瞎**。
+  //   真差别落在 **`header.system`** 里：实测 A=79405 字符、design-canvas 命名空间命中 135；
+  //   B=39605 字符、命中 0 ⇒ 用 `dcHits` 判臂，而不是 `toolsCount`。
+  const systemText = String(hdr?.data?.header?.system ?? '')
+  const systemChars = systemText.length
+  const dcHits = (systemText.match(/design_canvas_|mcp__design-canvas__/g) ?? []).length
 
   return {
     events: recs.length,
@@ -216,11 +224,18 @@ function extractMetrics(recs) {
     presetSelected: recs.filter((r) => r.type === 'agent-preset/selected').length,
     toolSet: tools,
     toolSetSize: tools.length,
+    // ★ 臂面自证的三件套（见 `armFaceSignal`）：code 模式 = 只有一个 `run_code`（PTC）
+    mode: tools.length === 1 && tools[0] === 'run_code' ? 'code' : tools.length ? 'native' : 'unknown',
+    systemChars,
+    dcHits,
     model: hdr?.data?.header?.config ? `${hdr.data.header.config.provider}/${hdr.data.header.config.model}` : null,
     contextWindow: recs.find((r) => r.type === 'request/context')?.data?.contextWindow ?? null,
     turnEnds,
     abortedByHandover: turnEnds.some((x) => /handover/i.test(JSON.stringify(x ?? {}))),
     usageFromEvents: usage,
+    // ★★ 行为面读数（2026-09-21 加）：**code 模式下唯一能看清"它到底做了什么"的通道**。
+    //   加之前 `byTool` 恒为 `{"run_code": N}`（两臂同形）⇒ 行为面这一列从来没有有效读数。
+    ...leafFace(recs),
   }
 }
 
@@ -330,6 +345,60 @@ function dangerHits(name, argsText) {
     }
   }
   return hits
+}
+
+/**
+ * ★★ **"符号类"工具名表**（2026-09-21）—— 用于把**行为面**做成可读的机器判据。
+ *
+ * ## 为什么必须有它（这是整套实验台最大的一个读数盲区）
+ *
+ * 跑批会话是 **`preset=code`（PTC）** ⇒ 模型侧只看到 `run_code` 一个工具，
+ * **所有真实动作都发生在 `run_code` 内部**，以 `tool/code-dispatch` 事件落盘
+ * （`data.name` = 叶子工具名，如 `read` / `pwsh` / `edit` / `safe_rename`）。
+ * 而 `analyzeTrajectory` **从不数这个事件** ⇒ 行为面读数在 code 模式下**恒等于 `{"run_code": N}`**，
+ * **两臂长得一模一样** ⇒ 「行为面」这一列**从来没有过有效读数**。
+ *
+ * ## 实测（2026-09-21，`out/eval-pair-cli-0005-…1789960605790.json` 点名的 5 条真会话）
+ *
+ * | 臂 | 叶子调用 | **符号类** | 结构 |
+ * |---|---|---|---|
+ * | A（`exp-base`，有 design-canvas） | 20 / 20 | **4 / 2** | `safe_rename`×2、`symbol_edit`×2、`edit` 0–2 |
+ * | B（`exp-base-nodc`，无） | 34 / 33 / 27 | **0 / 0 / 0** | 全靠 `read`+`pwsh`+`edit` **手改** |
+ *
+ * ⇒ **行为面本来就是分化的，只是没人量过它。**（这是"读数缺失"而不是"没有区别"。）
+ *
+ * ★ 匹配的是**工具名**（闭集），不是文件内容 ⇒ 不违反"文本匹配型判据不懂语义"那条纪律。
+ */
+const SYMBOL_TOOL_RE =
+  /^(safe_rename|symbol_edit|move_symbol|rename_many|rename_symbols|rename_files|find_references|impact_analysis|find_similar_names|suggest_renames|remove_dead_imports|cross_repo_symbol_index|harvest_closure|explore_code|edit_code|annotate_functions|design_canvas_.*|mcp__design-canvas__.*)$/
+
+/**
+ * ★ 纯函数：从 `tool/code-dispatch` 事件算**叶子工具直方图**（可两方向自测）。
+ *
+ * `readable` 的纪律与 `armFaceSignal` 一致：**一个 dispatch 事件都没有 ⇒ 不是"符号类 0 次"，
+ * 而是"这条通道读不出东西"**（会话被截断 / 不是 code 模式 / 转录缺失都长这样）
+ * ⇒ 显式不给结论，不许当成 0 参与比较。
+ */
+function leafFace(recs) {
+  const disp = (recs ?? []).filter((r) => r?.type === 'tool/code-dispatch')
+  const byTool = {}
+  const symbolTools = []
+  let failures = 0
+  for (const d of disp) {
+    const n = String(d?.data?.name ?? '?')
+    byTool[n] = (byTool[n] ?? 0) + 1
+    if (SYMBOL_TOOL_RE.test(n)) symbolTools.push(n)
+    if (d?.data?.isError) failures++
+  }
+  return {
+    leafCalls: disp.length,
+    leafByTool: byTool,
+    leafFailures: failures,
+    symbolToolCalls: symbolTools.length,
+    symbolTools,
+    leafReadable: disp.length > 0,
+    leafRule: '叶子工具来自 tool/code-dispatch 的 data.name（code 模式下 run_code 内部的真实动作）',
+  }
 }
 
 function analyzeTrajectory(sid) {
@@ -491,14 +560,18 @@ if (!exact && prefix.length > 1) {
   process.exit(1)
 }
 const task = exact ?? prefix[0]
-if (!task) {
+// ★ 2026-09-21：这两个入口**不需要 `--task`**（且 `--self-test-harness` 要用到下面才声明的
+//   `PROFILE_TOOL_MUST/FORBID` 表 ⇒ 入口只能放在表之后 ⇒ 这里先把它们放行，否则会先被"--task 必填"挡掉）。
+const NO_TASK_FLAGS = ['--check-worktree', '--self-test-harness']
+if (!task && !NO_TASK_FLAGS.some((f) => has(f))) {
   console.error(`--task 必填且要匹配任务集里的 id。可用：${tasks.map((t) => t.id).join(', ')}`)
   process.exit(1)
 }
 
 // ── --plan：只打印计划（`--pair` / `--repeat` / `--arm` 会自动建会话，不走这里）────
 const sid = argOf('--session')
-if (has('--plan') || (!sid && !has('--pair') && !has('--repeat') && !argOf('--arm'))) {
+// ★ NO_TASK_FLAGS 的入口**不走** `--plan`（它们没有 task，而 `--plan` 会读 `task.id`）。
+if (!NO_TASK_FLAGS.some((f) => has(f)) && (has('--plan') || (!sid && !has('--pair') && !has('--repeat') && !argOf('--arm')))) {
   const wt = worktreeState()
   console.log(`任务：${task.id}`)
   console.log(` 不变量：${task.invariant}`)
@@ -532,7 +605,10 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   const regression = task.regression.cmd
   const budgetMs = (task.budget?.maxMinutes ?? 15) * 60_000
   // ★ `--force`：实验期间改那些文件的**就是我们自己派出去的 Agent** ⇒ 跑完无条件回到实验起点（保护留给手工 `--restore`）。
-  const restoreAll = () => sh('node', ['scripts/eval-validate.mjs', '--restore', '--force'])
+  // ★★ 2026-09-21 修（**跑错仓库**）：这里**没传 cwd** ⇒ 默认落在主仓 `REPO`，而 seed/还原应作用于
+  //   **该臂的 `WORK`** ⇒ 早退路径（prepare 失败 / 无信号 / 并发写者 / 发题面失败）会把改动**留在臂的 worktree 里**，
+  //   下一轮 `--prepare` 连环失败，且"看起来跑过"⇒ **假绿**。改成与 ⑤ 同族的 `{cwd: WORK}`。
+  const restoreAll = () => sh('node', ['scripts/eval-validate.mjs', '--restore', '--force'], { cwd: WORK })
   /** 跑完必须干净：否则后面的（尤其成对的后续跑）会在 `--prepare` 上连环失败（2026-09-20 实测）。
    *  判据只看**代码/脚本**有没有残留（文档/记忆被别的会话改是常态，不该算残留）。 */
   const assertClean = (where) => {
@@ -561,7 +637,13 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   //   ★ 为什么分档：本仓库**真的有两个会话并行**（2026-09-20 实测被撞到），
   //     一刀切成"seed 打错了地方"会把并发写者误诊成题目 bug（误导下一个人去改一道好题）。
   const expectFiles = [...new Set(task.seed.edits.map((e) => e.file))].sort()
-  const changedFiles = sh('git', ['diff', '--name-only']).stdout.split('\n').filter((l) => l.trim()).sort()
+  // ★★ 2026-09-21 修：这里原先缺 `cwd: WORK` ⇒ **worktree 模式下这条断言在主仓上空转**
+  //   （`changedFiles` 恒为主仓的改动，而 seed 打在臂的 worktree 里）⇒ 断言**形同没有**。
+  //   本次实测恰好因为主仓干净而"看着正常"，但那正是典型的**空过**：它什么都没查。
+  const changedFiles = sh('git', ['diff', '--name-only'], { cwd: WORK })
+    .stdout.split('\n')
+    .filter((l) => l.trim())
+    .sort()
   const missingSeed = expectFiles.filter((f) => !changedFiles.includes(f))
   const extra = changedFiles.filter((f) => !expectFiles.includes(f))
   const DOC_ONLY = /^(\.workbuddy[\\/]|docs[\\/])/
@@ -650,7 +732,25 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   )
 
   // ④ 判据 + 轨迹
-  const after = shJudgeW(oracle)
+  // ★★ 2026-09-21 修（**oracle 缺 flaky 检测**）：regression 有 retry + `regressionFlaky`，
+  //   而 oracle **只读一次** ⇒ oracle 抖一下（瞬时绿）就直接判 FIXED ⇒ **假绿**（最坏那档）。
+  //   ⇒ 首读为绿时**复跑一次**确认；两次不一致 ⇒ `oracleFlaky=true` 并取**保守读数**（红）。
+  //   （判据纪律：假红优于假绿 —— 红至少给坐标；且两次读数都留档，不许静默吞掉。）
+  const after1 = shJudgeW(oracle)
+  let after = after1
+  let afterRetry = null
+  if (after1.status === 0) {
+    afterRetry = shJudgeW(oracle)
+    if (afterRetry.status !== 0) after = afterRetry
+  }
+  report.stages.oracleRun = {
+    first: { status: after1.status, tail: `${after1.stdout ?? ''}${after1.stderr ?? ''}`.slice(-1200) },
+    retry: afterRetry ? { status: afterRetry.status, tail: `${afterRetry.stdout ?? ''}${afterRetry.stderr ?? ''}`.slice(-1200) } : null,
+    flaky: !!afterRetry && afterRetry.status !== 0,
+  }
+  report.stages.oracleFlaky = report.stages.oracleRun.flaky
+  if (report.stages.oracleFlaky)
+    console.error(`${tag}⚠ oracle **两次读数不一致**（首读绿、复跑红）⇒ oracleFlaky=true，已按**保守读数（红）**判 ⇒ 不许当成 FIXED`)
   const reg1 = shJudgeW(regression)
   // ★ regression 红了先**复跑一次**确认：本机的 gate 里有一条（capability-gate）依赖**运行中的 DSH 栈**
   //   会写的运行态文件（能力注册表），并发活动可能让它瞬时变红（2026-09-20 观察到的"red 不复发"现象）。
@@ -666,7 +766,10 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
     retry: regRetry ? { status: regRetry.status, tail: `${regRetry.stdout ?? ''}${regRetry.stderr ?? ''}`.slice(-1200) } : null,
     flaky: !!regRetry && regRetry.status === 0,
   }
-  report.stages.diffStat = sh('git', ['diff', '--stat']).stdout.trim()
+  // ★★ 2026-09-21 修（**跑错仓库**）：这里**没传 cwd** ⇒ 默认落在主仓 `REPO`（本来就干净）
+  //   ⇒ 上一批 6 条 run 的 `diffStat` **全空**（实测）⇒ 事后**无法核对 agent 到底改了什么**。
+  //   Agent 的改动在**该臂的 `WORK`** 里 ⇒ 补 `{cwd: WORK}`。
+  report.stages.diffStat = sh('git', ['diff', '--stat'], { cwd: WORK }).stdout.trim()
   // ★ 2026-09-20 加：**把判据自己的输出留档**。此前只记 status，出现过"regression 红但无从知道哪条门红"，
   //   只能靠复现猜（而猜了半天没复现出来）。判据的产出必须可回看，否则等于没有证据。
   report.stages.oracleAfter = {
@@ -718,31 +821,33 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   const toolSet = report.stages.trajectory?.metrics?.toolSet ?? []
   const expTools = [...EXPECT_TOOLS.both, ...(armLabel ? (EXPECT_TOOLS[armLabel] ?? []) : [])]
   const forbTools = [...FORBID_TOOLS.both, ...(armLabel ? (FORBID_TOOLS[armLabel] ?? []) : [])]
-  if (expTools.length || forbTools.length) {
-    // ★ 支持**前缀/家族匹配**（`mcp__design-canvas__*`）—— 2026-09-20 教训：我按包内注册名
-    //   （`design_canvas_index`）写期望，而模型实际看到的是 MCP 客户端暴露的名字（`mcp__design-canvas__…`）
-    //   ⇒ 判据假红。期望必须按**模型实际看到的工具面**写，且允许按家族匹配。
-    const matchTool = (pattern, name) =>
-      pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern
-    const missing = expTools.filter((t) => !toolSet.some((n) => matchTool(t, n)))
-    const forbidden = forbTools.filter((t) => toolSet.some((n) => matchTool(t, n)))
-    report.stages.toolFaceCheck = {
-      expect: expTools,
-      forbid: forbTools,
-      toolSetSize: toolSet.length,
-      missing,
-      forbidden,
-      ok: missing.length === 0 && forbidden.length === 0,
-    }
-    if (!report.stages.toolFaceCheck.ok) {
-      console.error(
-        `${tag}✗ 臂自证不过：缺 [${missing.join(', ')}]，不该有 [${forbidden.join(', ')}] ⇒ 这次跑**不能算作该臂**`,
-      )
-      report.stages.armInvalid = true
-    } else {
-      console.log(`${tag}✓ 臂自证通过（工具面 ${toolSet.length} 个：含 [${expTools.join(', ')}]，不含 [${forbTools.join(', ')}]）`)
-    }
+  // ★★ 2026-09-21 修（**这段以前默认不跑，而且跑也跑瞎**）：
+  //   ① 旧代码只在 `--expectTool/--forbidTool` 非空时才进 `if` ⇒ 题面命令不给这两个参数
+  //      ⇒ **整段从不执行**，算出来的 `armInvalid` 也**没有任何消费点**（既不计分也不排除该轮）。
+  //   ② 旧判据看**工具条数/家族**，而跑批会话是 `preset=code` ⇒ code 模式 `tools` 恒为 `['run_code']`
+  //      ⇒ 用条数判臂**必然瞎**（实测 A/B 两臂都报"工具面=1"）。
+  //   ⇒ 现在**按该臂的 profile 默认启用**这张期望表，code 模式改用 **`dcHits`**（系统提示里的
+  //      design-canvas 命名空间命中数）当主通道。判为无效的轮 ⇒ `armInvalid=true`，由汇总**显式排除**。
+  const face = armFaceSignal(report.stages.trajectory)
+  report.stages.armFace = face
+  const faceChk = armFaceCheck(profile ?? arm, face, { expect: expTools, forbid: forbTools, toolSet })
+  report.stages.armFaceCheck = faceChk
+  if (faceChk.unenforced) {
+    console.log(`${tag}（臂面自证**未实施**：profile=${faceChk.profile ?? '?'} 没有声明面期望 ⇒ 不给结论，**不计作通过**）`)
+  } else if (!faceChk.ok) {
+    console.error(
+      `${tag}✗ 臂自证不过（通道=${faceChk.channel}）：${faceChk.reasons.join('；')}\n` +
+        `${tag}  ⇒ 这次跑**不能算作该臂**（mode=${face.mode} tools=${face.toolsCount} system=${face.systemChars}字符 dcHits=${face.dcHits}）`,
+    )
+    report.stages.armInvalid = true
+  } else {
+    console.log(
+      `${tag}✓ 臂自证通过（通道=${faceChk.channel}：mode=${face.mode} tools=${face.toolsCount} system=${face.systemChars}字符 dcHits=${face.dcHits}` +
+        `${faceChk.wantDc ? ' — 该臂必须看得见 design-canvas ✓' : ''}${faceChk.forbidDc ? ' — 该臂必须看不见 design-canvas ✓' : ''}）`,
+    )
   }
+  // （旧的"只看 toolSet 家族"那一段已并入上面的 `armFaceCheck`：非 code 模式仍走家族匹配
+  //   —— 含 2026-09-20 的前缀/家族匹配教训：期望要按**模型实际看到的工具名**写（`mcp__design-canvas__*`）。）
 
   // ⑤ 还原
   // ★ 能力题（空 seed）没有 manifest ⇒ 用"跑前快照"把跑出来的改动退回去：
@@ -782,7 +887,10 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   } else {
     restoreAll()
   }
-  report.stages.statusAfterRestore = sh('git', ['status', '--porcelain']).stdout.trim()
+  // ★★ 2026-09-21 修：原先缺 `cwd: WORK` ⇒ worktree 模式下这条报的是**主仓**的状态，
+  //   而"结束时把 git status 打出来 —— Agent 若改动了别的文件你能一眼看到"这句承诺
+  //   在 worktree 模式下**从未兑现**（看着干净，其实看错了地方）。同族漏网第 2 处。
+  report.stages.statusAfterRestore = sh('git', ['status', '--porcelain'], { cwd: WORK }).stdout.trim()
   report.stages.cleanAfterRestore = assertClean('还原后')
 
   console.log(`${tag}④ oracle：${after.status === 0 ? '绿 ✓' : '红 ✗'}   regression：${reg.status === 0 ? '绿 ✓' : '红 ✗'}`)
@@ -927,6 +1035,45 @@ function dshFacts() {
  * 为什么必须：worktree 是干净检出，**没有 node_modules / 没有构建产物** ⇒ 判据脚本在里面跑不起来。
  * 只建一次；已存在就跳过。失败**如实报**（不静默降级成"跑在主仓库"）。
  */
+/**
+ * ★ 纯函数：**某 worktree 的 HEAD 与主仓 HEAD 是否一致**（可两方向自测，`--self-test-harness` 覆盖三态）。
+ *
+ * ## 为什么必须（2026-09-21 实测的**装置撒谎**）
+ * 旧 `ensureWorktree` 只在 `dir/.git` **不存在**时才 `git worktree add` ⇒ **已存在的 worktree 永不刷新**，
+ * 也没有任何地方断言它的 HEAD == 主仓 HEAD。实测：`_wt/cli0005-A` / `-B` 停在旧提交 `b97a44c`，
+ * 而主仓 HEAD 是 `42c5c92`（差 17 个提交），且 `evals/pilot/rename-target/README.md` 在两者间**确实有差异**
+ * ⇒ **题面取自一个版本、判据脚本取自另一个版本** ⇒ 结果**假绿**（跑批器要回答的正是"差别是真差别还是装置在撒谎"）。
+ *
+ * ⇒ 发现 `exists && !matches` 时 **fail-fast**（打印两个 sha + 一条可复制的刷新命令），**不许静默重建**。
+ *
+ * @returns {{dir:string|null, exists:boolean, head:string|null, repoHead:string|null, matches:boolean, why:string}}
+ */
+function worktreeHeadState(dir, repoHead) {
+  const abs = dir ? path.resolve(dir) : null
+  const out = { dir: abs, exists: false, head: null, repoHead: repoHead ?? null, matches: false, why: '' }
+  if (!abs) {
+    out.why = '未提供目录'
+    return out
+  }
+  out.exists = fs.existsSync(path.join(abs, '.git'))
+  if (!out.exists) {
+    out.why = '不是 worktree（缺 .git）'
+    return out
+  }
+  out.head = String(sh('git', ['rev-parse', 'HEAD'], { cwd: abs }).stdout ?? '').trim() || null
+  if (!out.head) {
+    out.why = '读不到该 worktree 的 HEAD'
+    return out
+  }
+  if (!repoHead) {
+    out.why = '读不到主仓 HEAD ⇒ 无法比对（本通道无结论）'
+    return out
+  }
+  out.matches = out.head === repoHead
+  out.why = out.matches ? 'HEAD 与主仓一致' : `陈旧：worktree=${out.head} ≠ 主仓=${repoHead}`
+  return out
+}
+
 function ensureWorktree(dir) {
   const abs = path.resolve(dir)
   const out = { dir: abs, created: false, nodeModules: false, problems: [] }
@@ -935,6 +1082,22 @@ function ensureWorktree(dir) {
     const r = sh('git', ['worktree', 'add', '--detach', abs, 'HEAD'])
     if (r.status !== 0) out.problems.push('git worktree add 失败: ' + String(r.stderr ?? '').trim().slice(0, 160))
     else out.created = true
+  }
+  // ★★ 2026-09-21 修（**陈旧 worktree 静默续用 ⇒ 假绿**）：已存在的 worktree 此前**永不刷新**，
+  //   也不与主仓 HEAD 比对 ⇒ 题面与判据可能来自两个版本。**发现陈旧立即 fail-fast**
+  //   （打印两个 sha + 可复制的刷新命令），**不静默重建**（重建会丢掉臂里没收回的改动，更危险）。
+  const repoHead = String(sh('git', ['rev-parse', 'HEAD']).stdout ?? '').trim() || null
+  const hs = worktreeHeadState(abs, repoHead)
+  out.headState = hs
+  if (hs.exists && !hs.matches) {
+    console.error(
+      `✗ worktree 陈旧，拒绝跑：\n` +
+        `     worktree HEAD = ${hs.head}\n` +
+        `     主仓     HEAD = ${repoHead}\n` +
+        `  ⇒ 题面会取自一个版本、判据脚本取自另一个版本 ⇒ 结果不可信（假绿）。刷新：\n` +
+        `     git -C "${abs}" checkout --detach ${repoHead}`,
+    )
+    process.exit(1)
   }
   const nm = path.join(abs, 'node_modules')
   if (!fs.existsSync(nm)) {
@@ -977,6 +1140,114 @@ const PROFILE_EXPECT = {
   "exp-base": { must: [/\[tool-evolution\] apply running/, /\[design-canvas-bridge\] config:/], mustNot: [] },
   "exp-base-nodc": { must: [/\[tool-evolution\] apply running/], mustNot: [/\[design-canvas-bridge\] config:/] },
 }
+
+/**
+ * ★ 纯函数：**这次跑的"臂面"读数**（可两方向自测）。
+ *
+ * ## 为什么必须有它（2026-09-21 实测的**瞎判据**）
+ *
+ * 跑批会话是 **worktree + `preset=code`**，而 **code（PTC）模式下 `request/header.tools` 恒只有 `run_code` 一个**
+ * ⇒ 隔离审计报"工具面=1"，而两臂的真差别在**系统提示**里：
+ *   · A（`exp-base`）：system=**79405** 字符，design-canvas 命名空间命中 **135**；
+ *   · B（`exp-base-nodc`）：system=**39605** 字符，命中 **0**。
+ * ⇒ 用"工具条数/工具家族"判臂，在 code 模式下**必然瞎**（A 与 B 读数完全一样）。
+ *
+ * ## 口径
+ *  · `mode`：`code` = 只有一个 `run_code`（PTC）；`native` = 有普通工具面；`unknown` = 都没有。
+ *  · `systemChars` / `dcHits`：**系统提示**的长度与 `design_canvas_` / `mcp__design-canvas__` 命名空间命中数。
+ *  · `readable`：**该通道能不能给出结论**。★ 读不到（既无系统提示也无工具面）⇒ `false`
+ *    —— 判据纪律：「**通道不可用 ≠ 读数为 0**」，不可用必须**显式不给结论**，不许当成 0 参与。
+ *
+ * @param {object} traj  `analyzeTrajectory` 的返回值
+ */
+function armFaceSignal(traj) {
+  const m = traj?.metrics ?? {}
+  const tools = Array.isArray(m.toolSet) ? m.toolSet : []
+  const systemChars = typeof m.systemChars === 'number' ? m.systemChars : 0
+  const dcHits = typeof m.dcHits === 'number' ? m.dcHits : 0
+  const mode = m.mode ?? (tools.length === 1 && tools[0] === 'run_code' ? 'code' : tools.length ? 'native' : 'unknown')
+  return { mode, toolsCount: tools.length, systemChars, dcHits, readable: systemChars > 0 || tools.length > 0 }
+}
+
+/**
+ * ★ 纯函数：**这次跑的面是否与它声明的 profile 相符**（可两方向自测 + 消融自证）。
+ *
+ * ## 修的是什么（2026-09-21）
+ *  · 旧 per-run 自证**只由 `--expectTool/--forbidTool` 驱动**，而题面命令不给这两个参数
+ *    ⇒ 整段**从不执行**；算出来的 `armInvalid` **没有任何消费点**（既不计分也不排除）。
+ *  · 旧判据**用工具条数/家族**，在 code 模式下恒瞎（见 `armFaceSignal`）。
+ *
+ * ⇒ 现在：① **按每臂的 profile 默认启用**（复用 `PROFILE_TOOL_MUST` / `PROFILE_TOOL_FORBID`，
+ *    CLI 的 `--expectTool/--forbidTool` 作为**附加**）；② code 模式走 **`dcHits`** 通道
+ *   （A 臂必须 `dcHits>0`，B 臂必须 `dcHits===0`）；非 code 模式仍走工具家族（原行为）。
+ *
+ * @returns {{ok:boolean, unenforced:boolean, channel:string, reasons:string[], wantDc:boolean, forbidDc:boolean, face:object}}
+ */
+function armFaceCheck(profile, face, extra = {}) {
+  const must = [...(PROFILE_TOOL_MUST[profile] ?? []), ...(extra.expect ?? [])]
+  const forbid = [...(PROFILE_TOOL_FORBID[profile] ?? []), ...(extra.forbid ?? [])]
+  const wantDc = must.some((p) => /design[-_]canvas/i.test(p))
+  const forbidDc = forbid.some((p) => /design[-_]canvas/i.test(p))
+  const out = { profile: profile ?? null, face, must, forbid, wantDc, forbidDc, active: must.length > 0 || forbid.length > 0, unenforced: false, channel: 'none', reasons: [], ok: true }
+  // ★ 未实施的级：该 profile 没声明任何面期望 ⇒ **显式标 unenforced**，绝不计作"通过"
+  if (!out.active) {
+    out.unenforced = true
+    out.reasons.push('未实施：该臂没有声明工具面/dc 期望 ⇒ 本项**不给结论**（不等于通过）')
+    return out
+  }
+  if (wantDc && forbidDc) out.reasons.push('判据自相矛盾：该 profile 同时要求"看得见"和"看不见" design-canvas')
+  // ★ 通道不可用 ⇒ **无结论**，不许当成"dcHits=0"参与判定
+  if (!face?.readable) out.reasons.push('通道不可用：既读不到系统提示也读不到工具面 ⇒ 本通道**无结论**（不等于 dcHits=0）')
+  else if (face.mode === 'code') {
+    out.channel = 'dcHits'
+    if (wantDc && !(face.dcHits > 0))
+      out.reasons.push(`code 模式：该臂**必须看得见** design-canvas，但系统提示里 dcHits=${face.dcHits}（system=${face.systemChars} 字符）`)
+    if (forbidDc && face.dcHits !== 0)
+      out.reasons.push(`code 模式：该臂**必须看不见** design-canvas，但系统提示里 dcHits=${face.dcHits}（system=${face.systemChars} 字符）`)
+  } else {
+    out.channel = 'tools'
+    const mt = (p, nm) => (p.endsWith('*') ? nm.startsWith(p.slice(0, -1)) : nm === p)
+    const set = extra.toolSet ?? []
+    const missing = must.filter((p) => !set.some((nm) => mt(p, nm)))
+    const bad = forbid.filter((p) => set.some((nm) => mt(p, nm)))
+    if (missing.length) out.reasons.push(`缺工具家族 [${missing.join(', ')}]`)
+    if (bad.length) out.reasons.push(`出现了不该有的工具家族 [${bad.join(', ')}]`)
+  }
+  out.ok = out.reasons.length === 0
+  return out
+}
+
+/**
+ * ★ 纯函数：**"两臂每次都过地板"这个汇总是否成立**（可两方向自测 + 消融自证）。
+ *
+ * ## 修的是什么（2026-09-21，经典**遍历空集**的假绿）
+ * 旧写法：`fixed(A)===A.length && fixed(B)===B.length`。
+ * 当某臂**有效轮为 0**（`Ause=[]`）时 ⇒ `0 === 0` ⇒ **true** ⇒ 退出码 0
+ * ⇒ **一整批全被污染（有效轮 0）的跑批会被判成"两臂每次都过地板"**，是最坏那档假绿。
+ *
+ * ⇒ 任一侧有效轮为 0 ⇒ **绝不报 true**，显式标 `unenforced`（"本汇总不成立"）；
+ *   `aborted`（半截批次）同样 ⇒ 不报 true。**未成立的汇总绝不当"通过"计入。**
+ *
+ * @returns {{both:boolean, unenforced:boolean, empty:string[], aborted:boolean, why:string}}
+ */
+function bothAllFixedOf(aUse, bUse, aborted = false) {
+  const a = Array.isArray(aUse) ? aUse : []
+  const b = Array.isArray(bUse) ? bUse : []
+  const fixed = (runs) => runs.filter((r) => r?.verdict === 'FIXED').length
+  const empty = []
+  if (!a.length) empty.push('A')
+  if (!b.length) empty.push('B')
+  const unenforced = empty.length > 0
+  const why = unenforced
+    ? `臂 ${empty.join('/')} **有效轮为 0** ⇒ "两臂每次都过地板"这句话无意义（unenforced，不当作通过）`
+    : aborted
+      ? '本批被中断（aborted）⇒ 结论残缺，不当作通过'
+      : ''
+  return { both: !unenforced && !aborted && fixed(a) === a.length && fixed(b) === b.length, unenforced, empty, aborted, why }
+}
+
+/** 成对跑批的退出码（**纯函数**，让"汇总不成立 ⇒ 非 0"这条也能被自证）。 */
+const pairExitCode = (v) => (v?.both ? 0 : 2)
 
 /**
  * **稳定窗口判据（纯函数，可两方向自测）** —— 给定采样到的工具面"指纹"序列，判断是否已经稳定。
@@ -1197,6 +1468,218 @@ function parseToolFlags(flag) {
 const EXPECT_TOOLS = parseToolFlags('--expectTool')
 const FORBID_TOOLS = parseToolFlags('--forbidTool')
 
+// ── `--check-worktree <dir>`（可重复）：**只**查该 worktree 的 HEAD 是否 == 主仓 HEAD ────────
+// ★ 纯只读：**不建 worktree、不刷新、不触发任何换代、不跑题**。exit 0（全一致）/ 1（有不一致或缺 .git）。
+if (has('--check-worktree')) {
+  const repoHead = String(sh('git', ['rev-parse', 'HEAD']).stdout ?? '').trim() || null
+  console.log(`主仓 HEAD = ${repoHead}`)
+  const dirs = []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== '--check-worktree') continue
+    const v = argv[i + 1]
+    if (v) dirs.push(v)
+  }
+  let bad = 0
+  for (const d of dirs) {
+    const s = worktreeHeadState(d, repoHead)
+    const ok = s.exists && s.matches
+    if (!ok) bad++
+    console.log(`  ${ok ? '✓' : '✗'} ${s.dir}${s.exists ? `  HEAD=${s.head}` : '  **不是 worktree（缺 .git）**'}  —— ${s.why}`)
+    if (!ok && s.exists) console.log(`      刷新：git -C "${s.dir}" checkout --detach ${repoHead}`)
+  }
+  console.log(`  ${dirs.length - bad} 通过 / ${bad} 失败`)
+  process.exit(bad ? 1 : 0)
+}
+
+// ── `--self-test-harness`：跑批器三族新判据的**两方向自证**（不碰栈、不跑题、不换代）──────────
+// 覆盖：① worktree HEAD 三态（equal / unequal / 目录不存在）② armFace（**真会话数据**）
+//       ③ bothAllFixed（**空集必须不报 true** —— 这就是本次的 bug）。
+// 每个用例都断言到"**值**"，不是"没抛错"。
+if (has('--self-test-harness')) {
+  let pass = 0
+  let fail = 0
+  /** @param {string} name @param {function} fn 返回 {ok:boolean, detail:string} */
+  const T = (name, fn) => {
+    let r
+    try {
+      r = fn()
+    } catch (e) {
+      r = { ok: false, detail: '抛错：' + String(e?.message ?? e) }
+    }
+    if (r.ok) pass++
+    else fail++
+    console.log(`  ${r.ok ? '✓' : '✗'} ${name}${r.detail ? `\n         ${r.detail}` : ''}`)
+  }
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
+  console.log('自证 ① worktree HEAD 三态（真 git，不是假目录）')
+  const repoHead = String(sh('git', ['rev-parse', 'HEAD']).stdout ?? '').trim() || null
+  const oldHead = String(sh('git', ['rev-parse', 'HEAD~1']).stdout ?? '').trim() || null
+  T('绿 equal：目录存在且 HEAD == 主仓 HEAD', () => {
+    const s = worktreeHeadState(REPO, repoHead)
+    return { ok: s.exists === true && s.matches === true && s.head === repoHead, detail: `exists=${s.exists} matches=${s.matches} why=${s.why}` }
+  })
+  T('红 unequal：目录存在但 HEAD != 主仓 HEAD（陈旧 ⇒ 必须判不匹配）', () => {
+    const s = worktreeHeadState(REPO, oldHead ?? '0'.repeat(40))
+    return { ok: s.exists === true && s.matches === false && /陈旧/.test(s.why), detail: `exists=${s.exists} matches=${s.matches} why=${s.why}` }
+  })
+  T('红 dir 不存在：exists=false 且不匹配（不许判 equal）', () => {
+    const s = worktreeHeadState('D:/project_develop/_no-such-worktree-xyz', repoHead)
+    return { ok: s.exists === false && s.matches === false, detail: `exists=${s.exists} matches=${s.matches} why=${s.why}` }
+  })
+
+  console.log('\n自证 ② armFace（**真会话数据**，来自 C:/Users/Admin/.dsh/sessions）')
+  // ★ 三条真实会话（实测口径）：好 A = system 79405 字符/dcHits 135；好 B = system 39605 字符/dcHits 0；
+  //   坏 A1 = system 1795 字符、header 只有 4 个 `capability_*`（臂还没装配好就开跑的形状）。
+  const SID_A_GOOD = 'session-59adf627-5982-4ad9-9440-51999a67bb6d'
+  const SID_B_GOOD = 'session-2c11e358-e3ea-4ea3-9ba9-90724acdccc5'
+  const SID_A_BAD = 'session-8e5397e6-6b89-4ed6-a2d7-12b6c2f6dd0e'
+  const faceOf = (sid) => {
+    const t = analyzeTrajectory(sid)
+    if (!t?.found) return { face: null, why: '找不到该会话的日志（本项**不可自证** ⇒ 判失败，不许当通过）' }
+    return { face: armFaceSignal(t), why: null }
+  }
+  const fa = faceOf(SID_A_GOOD)
+  const fb = faceOf(SID_B_GOOD)
+  const fbad = faceOf(SID_A_BAD)
+  T('★证据 code 模式下"工具条数"必然瞎：好 A 与好 B 的 toolsCount **都是 1**，但 dcHits 135 vs 0', () => {
+    if (!fa.face || !fb.face) return { ok: false, detail: fa.why ?? fb.why }
+    const ok = fa.face.mode === 'code' && fb.face.mode === 'code' && fa.face.toolsCount === 1 && fb.face.toolsCount === 1 && fa.face.dcHits > 0 && fb.face.dcHits === 0
+    return { ok, detail: `A{mode=${fa.face.mode} tools=${fa.face.toolsCount} system=${fa.face.systemChars} dcHits=${fa.face.dcHits}}  B{mode=${fb.face.mode} tools=${fb.face.toolsCount} system=${fb.face.systemChars} dcHits=${fb.face.dcHits}}` }
+  })
+  T('绿 好 A（exp-base）⇒ dcHits>0，判据放行', () => {
+    if (!fa.face) return { ok: false, detail: fa.why }
+    const c = armFaceCheck('exp-base', fa.face)
+    return { ok: c.ok === true && c.channel === 'dcHits' && c.wantDc === true && c.unenforced === false, detail: `ok=${c.ok} channel=${c.channel} dcHits=${fa.face.dcHits} system=${fa.face.systemChars}` }
+  })
+  T('绿 好 B（exp-base-nodc）⇒ dcHits===0，判据放行', () => {
+    if (!fb.face) return { ok: false, detail: fb.why }
+    const c = armFaceCheck('exp-base-nodc', fb.face)
+    return { ok: c.ok === true && c.channel === 'dcHits' && c.forbidDc === true, detail: `ok=${c.ok} channel=${c.channel} dcHits=${fb.face.dcHits} system=${fb.face.systemChars}` }
+  })
+  T('红 坏 A1（system=1795 字、header 只有 4 个 capability_*）⇒ 判为**不是** exp-base 臂', () => {
+    if (!fbad.face) return { ok: false, detail: fbad.why }
+    const c = armFaceCheck('exp-base', fbad.face)
+    // ★ 失败点要落在**正确的通道**：这条样本是 `native` 面（header 只有 4 个 capability_*，
+    //   臂还没装配完）⇒ 正确的失败点是"缺工具家族"，不是 dcHits。
+    const rightReason =
+      fbad.face.mode === 'code'
+        ? c.channel === 'dcHits' && c.reasons.some((r) => /dcHits=0/.test(r))
+        : c.channel === 'tools' && c.reasons.some((r) => /缺工具家族/.test(r))
+    return { ok: c.ok === false && rightReason, detail: `ok=${c.ok} mode=${fbad.face.mode} channel=${c.channel} system=${fbad.face.systemChars} dcHits=${fbad.face.dcHits} reasons=${JSON.stringify(c.reasons)}` }
+  })
+  T('红 坏 A1 的 **code 模式**形状（system 只有 1795 字，读不到 design-canvas）⇒ dcHits 通道判不过', () => {
+    const badCode = { mode: 'code', toolsCount: 1, systemChars: 1795, dcHits: 0, readable: true }
+    const c = armFaceCheck('exp-base', badCode)
+    return { ok: c.ok === false && c.channel === 'dcHits' && c.reasons.some((r) => /dcHits=0/.test(r)), detail: `ok=${c.ok} channel=${c.channel} reasons=${JSON.stringify(c.reasons)}` }
+  })
+  T('红 正交：好 A 套 **B** 的期望（必须看得见 vs 实际看得见）⇒ 不过', () => {
+    if (!fa.face) return { ok: false, detail: fa.why }
+    const c = armFaceCheck('exp-base-nodc', fa.face)
+    return { ok: c.ok === false && c.forbidDc === true, detail: `ok=${c.ok} reasons=${JSON.stringify(c.reasons)}` }
+  })
+  T('红 正交：好 B 套 **A** 的期望（必须看得见 vs 实际看不见）⇒ 不过', () => {
+    if (!fb.face) return { ok: false, detail: fb.why }
+    const c = armFaceCheck('exp-base', fb.face)
+    return { ok: c.ok === false && c.wantDc === true, detail: `ok=${c.ok} reasons=${JSON.stringify(c.reasons)}` }
+  })
+  T('红 ★通道不可用 ≠ 读数为 0：读不到系统提示也读不到工具面 ⇒ 不给结论（不是 dcHits=0 放行）', () => {
+    const blind = { mode: 'code', toolsCount: 0, systemChars: 0, dcHits: 0, readable: false }
+    const c = armFaceCheck('exp-base', blind)
+    return { ok: c.ok === false && c.reasons.some((r) => /通道不可用/.test(r)), detail: `ok=${c.ok} reasons=${JSON.stringify(c.reasons)}` }
+  })
+  T('未实施：没声明面期望的 profile ⇒ **unenforced**（不计作通过）', () => {
+    if (!fa.face) return { ok: false, detail: fa.why }
+    const c = armFaceCheck(null, fa.face)
+    return { ok: c.unenforced === true && c.active === false, detail: `unenforced=${c.unenforced} active=${c.active}` }
+  })
+  T('绿 非 code 模式仍走工具家族：native 面含 design-canvas 家族 ⇒ 放行', () => {
+    const native = { mode: 'native', toolsCount: 76, systemChars: 1795, dcHits: 0, readable: true }
+    const c = armFaceCheck('exp-base', native, { toolSet: ['edit', 'mcp__design-canvas__edit_code'] })
+    return { ok: c.ok === true && c.channel === 'tools', detail: `ok=${c.ok} channel=${c.channel}` }
+  })
+  T('红 非 code 模式：native 面**缺** design-canvas 家族 ⇒ 不过', () => {
+    const native = { mode: 'native', toolsCount: 4, systemChars: 1795, dcHits: 0, readable: true }
+    const c = armFaceCheck('exp-base', native, { toolSet: ['capability_report', 'list_capabilities', 'tool_apply', 'tool_score'] })
+    return { ok: c.ok === false && c.channel === 'tools' && c.reasons.some((r) => /缺工具家族/.test(r)), detail: `ok=${c.ok} reasons=${JSON.stringify(c.reasons)}` }
+  })
+
+  console.log('\n自证 ③ bothAllFixed（**空集不许报 true** —— 本次 bug 的反例）')
+  const F = (n, fixed) => Array.from({ length: n }, (_, i) => ({ verdict: i < fixed ? 'FIXED' : 'NOT-FIXED' }))
+  T('绿 3/3 与 3/3 ⇒ both=true，退出码 0', () => {
+    const v = bothAllFixedOf(F(3, 3), F(3, 3), false)
+    return { ok: v.both === true && v.unenforced === false && pairExitCode(v) === 0, detail: `both=${v.both} exit=${pairExitCode(v)}` }
+  })
+  T('★红 空集（Ause=[]，B 2/2）⇒ **不**报 true + unenforced + 退出码非 0（本次 bug）', () => {
+    const v = bothAllFixedOf([], F(2, 2), false)
+    return { ok: v.both === false && v.unenforced === true && eq(v.empty, ['A']) && pairExitCode(v) !== 0, detail: `both=${v.both} unenforced=${v.unenforced} empty=${JSON.stringify(v.empty)} exit=${pairExitCode(v)} why=${v.why}` }
+  })
+  T('★红 两侧都空（0===0 的经典陷阱）⇒ 不报 true + 退出码非 0', () => {
+    const v = bothAllFixedOf([], [], false)
+    return { ok: v.both === false && v.unenforced === true && pairExitCode(v) !== 0, detail: `both=${v.both} empty=${JSON.stringify(v.empty)} exit=${pairExitCode(v)}` }
+  })
+  T('红 A 2/3（有跑没过地板）⇒ 不报 true', () => {
+    const v = bothAllFixedOf(F(3, 2), F(3, 3), false)
+    return { ok: v.both === false && v.unenforced === false && pairExitCode(v) !== 0, detail: `both=${v.both} exit=${pairExitCode(v)}` }
+  })
+  T('红 aborted（半截批次）+ 3/3&3/3 ⇒ 不报 true，退出码非 0', () => {
+    const v = bothAllFixedOf(F(3, 3), F(3, 3), true)
+    return { ok: v.both === false && v.aborted === true && pairExitCode(v) !== 0, detail: `both=${v.both} aborted=${v.aborted} exit=${pairExitCode(v)} why=${v.why}` }
+  })
+  T('绿 n=1 且 1/1 两臂 ⇒ both=true（把正向用例单独放）', () => {
+    const v = bothAllFixedOf(F(1, 1), F(1, 1), false)
+    return { ok: v.both === true && pairExitCode(v) === 0, detail: `both=${v.both} exit=${pairExitCode(v)}` }
+  })
+
+  console.log('\n自证 ④ 行为面：叶子工具直方图（**code 模式下唯一看得清"它做了什么"的通道**）')
+  // 单元：用**造的** recs 覆盖形状（含空集 ⇒ 通道不可用）
+  const D = (name, isError = false) => ({ type: 'tool/code-dispatch', data: { name, isError } })
+  T('绿 3 次叶子调用（read×2 + safe_rename×1）⇒ leafCalls=3、symbolToolCalls=1', () => {
+    const f = leafFace([D('read'), D('read'), D('safe_rename')])
+    return { ok: f.leafCalls === 3 && f.symbolToolCalls === 1 && f.leafReadable === true && eq(f.symbolTools, ['safe_rename']), detail: JSON.stringify({ leafCalls: f.leafCalls, symbol: f.symbolToolCalls, byTool: f.leafByTool }) }
+  })
+  T('红 只有文本工具（read/edit/pwsh）⇒ symbolToolCalls=0（**不是**通道不可用）', () => {
+    const f = leafFace([D('read'), D('edit'), D('pwsh'), D('edit')])
+    return { ok: f.symbolToolCalls === 0 && f.leafReadable === true && f.leafCalls === 4, detail: JSON.stringify({ leafCalls: f.leafCalls, symbol: f.symbolToolCalls, readable: f.leafReadable }) }
+  })
+  T('★红 一个 dispatch 都没有 ⇒ leafReadable=false（**通道不可用 ≠ symbolToolCalls 0**）', () => {
+    const f = leafFace([{ type: 'tool/call', data: { name: 'run_code' } }])
+    return { ok: f.leafCalls === 0 && f.leafReadable === false, detail: `leafCalls=${f.leafCalls} readable=${f.leafReadable}` }
+  })
+  T('绿 叶子失败计数独立于符号类（isError 单独数）', () => {
+    const f = leafFace([D('pwsh', true), D('read'), D('safe_rename', true)])
+    return { ok: f.leafFailures === 2 && f.symbolToolCalls === 1, detail: `leafFailures=${f.leafFailures} symbol=${f.symbolToolCalls}` }
+  })
+  // ★★ 真实数据：**行为面本来就分化，只是从来没量过**
+  //   注意口径：`analyzeTrajectory()` 顶层是 **tool/call 层**（恒 `{"run_code":N}`），
+  //   新加的叶子直方图挂在 **`.metrics`** 下（与 `dcHits`/`mode` 同一层，见 `extractMetrics`）。
+  const la = analyzeTrajectory(SID_A_GOOD)
+  const lb = analyzeTrajectory(SID_B_GOOD)
+  const mA = la?.metrics ?? {}
+  const mB = lb?.metrics ?? {}
+  T('★证据 两臂 `byTool`（run_code 层）**完全同形**，但叶子层分化（这就是加之前的读数盲区）', () => {
+    if (!la?.found || !lb?.found) return { ok: false, detail: '真会话不在盘上 ⇒ 本项**不可自证**（判失败，不许当通过）' }
+    const sameAtRunCmd = eq(la.byTool, lb.byTool)
+    const differAtLeaf = mA.symbolToolCalls !== mB.symbolToolCalls
+    return {
+      ok: sameAtRunCmd && differAtLeaf,
+      detail: `A byTool=${JSON.stringify(la.byTool)} leaf=${mA.leafCalls}/symbol${mA.symbolToolCalls}  |  B byTool=${JSON.stringify(lb.byTool)} leaf=${mB.leafCalls}/symbol${mB.symbolToolCalls}`,
+    }
+  })
+  T('绿 好 A ⇒ 符号类工具**用到了**（≥1 次）', () => {
+    if (!la?.found) return { ok: false, detail: '真会话不在盘上 ⇒ 不可自证' }
+    return { ok: mA.symbolToolCalls >= 1 && mA.leafReadable === true, detail: `leafCalls=${mA.leafCalls} symbolToolCalls=${mA.symbolToolCalls} tools=${JSON.stringify(mA.symbolTools)} byTool=${JSON.stringify(mA.leafByTool)}` }
+  })
+  T('绿 好 B ⇒ 符号类工具**一次都没用到**（=0），且叶子通道可读', () => {
+    if (!lb?.found) return { ok: false, detail: '真会话不在盘上 ⇒ 不可自证' }
+    return { ok: mB.symbolToolCalls === 0 && mB.leafReadable === true, detail: `leafCalls=${mB.leafCalls} symbolToolCalls=${mB.symbolToolCalls} byTool=${JSON.stringify(mB.leafByTool)}` }
+  })
+
+  console.log('')
+  console.log(`  ${pass} 通过 / ${fail} 失败`)
+  process.exit(fail ? 1 : 0)
+}
+
 // ── 成对 CLI：--pair --task X --armA council --armB code [--repeat k] ───────
 if (has('--pair')) {
   const armA = argOf('--armA') ?? 'council'
@@ -1368,11 +1851,17 @@ if (has('--pair')) {
   //   ⚠️ 两条纪律：
   //     ① **排除要显式可见**（打印"排除 k 轮 + 原因"），不许默默过滤 —— 那又是一类假绿；
   //     ② 排除后**有效 n 可能小于 REPEAT**，表头必须显示两个 n（设计 n / 有效 n）。
-  const usable = (x) => x.runs.filter((r) => r.handoverDuringRun?.contaminated !== true)
+  // ★★ 2026-09-21 加（**臂自证无效的轮也必须排除**）：`armInvalid` 以前**没有任何消费点**
+  //   ⇒ 明明"这次跑不能算作该臂"，却照样计分 ⇒ 两臂差别被稀释（假绿）。
+  //   ⚠️ 排除必须**显式打印轮号 + 原因**，并把"设计 n / 有效 n"两个数都显示出来 —— 默默过滤是另一类假绿。
+  const usable = (x) =>
+    x.runs.filter((r) => r.handoverDuringRun?.contaminated !== true && r.armInvalid !== true)
   const droppedOf = (x) => x.runs.filter((r) => r.handoverDuringRun?.contaminated === true).length
+  const invalidOf = (x) => x.runs.filter((r) => r.armInvalid === true)
   const Ause = usable(A)
   const Buse = usable(B)
   const dropped = { A: droppedOf(A), B: droppedOf(B) }
+  const droppedArm = { A: invalidOf(A), B: invalidOf(B) }
   const fixedCount = (runs) => runs.filter((r) => r.verdict === 'FIXED').length
   const g = (runs, key) => agg(runs, (r) => r[key])
   const gTraj = (runs, key) => agg(runs, (r) => r.trajectory?.[key])
@@ -1388,11 +1877,21 @@ if (has('--pair')) {
   console.log('─'.repeat(84))
   console.log(`成对 delta（A=${armA}  vs  B=${armB}）  单元格 = mean [min–max]`)
   console.log(`  设计 n=${REPEAT} ｜ **有效 n：A=${Ause.length}  B=${Buse.length}**` +
-    (dropped.A || dropped.B
-      ? `（已排除污染轮：A ${dropped.A} 轮 / B ${dropped.B} 轮 —— 跑期间发生了换代，脚本判 contaminated:true）`
+    ((dropped.A || dropped.B || droppedArm.A.length || droppedArm.B.length)
+      ? `（已排除：换代污染 A ${dropped.A} / B ${dropped.B} 轮；**臂自证无效** A ${droppedArm.A.length} / B ${droppedArm.B.length} 轮）`
       : ''))
+  if (droppedArm.A.length || droppedArm.B.length) {
+    console.log(`  ⚠️ 被排除的轮（**臂自证无效 ⇒ 不算作该臂**，不计入任何统计）：`)
+    for (const [L, bad] of [['A', droppedArm.A], ['B', droppedArm.B]]) {
+      for (const r of bad) {
+        const reasons = r.armFaceCheck?.reasons ?? []
+        const f = r.armFace ?? {}
+        console.log(`     ${L}: verdict=${r.verdict ?? '?'} mode=${f.mode ?? '?'} tools=${f.toolsCount ?? '?'} system=${f.systemChars ?? '?'}字符 dcHits=${f.dcHits ?? '?'} —— ${reasons.join('；') || '(无原因)'}`)
+      }
+    }
+  }
   if (dropped.A || dropped.B) {
-    console.log(`  ⚠️ 被排除的轮（**不计入任何统计**）：`)
+    console.log(`  ⚠️ 被排除的轮（**换代污染**，不计入任何统计）：`)
     for (const [L, droppedRuns] of [['A', A.runs.filter((r) => r.handoverDuringRun?.contaminated === true)], ['B', B.runs.filter((r) => r.handoverDuringRun?.contaminated === true)]]) {
       for (const r of droppedRuns) {
         const hits = r.handoverDuringRun?.hits ?? []
@@ -1420,10 +1919,19 @@ if (has('--pair')) {
     if (!a || !b) continue
     console.log(`    ${label.padEnd(16)} ${(b.mean - a.mean).toFixed(0).padStart(8)}   （A ${a.mean.toFixed(0)} → B ${b.mean.toFixed(0)}）`)
   }
-  const bothAllFixed = fixedCount(Ause) === Ause.length && fixedCount(Buse) === Buse.length
+  // ★★ 2026-09-21 修：旧写法在 `Ause=[]` 时 `0===0` ⇒ true ⇒ **全污染的一批被判成全绿**（遍历空集假绿）。
+  //   ⇒ 改走 `bothAllFixedOf`：任一侧有效轮 0 ⇒ `unenforced`（本汇总不成立）+ 退出码非 0。
+  const baf = bothAllFixedOf(Ause, Buse, aborted)
+  const bothAllFixed = baf.both
   console.log('')
+  if (baf.why) console.log(`⇒ ⛔ **汇总不成立（unenforced）**：${baf.why}`)
   console.log(bothAllFixed ? '⇒ 两臂每次都过地板（差异看成本/路径）' : '⇒ **有跑没过地板** ⇒ 先看那几跑，别急着解读均值')
   pair.bothAllFixed = bothAllFixed
+  // ★ aborted（半截批次）以前**只打印不记账** ⇒ 半截批次照样当结论退出 0 ⇒ 现在记进产物并强制非 0。
+  pair.bothAllFixedWhy = baf.why || null
+  pair.unenforced = baf.unenforced
+  pair.aborted = aborted
+  pair.effectiveN = { A: Ause.length, B: Buse.length, designed: REPEAT }
   // ★ 写入报告后**自动跑一次两臂隔离审计**（把有没有碰到共享面落进产物里，见 eval-isolation-audit.mjs）
   const out = path.join(REPO, 'out', `eval-pair-${task.id}-${Date.now()}.json`)
   pair.isolationAudit = { ranAt: new Date().toISOString() }
@@ -1437,7 +1945,7 @@ if (has('--pair')) {
     pair.isolationAudit.error = String(e?.message ?? e)
   }
   console.log(`报告 → ${path.relative(REPO, out)}`)
-  process.exit(bothAllFixed ? 0 : 2)
+  process.exit(pairExitCode(baf))
 }
 
 // ── 单臂 CLI（`--repeat k` 时就是 pass^k）─────────────────────────────────

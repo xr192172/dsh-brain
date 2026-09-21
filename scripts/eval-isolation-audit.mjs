@@ -69,9 +69,16 @@ function audit(sid, label) {
     }
   }
   // 工具面（首个 request/header）
+  // ★★ 2026-09-21 修正**口径**（此前这个数字被读成了"臂有多大"）：
+  //   在 code（PTC）模式下 `request/header.tools` **恒只有 `run_code` 一个** ⇒ 恒为 1，
+  //   而两臂的真差别落在**系统提示**里（实测 A=79405 字符 / B=39605 字符）
+  //   ⇒ 打印时**必须带上口径标注**（mode + system 字符数），并声明它**不是**臂大小。
   const hdr = recs.find((r) => r.type === 'request/header')
-  const toolSetSize = (hdr?.data?.header?.tools ?? []).length
-  return { sid, label, found: true, calls: calls.length, toolSetSize, hits }
+  const tools = (hdr?.data?.header?.tools ?? []).map((t) => t?.name ?? '?')
+  const toolSetSize = tools.length
+  const systemChars = String(hdr?.data?.header?.system ?? '').length
+  const mode = toolSetSize === 1 && tools[0] === 'run_code' ? 'code' : toolSetSize ? 'native' : 'unknown'
+  return { sid, label, found: true, calls: calls.length, toolSetSize, mode, systemChars, hits }
 }
 
 const targets = []
@@ -94,13 +101,19 @@ for (const t of targets) {
     continue
   }
   const names = Object.keys(r.hits)
-  console.log(`  ${r.label}  工具面=${r.toolSetSize}  调用=${r.calls}  ${names.length ? '⚠ 触碰到共享面：' + names.join(' / ') : '✓ 没触碰到列出的共享面'}`)
+  console.log(
+    `  ${r.label}  工具面=${r.toolSetSize}(mode=${r.mode}, system=${r.systemChars}字符)  调用=${r.calls}  ` +
+      `${names.length ? '⚠ 触碰到共享面：' + names.join(' / ') : '✓ 没触碰到列出的共享面'}`,
+  )
   for (const n of names) {
     flagged++
     for (const h of r.hits[n].slice(0, 3)) console.log(`      · [${n}] ${h.tool}: ${h.snippet}`)
   }
 }
 console.log(
-  `\n合计 ${flagged} 处触碰。⚠ 注意：**没触碰到 ≠ 没泄漏**（本审计只看工具参数里出现的路径）。` +
+  `\n⚠ 口径：「工具面」= 首条 request/header 的 tools **条数**，**不是臂有多大**：` +
+    `\n   code（PTC）模式下它恒为 1（只有 \`run_code\`）—— 要判臂大小请看同行的 \`system=…字符\`，` +
+    `\n   或跑 \`node scripts/eval-run.mjs --self-test-harness\` 看 dcHits 口径（A>0 / B===0）。` +
+    `\n合计 ${flagged} 处触碰。⚠ 注意：**没触碰到 ≠ 没泄漏**（本审计只看工具参数里出现的路径）。` +
     `\n   要更强的隔离，需要：① 每臂独立的会话目录/报告目录；② 或把另一臂的产物在跑之前移出 agent 够得到的位置。`,
 )
