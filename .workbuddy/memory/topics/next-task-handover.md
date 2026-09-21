@@ -39,6 +39,45 @@
 
 ---
 
+## ★★ 补记（2026-09-21 下午二段）：**装置已大修；但"配题"之前先解 R1**
+
+### 1. 既有 `cli-0005` 成对结果 **不可用**（已定性，别再引用它）
+
+`bothAllFixed=false` 只由 **A 的一次基建事故轮**造成（header 仅 4 个 `capability_*`、system 提示 **1795** 字符 vs 正常 **79405**、
+**没碰任何文件**）；它跨了一次 flip 却被 `ignoreWindows` 当"自家切臂"排除 ⇒ `contaminated=false`。
+**剔掉它：A 2/2、B 3/3 全 FIXED ⇒ 零区分度。** 且 `diffStat` 6 条**全空**（真因见 §2）。
+
+### 2. 装置修了 7 处（`scripts/eval-run.mjs` + `eval-isolation-audit.mjs`）
+`ensureWorktree` 陈旧不报（两个 worktree 曾停在 `b97a44c`，主仓 `42c5c92` ⇒ 题面/判据**混版本**）｜
+`restoreAll`/`diffStat`/`diff --name-only`/`statusAfterRestore` **四处缺 `cwd: WORK`**（其中两处是**空过**）｜
+`bothAllFixed` **空集陷阱**（`0===0` ⇒ true）｜★ 每跑臂自证**默认关**且 code 下**恒瞎**、`armInvalid` **无人消费**｜oracle 无 flaky。
+**新入口**：`--check-worktree`（独立、只读、exit 0/1）。
+**新自测**：`node scripts/eval-run.mjs --self-test-harness` = **27 通过 / 0 失败**（消融自证 27/0 → 24/3 ✓）。
+⚠️ 按既有约定**新门不并入 `check-all`** ⇒ **必须单独跑它**（否则新判据会烂掉）。
+
+### 3. ★★ 最大的读数盲区已补：**行为面**
+`analyzeTrajectory` **从不数 `tool/code-dispatch`** ⇒ `byTool` 恒 `{"run_code":N}`，两臂同形。
+补 `leafFace()` 后（用已有 5 条真会话重算、0 次新跑）：
+**A 的 `symbolToolCalls`=2/4（`safe_rename`/`symbol_edit`），B=0/0/0（全靠 `read`+`pwsh`+`edit` 手改，`edit` 7–8 次）**。
+⇒ 行为面**本来就有区分度**，只是没人量过。
+
+### 4. ★★ 配题前必须先解的一件（头号阻塞）
+`docs/eval-discrimination-plan.md` §2.2 **S4** + `MEMORY.md` 铁律 #16：
+**`README.md` 把陷阱印在题面上，`check.mjs`（含判据实现与期望值）就在 agent 可读写的 worktree 里**
+—— 实测三条 B 会话**都读了 `check.mjs`** ⇒ 任何陷阱都被降级成"照抄规格"。
+违反 `evals/README.md` **R1（判据必须在 Agent 够不到的地方）**；`cli-0004`/`cli-0005` **同病**。
+⇒ **不先解 R1，配再难的题也一样零区分度。**
+
+### 5. 下一步顺序（照 `docs/eval-discrimination-plan.md` §5）
+**步 0（行为面读数）✅ 已完成** → 步 1（A 臂 smoke：12 文件小样含 1 条 re-export 链 + 1 个同名邻居，
+看 `safe_rename` 算不算得出完整闭包；**它决定 R3，R3 不成立则 cli-0007 设计要推倒**）
+→ 步 2（B 单臂校准 `maxToolCalls`）→ 步 3（写 `cli-0007.gen.mjs` + `check.mjs` + `--self-test`）
+→ 步 4（才跑 `--pair`）。**R1 应插在步 3 之前或并行。**
+
+**验收信号（别忘了）**：下一次 pair 的 `diffStat` **必须非空** —— 那是 §2 那批 cwd 修复的唯一实测验收。
+
+---
+
 # 接手指南（**回执** + 下一项）—— 2026-09-20 15:15（§3.B **已实现并跑通第一对**；下一项 §3.D）
 
 > **给新会话读的**：这是一份**自包含**的交接。读完它 + 它点到的文件就能接着干，不必回溯对话。
