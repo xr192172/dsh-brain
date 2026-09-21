@@ -58,3 +58,37 @@ node scripts/eval-run.mjs --traj "$SID"          # 事后补算轨迹（不花 t
    差点去改一道本来没问题的题）。已改成"必须唯一匹配 id 或前缀"，匹配不上直接报错。
 2. **`eval-run.mjs` 缺"seed 落点"断言**：现在打 seed 后会断言
    **git 看到的改动文件集合 == seed 点名的文件集合**，不等就弃跑 —— 上面第 1 条如果早就有它，当场就会被拦住。
+
+---
+
+## 补跑：cli-0005（2026-09-21，M1 靶场线）与「cli-0004 不存在」
+
+> 执行口径与上面 3 题**完全一致**（现行 `council` preset / 同 HEAD / 干净工作区 / 每题新建空会话）。
+> 明细：`out/eval-run-cli-0005-symbol-rename-design-canvas-x1-1789957040171.json`。
+
+| 题 | verdict | 墙钟 | steps | outputTokens | toolCalls（分布） | 危险动作 | oracle | regression | git diff |
+|---|---|---|---|---|---|---|---|---|---|
+| `cli-0005` 符号级语义重命名（能力题·空 seed） | **FIXED** | 37.8s | +13 | 5948 | 24（read×8 pwsh×3 safe_rename×3 symbol_edit×2 find_references×3 design_canvas_*×4 glob×1） | 0 | 绿 | 绿 | 3 文件 +8/−8（跑后已还原） |
+
+- `hasSignal=true`（HEAD 上 oracle 红 ⇒ 能力题判据成立）、`outcome=settled`、`budgetOk=true`、
+  `regressionFlaky=false`、无换代污染、`cleanAfterRestore=true`（`reverted` 3 个文件，`removedUntracked` 0）。
+- `toolFailures=3`（内容判据算出的"疑似工具报错"）——不影响判据：oracle / regression 均绿。
+- ★ 与上面 3 题**不同类**：那 3 题是"恢复一行不变量"（回归修复，正解 = 改回 HEAD ⇒ diff 空），
+  cli-0005 是"还没做的能力题"，**真的改出了 diff（+8/−8）**，且 toolCalls 24 已逼近预算 30
+  ⇒ 对"路径与成本"这一主判据**更有区分度**，建议 §3.B 优先用它。
+
+### ⚠ 两个必须记下的事实（都会让人误以为"任务集是 5 题"）
+
+1. **`cli-0004` 不在任务集里**：`evals/pilot/tasks.jsonl` 实际只有 **4 行**（0001 / 0002 / 0003 / 0005）。
+   `cli-0004` 只存在于 `docs/eval-task-design-harder.md` 的**规格草案**（其 oracle 草案
+   `evals/checks/cli-0004.mjs` 也未落盘）⇒ **本题无基线可跑**（不是超时、不是判失败，是题还没有）。
+2. **`node scripts/eval-validate.mjs` 报的"5 题有效 / 0 题有问题"是双计假象**：
+   它自己打印的标题就是"（4 题）"，但 `out/eval-validate.json` 的 `results` 有 **5 条**，
+   其中 `cli-0005-symbol-rename-design-canvas` **出现两次**。
+   成因（`scripts/eval-validate.mjs`）：能力题分支在 `try` 里 `results.push(rec)` 后 `continue`，
+   `finally` 里的 `if (isEmptySeed) results.push(rec)` **又 push 一次**
+   （回归题成功路径只在 `finally` 里 push ⇒ 只有能力题被双计）。
+   ⇒ 汇总行读的是 `results.length` 而非 `tasks.length` ⇒ **4 题报成 5 题**。
+   （本轮只允许改本文档 ⇒ 未动脚本，如实记录，交给主线修。）
+
+⇒ **基线现况：4/4 FIXED（0001 / 0002 / 0003 / 0005）；cli-0004 缺题 ⇒ 它没有基线。**

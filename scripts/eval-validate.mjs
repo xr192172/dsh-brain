@@ -274,18 +274,20 @@ for (const t of tasks) {
       if (!rec.seededOracle) {
         say(`  ✗ **假题（能力题）**：在 HEAD 上 oracle 就是绿的 ⇒ 这件事本来就做完了，题没有信号`)
         failed++
-        results.push(rec)
         continue
       }
       if (!rec.cleanRegression) {
         say(`  ✗ 前提不成立：regression 在 HEAD 上就是红的（先把仓库修好再收题）`)
         failed++
-        results.push(rec)
         continue
       }
       say(`  ✓ 能力题：HEAD 上 oracle 红（${t.oracle.cmd.join(' ')}）+ regression 绿 ⇒ 有信号`)
       rec.ok = true
-      results.push(rec)
+      // ★ 2026-09-21 修：此处原先 `results.push(rec)` —— 但 `continue` **仍会跑 finally**，
+      //   而 finally 的 isEmptySeed 分支也会 push ⇒ **同一条 rec 被数两遍**。
+      //   实测后果：`tasks.jsonl` 只有 4 题，报告却写"**5 题有效**"（cli-0005 重复），
+      //   即**判据自身假绿**（最坏那档：你以为查过了）。
+      //   ⇒ 现在 **push 只发生在 finally 里（按分支互斥，每条恰好一次）**，此处只 continue。
       continue
     }
     // ① 干净态：oracle 绿（regression 绿是前提，跑一次 oracle 就够说明这题"本来就过"）
@@ -294,7 +296,7 @@ for (const t of tasks) {
     if (!rec.cleanOracle) {
       say(`  ✗ 干净态 oracle 就是红的 —— 这题的前提不成立（先修好仓库再收题）`)
       failed++
-      results.push(rec)
+      // ★ 同上：不再在 try 内 push（单一 push 点在 finally）—— 否则这条也会被数两遍
       continue
     }
     // ② 打 seed → oracle 必须红
