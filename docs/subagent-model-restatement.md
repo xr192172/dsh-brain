@@ -202,3 +202,13 @@ driver `README.md:23`：创建前**捕获**父代的显式沙箱覆盖与 **`'ne
 5. **`toolOrder` 是否对"子代 scope 新增的工具"也生效**（它由 `knownNames` 全集驱动）—— 未验证。
 6. **我们没有用过 `subagent_control` / `list_agents` / `send_message`**，它们的实际行为我没读。
 7. **`dsh-tool-subagent-report` 的 host-plane 行**我只从 preset 注释里读到，**没去 profile 里核对它是否真的挂着**。
+
+---
+
+## 12. ⇒ 深挖另立一文
+
+**`docs/skill-as-agent-feasibility.md`** —— "把 skill 当 agent + 调完就获得新工具"的**可行性裁决**：
+「为什么需要 schema」的精确回答、三条机制证据（`tools.register` 是活的 + provider 每次装配重求值 +
+**上游 `dsh-tool-cordis` 就是这么用的**）、缺的两件事（skill 不带能力 / 子代叙事是"瘟神"）、
+代价（装载一次 = 前缀全失效，故应对齐压缩点）、以及未闭合清单。
+**本文 §10 里那两行"❌ 不是 / ⚠️ 半成立"，在那篇里被细化成"断在哪、怎么接"。**
