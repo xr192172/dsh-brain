@@ -26,6 +26,16 @@
  *          候选 B `session/end-seed` 的实测理由见输出里「切分标记普查」段）。
  *   改动3 负对照：spawn 子代的种子份应为 0、fork 子代应为 >0，末行打印 negative control passed = true/false。
  *
+ * ★ v4 修两个**已确认的口径 bug**（对应 docs/skill-as-agent-spec.md §0.2-2 / §10.4 O24+O22 / §11.4 / §11.5；
+ *   **v3 的三段一律不动**，同样只做并列、不删口径）：
+ *   改动 O24 首请求口径：旧 = 「日志里第一条带 usage 的 assistant/message」——对**带种子的子代**
+ *          取到的是**拷贝来的父代消息**（带着父代当年付过的 usage）⇒ 不是子代自己的首请求。
+ *          新（权威）= 「第一条带 usage 且 **seq > seedLength** 的 assistant/message」；
+ *          **seedLength 缺键（无种子）⇒ 保持原语义**（= 日志第一条）。旧值并列保留 + 审计"两口径不同的会话数"。
+ *   改动 O22 负对照判据：旧 = 「fork 子代种子份**全部** > 0」（样本里有历史空种子 fork ⇒ 形状错、永不通过）；
+ *          新 = **按 seedLength 是否存在分臂**：臂 A（有 seedLength）⇒ 种子份 > 0；臂 B（无）⇒ 种子份 == 0。
+ *          按 provider（fork/spawn）的分组**降级为信息列**，不再作判据。
+ *
  * 用法：
  *   node scripts/measure-delegation-reuse.mjs
  *   node scripts/measure-delegation-reuse.mjs --by-provider   # 按 fork/spawn 分组对比
@@ -172,10 +182,16 @@ for (const s of listSessions()) {
   const totalCacheWrite = sum((u) => u.cacheWriteTokens)
   const denom = totalIn + totalCacheRead + totalCacheWrite
 
+  /* ── ★ 改动 O24：首请求的【旧口径】 = 日志里第一条带 usage 的 assistant/message ──
+   *   对带种子的子代，这一条是**拷贝来的父代消息**（带着父代当年付过的 usage）
+   *   ⇒ 它不是子代自己的首请求。旧口径**并列保留**，不删。 */
   const firstIdx = usages.findIndex((u) => u)
-  const first = firstIdx >= 0 ? usages[firstIdx] : null
-  const firstMsg = firstIdx >= 0 ? msgs[firstIdx] : null
-  const firstDenom = first ? num(first.inputTokens) + num(first.cacheReadTokens) + num(first.cacheWriteTokens) : 0
+  const oldFirst = firstIdx >= 0 ? usages[firstIdx] : null
+  const oldFirstMsg = firstIdx >= 0 ? msgs[firstIdx] : null
+  const oldFirstIn = oldFirst ? num(oldFirst.inputTokens) : null
+  const oldFirstCacheRead = oldFirst ? num(oldFirst.cacheReadTokens) : null
+  const oldFirstDenom = oldFirst ? num(oldFirst.inputTokens) + num(oldFirst.cacheReadTokens) + num(oldFirst.cacheWriteTokens) : 0
+  const oldFirstHit = oldFirstDenom ? num(oldFirst.cacheReadTokens) / oldFirstDenom : null
 
   const lastMsg = [...msgs].reverse().find((e) => pickUsage(e))
 
@@ -189,6 +205,22 @@ for (const s of listSessions()) {
   const hasSeedLenKey = head != null && Object.prototype.hasOwnProperty.call(head, 'seedLength')
   const seedLength = hasSeedLenKey && typeof head.seedLength === 'number' ? head.seedLength : null
   const seqOf = (e) => (typeof e.seq === 'number' ? e.seq : null)
+
+  /* ── ★ 改动 O24：首请求的【新口径（权威）】 ──
+   *   子代自己的首请求 = **第一条带 usage 且 seq > seedLength 的 assistant/message**
+   *   （日志前段 seq <= seedLength 是拷贝来的父代消息，带着父代付过的 usage ⇒ 必须跳过）
+   *   缺 seedLength 键（无种子）⇒ **保持原语义**（= 日志第一条），不改变空种子子代的读数。 */
+  const newIdx = seedLength === null
+    ? firstIdx
+    : msgs.findIndex((m, i) => usages[i] && typeof m.seq === 'number' && m.seq > seedLength)
+  const newFirst = newIdx >= 0 ? usages[newIdx] : null
+  const newFirstMsg = newIdx >= 0 ? msgs[newIdx] : null
+  const newFirstIn = newFirst ? num(newFirst.inputTokens) : null
+  const newFirstCacheRead = newFirst ? num(newFirst.cacheReadTokens) : null
+  const newFirstDenom = newFirst ? num(newFirst.inputTokens) + num(newFirst.cacheReadTokens) + num(newFirst.cacheWriteTokens) : 0
+  const newFirstHit = newFirstDenom ? num(newFirst.cacheReadTokens) / newFirstDenom : null
+  // 有种子、但种子之后一条自己的请求都没有（子代建好后没跑）⇒ 新口径不可判定（**不近似、不回退到旧值**）
+  const seedNoOwnRequest = seedLength !== null && newIdx < 0
 
   // 候选 A：seq <= seedLength 属于 fork 血脉的种子；缺 seedLength ⇒ 种子为空（不近似）
   let seedA = ZERO_U, liveA = mergedTotals, slicedA = false
@@ -233,11 +265,21 @@ for (const s of listSessions()) {
     steps: msgs.length,
     totalIn, totalCacheRead, totalCacheWrite,
     hit: denom ? totalCacheRead / denom : null,
-    firstSeq: firstMsg?.seq ?? null,
-    firstTime: firstMsg?.time ?? null,
-    firstIn: first ? num(first.inputTokens) : null,
-    firstCacheRead: first ? num(first.cacheReadTokens) : null,
-    firstHit: firstDenom ? num(first.cacheReadTokens) / firstDenom : null,
+    // ── ★ O24 首请求：权威值 = seedLength 之后（新）；old* = 日志首条（旧，并列保留） ──
+    firstSeq: newFirstMsg?.seq ?? null,
+    firstTime: newFirstMsg?.time ?? null,
+    firstIn: newFirstIn,
+    firstCacheRead: newFirstCacheRead,
+    firstHit: newFirstHit,
+    firstSeqOld: oldFirstMsg?.seq ?? null,
+    firstTimeOld: oldFirstMsg?.time ?? null,
+    firstInOld: oldFirstIn,
+    firstCacheReadOld: oldFirstCacheRead,
+    firstHitOld: oldFirstHit,
+    seedNoOwnRequest,
+    // 两口径是否不同（审计"有多少个会话两者不同"）
+    firstDiffers: !(oldFirstMsg?.seq === newFirstMsg?.seq
+      && oldFirstIn === newFirstIn && oldFirstCacheRead === newFirstCacheRead),
     lastTime: lastMsg?.time ?? null,
     // ── v3 新增 ──
     oldTotals, mergedTotals, mergedSteps, mergeStats, chunkOnlyList, maxSeq,
@@ -264,6 +306,7 @@ L.push('')
 L.push('--- 父/子配对明细 ---')
 for (const { child: c, parent: p } of pairs) {
   const gapSec = c.firstTime && p.lastTime ? ((c.firstTime - p.lastTime) / 1000).toFixed(0) : null
+  const gapSecOld = c.firstTimeOld && p.lastTime ? ((c.firstTimeOld - p.lastTime) / 1000).toFixed(0) : null
   const common = lcp(c.system, p.system)
   const commonPct = common !== null && c.systemLen ? ((common / c.systemLen) * 100).toFixed(1) + '%' : 'n/a'
   L.push(`■ child ${c.id}  provider=${c.prov}  mode=${c.mode}  depth=${c.depth}`)
@@ -272,13 +315,18 @@ for (const { child: c, parent: p } of pairs) {
     `同模型=${c.model === p.model && c.provider === p.provider ? 'YES' : 'NO'}`)
   L.push(`            子preset=${c.preset}  父preset=${p.preset}  同preset=${c.preset === p.preset ? 'YES' : 'NO'}`)
   L.push(`            system 长度: 子=${c.systemLen} 父=${p.systemLen}  公共前缀=${common} (${commonPct})  工具数: 子=${c.toolsCount} 父=${p.toolsCount}`)
-  L.push(`            父末请求→子首请求间隔=${gapSec ?? 'n/a'}s`)
-  L.push(`  子首请求: 未缓存输入=${c.firstIn}  缓存读=${c.firstCacheRead}  命中率=${pct(c.firstHit)}`)
+  L.push(`            父末请求→子首请求间隔: 新(seedLength之后)=${gapSec ?? 'n/a'}s  旧(日志首条)=${gapSecOld ?? 'n/a'}s`)
+  L.push(`  子首请求(seedLength之后·新★权威): 未缓存输入=${c.firstIn}  缓存读=${c.firstCacheRead}  命中率=${pct(c.firstHit)}  seq=${c.firstSeq}`)
+  L.push(`  子首请求(日志首条·旧，仅并列)   : 未缓存输入=${c.firstInOld}  缓存读=${c.firstCacheReadOld}  命中率=${pct(c.firstHitOld)}  seq=${c.firstSeqOld}`)
   L.push(`  父末轮  : 未缓存输入=${p.totalIn}  缓存读=${p.totalCacheRead}  总命中率=${pct(p.hit)}`)
   const v = c.firstHit === null ? '不可判定'
     : c.firstHit >= 0.5 ? '✅ 吃到父代前缀'
       : c.firstHit > 0.05 ? '⚠️ 部分命中' : '❌ 几乎零命中'
   L.push(`  裁决: ${v}`)
+  if (c.firstDiffers) {
+    L.push(`  ★ O24: 两口径**不同**（子代 seedLength=${c.seedLength}）—— 旧口径取到的是父代拷贝消息，新口径才是子代自己的首请求`)
+  }
+  if (c.seedNoOwnRequest) L.push('  ★ O24: 有 seedLength，但种子之后没有子代自己的请求 ⇒ 新口径不可判定（不回退到旧值）')
   L.push('')
 }
 
@@ -377,11 +425,17 @@ L.push('')
 
 
 // ── 全量按 depth ──────────────────────────────────────────────
+// ★ O24：首命中/首缓存读/首in 均为**新口径（seedLength 之后，权威）**；末两列是**旧口径（日志首条）**并列。
 L.push('=== 全量一览（depth 升序；只列有 usage 的）===')
-L.push(pad('depth', 6) + pad('prov', 8) + pad('preset', 14) + pad('steps', 6) + pad('总命中', 8) + pad('首命中', 8) + pad('首缓存读', 10) + 'session')
+L.push('  ★ 首* 列为**新口径（seedLength 之后）**；「首*(旧)」列为**日志首条**并列。两者不同处标 Δ。')
+L.push(pad('depth', 6) + pad('prov', 8) + pad('preset', 14) + pad('steps', 6) + pad('总命中', 8) +
+  pad('首命中', 8) + pad('首in', 7) + pad('首缓存读', 10) +
+  pad('首命中(旧)', 12) + pad('首in(旧)', 9) + pad('首缓存读(旧)', 13) + pad('Δ', 3) + 'session')
 for (const r of rows.filter((x) => x.steps > 0).sort((a, b) => (a.depth ?? -1) - (b.depth ?? -1))) {
   L.push(pad(r.depth, 6) + pad(r.prov, 8) + pad(r.preset, 14) + pad(r.steps, 6) +
-    pad(pct(r.hit), 8) + pad(pct(r.firstHit), 8) + pad(r.firstCacheRead, 10) + r.id)
+    pad(pct(r.hit), 8) + pad(pct(r.firstHit), 8) + pad(r.firstIn, 7) + pad(r.firstCacheRead, 10) +
+    pad(pct(r.firstHitOld), 12) + pad(r.firstInOld, 9) + pad(r.firstCacheReadOld, 13) +
+    pad(r.firstDiffers ? 'Δ' : '', 3) + r.id)
 }
 L.push('')
 
@@ -389,6 +443,41 @@ const depthHist = new Map()
 for (const r of rows) depthHist.set(r.depth, (depthHist.get(r.depth) ?? 0) + 1)
 L.push('--- delegationDepth 分布 ---')
 for (const [d, n] of [...depthHist.entries()].sort((a, b) => (a[0] ?? -1) - (b[0] ?? -1))) L.push(`  depth=${d}: ${n}`)
+L.push('')
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * ★ 改动 O24 —— 首请求口径：日志首条（旧） vs seedLength 之后（新）
+ *   旧：日志里第一条带 usage 的 assistant/message。带种子子代的日志前段是**拷贝来的父代消息**，
+ *       它们带着**父代当年付过的 usage** ⇒ 旧值对带种子子代取到的是父代的请求，不是子代的。
+ *   新：第一条带 usage 且 **seq > seedLength** 的 assistant/message；缺 seedLength 键时**保持旧语义**。
+ *   ★ 权威值 = 新口径（主表/裁决列都用新）；旧值**并列保留**，不删口径。
+ * ══════════════════════════════════════════════════════════════════════════ */
+const diffFirst = rows.filter((r) => r.firstDiffers)
+const noOwn = rows.filter((r) => r.seedNoOwnRequest)
+L.push('=== ★ 改动 O24：首请求口径（旧 = 日志首条 / 新 = seedLength 之后，权威）===')
+L.push(`  会话总数 = ${rows.length}；有 usage 的 = ${rows.filter((r) => r.steps > 0).length}`)
+L.push(`  ★ 两口径**不同**的会话数 = ${diffFirst.length} / ${rows.length}   ← 审计用（这些会话按旧口径读到的不是子代自己的首请求）`)
+if (noOwn.length) L.push(`  ⚠️ 有 seedLength 但种子之后无子代自己请求的会话 = ${noOwn.length}（新口径不可判定，不回退旧值）`)
+else L.push('  有 seedLength 但种子之后无子代自己请求的会话 = 0')
+L.push('')
+L.push('--- 两口径不同的会话（逐条并列；权威 = 新）---')
+if (!diffFirst.length) L.push('  （无）')
+for (const r of diffFirst) {
+  L.push(`  ■ ${pad(String(r.id).slice(0, 12), 14)} seedLength=${pad(r.seedLength === null ? '(缺键)' : r.seedLength, 8)} prov=${r.prov ?? '(无 descriptor)'}`)
+  L.push(`      旧(日志首条)         : seq=${pad(r.firstSeqOld, 6)} in=${pad(r.firstInOld, 8)} cr=${pad(r.firstCacheReadOld, 8)} 命中率=${pct(r.firstHitOld)}`)
+  L.push(`      新(seedLength 之后)★ : seq=${pad(r.firstSeq, 6)} in=${pad(r.firstIn, 8)} cr=${pad(r.firstCacheRead, 8)} 命中率=${pct(r.firstHit)}`)
+}
+L.push('')
+L.push('--- 门 2 点名复核（docs/skill-as-agent-spec.md §11.4 / out/verify-bigseed.txt 的硬数值）---')
+for (const [wantId, wantIn, wantCr] of [['a04d96f5', 474, 40832], ['bd7d6e6d', 413, 133248]]) {
+  const r = rows.find((x) => String(x.id).startsWith(wantId))
+  if (!r) { L.push(`  ${wantId}: **未找到该会话** ⇒ 无法核对`); continue }
+  const ok = r.firstIn === wantIn && r.firstCacheRead === wantCr
+  L.push(`  ${wantId}  seedLength=${r.seedLength}  新首请求: in=${r.firstIn} cr=${r.firstCacheRead}` +
+    `   期望: in=${wantIn} cr=${wantCr}   ⇒ ${ok ? '✅ MATCH' : '❌ MISMATCH'}`)
+  L.push(`         （旧口径并列: in=${r.firstInOld} cr=${r.firstCacheReadOld}）`)
+}
 L.push('')
 
 
@@ -536,30 +625,48 @@ for (const p of provGroups) {
       `种子份=${fmtU(r.seedA)} 分身自己=${fmtU(r.liveA)}`)
   }
 }
-const forkN = ctl.fork?.n ?? 0
-const spawnN = ctl.spawn?.n ?? 0
-const spawnOK = (ctl.spawn?.pos ?? 0) === 0        // spawn 的种子份必须全为 0
-const forkOK = (ctl.fork?.pos ?? 0) === (ctl.fork?.n ?? -1) && (ctl.fork?.n ?? 0) > 0 // fork 的种子份必须全 > 0
-let controlPassed = false
-if (!forkN || !spawnN) {
-  L.push(`  ⇒ 样本不足以分 fork/spawn（fork=${forkN}, spawn=${spawnN}）⇒ **无法做对照**，不假装通过。`)
+/* ★ 改动 O22：负对照判据 = **按 `header.seedLength` 是否存在分臂**（与 provider 无关，只看有没有真的继承历史）
+ *   臂 A（有 seedLength ⇒ 真继承了历史） ⇒ 种子份必须 > 0
+ *   臂 B（无 seedLength）                 ⇒ 种子份必须 == 0
+ *   ★ 原判据（"fork 子代种子份**全部** > 0"）**形状错**：样本里有历史空种子 fork ⇒ 永远不可能通过。
+ *   ⇒ 按 descriptor.provider（fork/spawn）的分组**降级为信息列**（上面那段逐条保留），不再作判据。 */
+const armA = rows.filter((r) => r.hasSeedLenKey)
+const armB = rows.filter((r) => !r.hasSeedLenKey)
+const armAZero = armA.filter((r) => isZeroU(r.seedA))
+const armAPos = armA.filter((r) => !isZeroU(r.seedA))
+const armBZero = armB.filter((r) => isZeroU(r.seedA))
+const armBPos = armB.filter((r) => !isZeroU(r.seedA))
+const armADegen = armA.filter((r) => !(typeof r.seedLength === 'number' && r.seedLength > 0))
+const armAOK = armA.length > 0 && armAZero.length === 0
+const armBOK = armBPos.length === 0
+const controlPassed = armAOK && armBOK
+
+L.push('--- ★ 判据：按 header.seedLength 是否存在分臂（上方 provider 分组 = 信息列，非判据）---')
+L.push(`  臂 A（有 seedLength ⇒ 真继承了历史）: n=${armA.length}  种子份 > 0 的 = ${armAPos.length}  种子份 == 0 的 = ${armAZero.length}` +
+  `  ⇒ 要求「> 0」⇒ passed = ${armAOK}`)
+if (armADegen.length) L.push(`      ⚠️ 臂 A 中 seedLength 键存在但值 ≤ 0 的 = ${armADegen.length}（这种样本不可能切出非零种子份，会让臂 A 判据形状失真）`)
+for (const r of armA) {
+  L.push(`      ${pad(String(r.id).slice(0, 12), 14)} seedLength=${pad(r.seedLength, 8)} prov=${pad(r.prov ?? '(无 descriptor)', 20)} ` +
+    `种子份=${fmtU(r.seedA)}  ${isZeroU(r.seedA) ? '❌ 未 > 0' : '✅ > 0'}`)
+}
+L.push(`  臂 B（无 seedLength）: n=${armB.length}  种子份 == 0 的 = ${armBZero.length}  种子份 > 0 的 = ${armBPos.length}` +
+  `  ⇒ 要求「== 0」⇒ passed = ${armBOK}`)
+L.push(`      样例 id（前 12 个）: ${armB.slice(0, 12).map((r) => String(r.id).slice(0, 12)).join(', ')}${armB.length > 12 ? ` …（共 ${armB.length} 个）` : ''}`)
+for (const r of armBPos) {
+  L.push(`      ❌ ${pad(String(r.id).slice(0, 12), 14)} seedLength=(缺键) 种子份=${fmtU(r.seedA)} ← 无种子却切出非零种子份`)
+}
+L.push(`  判据：臂 A 种子份全 > 0 ? ${armAOK}（实测 ${armAPos.length}/${armA.length} 个 > 0）；` +
+  `臂 B 种子份全 == 0 ? ${armBOK}（实测 ${armBPos.length}/${armB.length} 个 > 0）`)
+if (!controlPassed) {
+  L.push('  ⇒ ★ 负对照**未通过**：按 seedLength 分臂后仍有臂的判据不成立，如上逐条所示。')
 } else {
-  L.push(`  判据：spawn 子代种子份全为 0 ? ${spawnOK}（实测 ${ctl.spawn.pos}/${ctl.spawn.n} 个 > 0）；` +
-    `fork 子代种子份全 > 0 ? ${forkOK}（实测 ${ctl.fork.pos}/${ctl.fork.n} 个 > 0）`)
-  controlPassed = spawnOK && forkOK
-  if (!controlPassed) {
-    L.push('  ⇒ ★ 负对照**未通过**：fork 臂要求「种子份 > 0」，实测本机**每一个 fork 子代都没有可切的种子**。')
-    L.push('     证据（见上面逐条 + 上面的切分标记普查）：4 个 fork 子代的 header **缺 seedLength 键**，')
-    L.push('     且其日志本身**不含父代 seed 的深拷贝**（事件数 21~22、seq 0 是 sandbox/mode，首事件时间 = 子代 createdAt），')
-    L.push('     故按「不近似」原则种子份 = 0 —— 与 spawn 同值 ⇒ 该对照在本机样本上不可满足。')
-    L.push('     （不是脚本坏了：唯一带 seedLength 的样本切得出非零种子份，见下「机制正对照」。）')
-  }
+  L.push('  ⇒ ★ 负对照通过：有 seedLength 的会话其种子份全 > 0（切分确实切到了父代拷贝），无 seedLength 的会话其种子份全 = 0。')
 }
 L.push('')
-L.push('--- 机制正对照（唯一带 seedLength 的样本；它没有 subagent/descriptor，是**会话级 fork**）---')
+L.push(`--- 机制正对照（全部带 seedLength 的样本，n=${seedLenPos.length}；切分确实切出非零种子份）---`)
 if (seedLenPos.length) {
   for (const r of seedLenPos) {
-    L.push(`  ${String(r.id).slice(0, 12)}  parentSession=${r.parent}  seedLength=${r.seedLength}`)
+    L.push(`  ${String(r.id).slice(0, 12)}  parentSession=${r.parent}  seedLength=${r.seedLength}  prov=${r.prov ?? '(无 descriptor)'}`)
     L.push(`      种子份   = ${fmtU(r.seedA)}   ← 非 0 ⇒ 切分机制本身有效（父代已付账的拷贝）`)
     L.push(`      分身自己 = ${fmtU(r.liveA)}`)
     L.push(`      合计     = ${fmtU(r.totalA)}  （= 该会话整份归并，一致=${fmtU(r.totalA) === fmtU(r.mergedTotals)}）`)
@@ -578,4 +685,7 @@ fs.writeFileSync(OUT, L.join('\n'), 'utf8')
 console.log('written', OUT, '| pairs=', pairs.length, '| byProvider=', BY_PROVIDER)
 console.log(`[v3] 旧口径(仅message) prompt侧=${dueOf(oldGlobal)}  →  新口径(两源归并) prompt侧=${dueOf(newGlobal)}  漏账=${dueOf(diffGlobal)}`)
 console.log(`[v3] 种子份总量 cr=${rows.reduce((a, r) => a + r.seedA.cacheReadTokens, 0)} | 分身自己总量 cr=${rows.reduce((a, r) => a + r.liveA.cacheReadTokens, 0)} | 标记=${SEED_MARKER}`)
+console.log(`[v4/O24] 首请求两口径不同的会话数 = ${diffFirst.length} / ${rows.length}（权威 = seedLength 之后）；` +
+  `有 seedLength 但无自己请求的 = ${noOwn.length}`)
+console.log(`[v4/O22] 臂A(有seedLength) n=${armA.length} 全>0? ${armAOK} | 臂B(无seedLength) n=${armB.length} 全==0? ${armBOK}`)
 console.log(`[v3] ${negativeControlLine}`)
