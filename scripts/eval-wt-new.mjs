@@ -65,8 +65,66 @@
  *     复制来的 lib 是**旧 src 的产物** ⇒ "未 seed 绿"能骗过，**seed 之后 oracle 依旧绿**
  *     ⇒ 把判据变成瞎的（假绿比假红更坏）。树内构建则让树里的 src 与 lib **同源**。
  *
+ * ── ★★ O85（2026-09-22）：**建树根可以移出判据根**（`--root`）────────────────────
+ *
+ * **上一轮的场地错在哪**：默认根是 `<判据根>/out/_wt/<名字>` ⇒ 被测 agent 的 cwd 在
+ * `dsh-brain/` **里面**，用 `..` 走两层就回到 `dsh-brain/`：`scripts/`、`evals/`、
+ * 以及 `out/` 里**所有历史判据产物**（`gate-vector-run.txt`、`w2*-*`、`face-audit.txt`…）
+ * 全在**祖先链**上随手可及。`sparse-checkout` 只挡住了"**树里**没有判据"，
+ * **没挡住"树外向上两层就是判据根"** —— 而且 `out/` 下还同时放着**两臂的记忆库**，
+ * 于是 A 臂能读到 B 臂的记忆 ⇒ **自变量泄漏**（两臂就不再是两臂）。
+ *
+ * **新的口径**：判据一律留在判据根、**由外部执行**；场地整体搬到判据根**之外**，
+ * 每臂一个**互不共享实验根**的独立目录：
+ *   ```
+ *   D:/project_develop/_abA/{wt,store}      ← A 臂的实验根（非项目；`_` 前缀 = 本工作区约定）
+ *   D:/project_develop/_abB/{wt,store}      ← B 臂的实验根（与 A **不共享**任何子目录）
+ *   node scripts/eval-wt-new.mjs --root D:/project_develop/_abA --name wt
+ *   ```
+ * ★ 这样两条都成立：**判据根不在工作树的祖先链上**；**两臂的祖先链没有公共的"实验根"**
+ *   （除了 `D:/project_develop` 这一层）。
+ * ★★ 但**这不是沙箱**：被测 agent 有 `pwsh` ⇒ 它可以 `cd` 到任何地方、可以 `ls ..`、
+ *   可以走绝对路径 ⇒ **文件系统级的绝对隔离在不加沙箱时做不到**。
+ *   本布置只堵三条：① 工作目录子树内 ② 祖先链 ③ 两臂互见（朴素相对路径）。
+ *   残余风险见 `out/w31-o85-isolation.md`「残余风险」。
+ *
+ * ── ★★ O86（2026-09-22）：**同卷的"非兄弟根"不够 —— 两臂必须落在不同卷**────────────
+ *
+ * **上一轮（O85）的场地仍然是坏的，而且是致命的**：两臂的实验根是**兄弟目录**
+ *   ```
+ *   D:/project_develop/_abA/{wt,store}      ← A 臂
+ *   D:/project_develop/_abB/{wt,store}      ← B 臂   ★ 与 _abA 同一个父目录
+ *   ```
+ * ⇒ 实测 `D:/project_develop/_abA/wt/../../_abB/store/knowledge_base.json` **真的存在**
+ *   ⇒ **A 臂用一条相对路径就直接读到了 B 臂的记忆库** ⇒ 自变量泄漏 ⇒ **A/B 不再是两臂**。
+ *   O85 的报告把这条记成"长回旋可达"的**残余**，但它是**判据本身**：臂间互见 = 实验没有对照。
+ *
+ * **为什么"同卷换个非兄弟根"仍然不够**：`..` 在**同一个卷内是无界的**。
+ *   把 B 改到 `D:/_abB` 只是让它从"上两级"变成"上三级"——只要知道名字，**照样到得了**。
+ *   ⇒ 想做到**"从任一臂出发，用任意相对路径都到不了对方的 store / wt"**，
+ *     唯一的硬办法是让两臂**不在同一个卷**：相对路径**永远跨不过卷根**（`D:\` ↔ `C:\`）。
+ *
+ * **本轮口径（跨卷 + 长度对齐）**：
+ *   ```
+ *   D:/project_develop/_abA/{wt,store}      ← A 臂（判据根所在卷 D:）
+ *   C:/_abB-experiment-root/{wt,store}      ← B 臂（★ 另一个卷；与 A 的祖先链交集 = ∅）
+ *   node scripts/eval-wt-new.mjs --root C:/_abB-experiment-root --name wt --peer D:/project_develop/_abA
+ *   ```
+ *   · ★ **为什么 B 的目录名要凑成 20 个字符**：`mem-arm.mjs` 有一条既有约束 ——
+ *     两臂 cwd 的**路径长度必须相同**（否则长度差异会泄进 `system`，见该文件里的说明）。
+ *     `D:/project_develop/_abA/wt` 是 26 字符 ⇒ `C:/_abB-experiment-root/wt` 也正好 26 字符。
+ *   · ★ **为什么卷根不同就等价于"不可达"**：`path.relative()` 在跨卷时**不返回相对路径**，
+ *     而是回落成绝对路径（`C:\_abB-experiment-root`）⇒ 这本身就是"相对路径表达不出这条路"的机器证据。
+ *     `[10]` 步把这条做成断言，并且**再实探一遍**长回旋候选路径（都必须是 ENOENT）。
+ *   · ★★ **仍然不是沙箱**：A 臂在 D: 卷 ⇒ 它用长回旋相对路径**照样能回到判据根**
+ *     （`../../../project_develop/dsh-brain/scripts/…`）。本轮堵住的只有**臂间互见**这一条。
+ *     残余风险见 `out/w32-o86-arms.md`「残余风险」。
+ *
  * ── 用法 ────────────────────────────────────────────────────────────────
  *   node scripts/eval-wt-new.mjs --name w25-R1
+ *   node scripts/eval-wt-new.mjs --root D:/project_develop/_abA --name wt
+ *   ★ O86（跨卷两臂，别忘 --peer）：
+ *   node scripts/eval-wt-new.mjs --root C:/_abB-experiment-root --name wt --peer D:/project_develop/_abA
  *   node scripts/eval-wt-new.mjs --name w25-R1 --dir D:/tmp/w25-R1 --exclude docs --exclude .workbuddy
  *   node scripts/eval-wt-new.mjs --name w25-R1 --json out/w25-wt.json
  *
@@ -119,18 +177,30 @@ const JUDGE_FILES = [
 const USAGE = `${NAME} —— 起一个**不含判据**的隔离工作树（R1）
 
 用法：
-  node scripts/eval-wt-new.mjs --name <名字> [--dir <绝对路径>] [--exclude <仓库相对目录>]… [--json <file>]
+  node scripts/eval-wt-new.mjs --name <名字> [--root <绝对路径>] [--dir <绝对路径>]
+                               [--peer <另一臂的实验根>] [--exclude <仓库相对目录>]… [--json <file>]
 
 参数：
-  --name <n>        工作树名字（默认目录 <仓库>/out/_wt/<n>；out/ 已在 .gitignore 里）
-  --dir <abs>       直接指定目录（必须绝对路径；与 --name 二选一）
+  --name <n>        工作树名字（默认目录 <建树根>/<n>；建树根默认 <仓库>/out/_wt，out/ 已在 .gitignore 里）
+  --root <abs>      建树根目录（必须绝对路径；建树 = <root>/<name>）。★ O85：把它指到判据根
+                    **之外**（如 D:/project_develop/_abA）⇒ 判据不在被测 agent 的祖先链上；
+                    留在判据根内（默认）⇒ 只挡"树里"，不挡"树外向上两层的 dsh-brain/"。
+  --peer <abs>      ★★ O86：**另一臂**的实验根（如 D:/project_develop/_abA）。给了它 ⇒ 多跑一步 [10]：
+                    从**本树**出发用相对路径去够对方的 store / wt，判定"两臂互不可见"。
+                    **要求两臂在不同卷**（相对路径跨不过卷根）——同卷即使不是兄弟也到得了（'..' 在卷内无界）。
+  --peer-only       ★★ O86：**不起树**，只对**已存在**的场地跑"两臂互不可见"判据（**双向**），然后退出。
+                    必须与 --dir <本树> 和 --peer <另一臂实验根> 一起给。可复跑命令：
+                      node scripts/eval-wt-new.mjs --peer-only --dir D:/project_develop/_abA/wt --peer C:/_abB-experiment-root
+  --dir <abs>       直接指定目录（必须绝对路径；与 --name 二选一，优先级最高）
   --exclude <p>     额外排除的仓库相对目录（可重复，**追加**）。默认已排除：${DEFAULT_EXCLUDES.join(' , ')}
   --no-hygiene      只排除规格点名的两个目录（scripts , evals），不带 docs/patches/.workbuddy
   --json <file>     把结论写成 JSON（默认不写）
   -h, --help        打印本用法
 
-为什么默认目录在 out/_wt/ 下：out/ 被 git 忽略 ⇒ 起树**不会**让主仓 \`git status\` 多出
+⚠ 默认建树根在判据根内部：out/ 被 git 忽略 ⇒ 起树**不会**让主仓 \`git status\` 多出
 "?? _wt/" 这一行（放在仓库根下的 _wt/ 会让它变脏 —— 而"主仓未被污染"是硬要求）。
+★ 但**代价**是：工作树在 \`dsh-brain/\` 里面 ⇒ \`..\` 两层就回到判据根（scripts/ evals/ out/）
+⇒ **判据在祖先链上**。要真隔离就显式给 \`--root\`（见文件头 O85 一节）。
 `
 
 function sh(cmd, args, opts = {}) {
@@ -146,6 +216,145 @@ function sh(cmd, args, opts = {}) {
 const EOL_FLAGS = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf']
 /** ★ 所有会碰工作区的 git 命令都必须走它（见文件头"行尾坑"）。 */
 const gitIn = (dir, args) => sh('git', ['-C', dir, ...EOL_FLAGS, ...args])
+
+/**
+ * ── ★★ O85：祖先链与"判据面"探测（纯只读，不碰任何东西）────────────────────
+ */
+/** `p` 相对 `anc` 的路径（正斜杠、可读）。 */
+const relFrom = (anc, p) => path.relative(path.resolve(anc), path.resolve(p)).replace(/\\/g, '/')
+/** `p` 是否在 `anc` **内部或就是它自己**（`''` = 同一个目录也算在内）。 */
+function isInside(anc, p) {
+  const rel = relFrom(anc, p)
+  return rel === '' || (!rel.startsWith('../') && !path.isAbsolute(rel))
+}
+/** 工作树的**完整祖先链**（从父目录一路到盘符根，不含自己；循环只从 `return` 退出）。 */
+function ancestorsOf(p) {
+  const out = []
+  let cur = path.resolve(p)
+  for (;;) {
+    const parent = path.dirname(cur)
+    if (parent === cur) return out
+    out.push(parent)
+    cur = parent
+  }
+}
+/**
+ * 每个祖先目录里**直接**（不下钻）有没有"判据面"的目录名 —— 即从工作树用 `..`+名字就能回到的东西。
+ * ★ 只收**判据根的专名**，不收泛名（`docs` / `patches` 之类的普通目录在祖先链上到处都是，
+ *   收进来只会变成噪音 —— 而噪音会让人忽略真正的提醒）：
+ *   · `dsh-brain` = 判据根基线名（回到它就等于回到 `scripts/` `evals/` `out/`）；
+ *   · `scripts` / `evals` = R1 的直接对象（判据目录本身的基线名）；
+ *   · `out` = 判据产物目录（历史判据产物 `gate-vector-run.txt` / `w2*-*` / `face-audit.txt` 全在里面）。
+ * ★ 只报"名字在"，不做"里面有没有判据"的判断（后者是 `memory-judge-poison-check.mjs` 的对象）。
+ */
+const JUDGE_FACE_NAMES = new Set(['dsh-brain', 'scripts', 'evals', 'out'])
+function judgeFaceIn(dir) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  return entries
+    .filter((e) => e.isDirectory() && JUDGE_FACE_NAMES.has(e.name))
+    .map((e) => e.name)
+    .sort()
+}
+
+/**
+ * ── ★★ O86：两臂互不可见的机器判据（纯只读，不写任何东西）────────────────────
+ *
+ * 判据对象：**从本工作树出发，用【任意相对路径】都到不了另一臂的实验根（其 `store` / `wt`）**。
+ * 三条机器依据（缺一条都不算过）：
+ *
+ *   1. ★ **卷根不同** —— 相对路径**永远跨不过卷根**：Windows 上从 `D:\…` 出发没有任何相对写法
+ *      能落到 `C:\…`；`path.relative()` 自己就会**回落成绝对路径**（`C:\_abB-experiment-root`）
+ *      ⇒ 这条不是"抽样没探到"，而是"**这种路径不存在**"的充分证明。
+ *   2. ★ **对方不在本树的祖先链上** —— 否则 `..` 就直接上去了（O85 的场地就是这一条破的）。
+ *   3. ★ **实探** —— 从本树构造一族**长回旋**候选（上 1…5 级，再拼对方目录名 + 尾部子路径），
+ *      逐条 `stat` ⇒ **必须全部 ENOENT**。
+ *      ★ 先证明**对方确实存在**：否则"全部 ENOENT"是在空集上为真 = **假绿**（本项目的硬纪律）。
+ *
+ * 返回的 `attempts` 是**全部**实探读数（报告里要原样贴），不是只贴通过的那一半。
+ */
+const volumeOf = (p) => path.parse(path.resolve(p)).root.toLowerCase()
+const UP_LEVELS = 5
+const PEER_SUBPATHS = ['', 'store', 'store/knowledge_base.json', 'wt', 'wt/package.json']
+function crossArmVerdict(wtDir, peerRoot) {
+  const wt = path.resolve(wtDir)
+  const peer = path.resolve(peerRoot)
+  const peerExists = fs.existsSync(peer)
+  const volWt = volumeOf(wt)
+  const volPeer = volumeOf(peer)
+  const volumeDiffers = volWt !== volPeer
+  // ★ 跨卷时 `path.relative` **不返回相对路径**，而是绝对路径 —— 这本身就是机器证据。
+  const relRaw = path.relative(wt, peer)
+  const relIsAbsolute = path.isAbsolute(relRaw)
+  const peerInAncestors = ancestorsOf(wt)
+    .map((a) => a.toLowerCase())
+    .includes(peer.toLowerCase())
+  const peerBase = path.basename(peer)
+  const attempts = []
+  for (let k = 1; k <= UP_LEVELS; k++) {
+    for (const sub of PEER_SUBPATHS) {
+      const p = `${'../'.repeat(k)}${peerBase}${sub ? '/' + sub : ''}`
+      const abs = path.resolve(wt, p)
+      attempts.push({ rel: p, abs: abs.replace(/\\/g, '/'), exists: fs.existsSync(abs) })
+    }
+  }
+  const reachable = attempts.filter((a) => a.exists)
+  const ok = peerExists && volumeDiffers && !peerInAncestors && reachable.length === 0
+  return {
+    ok,
+    wt: wt.replace(/\\/g, '/'),
+    peer: peer.replace(/\\/g, '/'),
+    peerExists,
+    volWt,
+    volPeer,
+    volumeDiffers,
+    relRaw: relRaw.replace(/\\/g, '/'),
+    relIsAbsolute,
+    peerInAncestors,
+    probes: attempts.length,
+    reachable,
+    attempts,
+    ancestorsWt: ancestorsOf(wt).map((a) => a.replace(/\\/g, '/')),
+    ancestorsPeer: ancestorsOf(peer).map((a) => a.replace(/\\/g, '/')),
+  }
+}
+
+/**
+ * 把 `crossArmVerdict()` 的结果**打印出来并下判定**（走 `check()` ⇒ 计入退出码）。
+ * ★ 打印的是**全部**实探读数（不是只贴通过的那一半）—— 报告要原样引用。
+ * @returns 判决对象（供 `--json` 与 `--peer-only` 复用）
+ */
+function reportPeerCheck(wtDir, peerRoot, label) {
+  const pv = crossArmVerdict(wtDir, peerRoot)
+  const lower = pv.ancestorsPeer.map((x) => x.toLowerCase())
+  const inter = pv.ancestorsWt.filter((a) => lower.includes(a.toLowerCase()))
+  say('')
+  say(`${label}：两臂互不可见 —— 从**本树**出发，用【任意相对路径】够另一臂`)
+  say(`    本树（被测 agent 的 cwd）: ${pv.wt}`)
+  say(`    另一臂的实验根            : ${pv.peer}`)
+  say(`    前提：对方确实存在？      : ${pv.peerExists ? '是 ✓（否则下面的 ENOENT 是空集上的真）' : '**否 ✗**（空集上为真 ⇒ 本步作废）'}`)
+  say('')
+  say(`    依据①卷根：本树在 ${pv.volWt}   另一臂在 ${pv.volPeer}   ${pv.volumeDiffers ? '★ 不同卷 ⇒ 相对路径**跨不过去** ✓' : '**同卷** ✗ ⇒ \'..\' 在卷内无界，只要知道名字就到得了'}`)
+  say(`      path.relative(本树 → 另一臂) = ${pv.relIsAbsolute ? `**${pv.relRaw}**（★ 回落成绝对路径 = "相对路径表达不出这条路"的机器证据）` : `${pv.relRaw}（是相对路径 ⇒ 可达）`}`)
+  say(`    依据②祖先链：另一臂在本树祖先链上？ ${pv.peerInAncestors ? '**在** ✗' : '不在 ✓'}`)
+  say(`      本树祖先链（共 ${pv.ancestorsWt.length} 级）: ${pv.ancestorsWt.join('  <  ')}`)
+  say(`      另一臂祖先链（共 ${pv.ancestorsPeer.length} 级）: ${pv.ancestorsPeer.join('  <  ')}`)
+  say(`      两条祖先链的交集: ${inter.length ? inter.join(' , ') : '（空）'}`)
+  say(`        ⇒ 除卷根本身以外，两臂${inter.every((x) => x === pv.volWt || x === pv.volPeer) ? '**不共享任何目录** ✓（交集只含卷根）' : '**共享了非卷根目录** ✗'}`)
+  say('')
+  say(`    依据③实探：从本树构造 ${pv.probes} 条**长回旋**相对路径（上 1…${UP_LEVELS} 级 + 对方目录名 + 尾部子路径），逐条 stat：`)
+  for (const a of pv.attempts) say(`      [${a.exists ? '**可达 ✗**' : 'ENOENT ✓'}] ${a.rel.padEnd(34)} → ${a.abs}`)
+  say(`      ⇒ 可达 ${pv.reachable.length}/${pv.probes} 条${pv.reachable.length ? `：${pv.reachable.map((a) => a.rel).join(' , ')}` : '（全部失败）'}`)
+  check(pv.peerExists, `O86：另一臂确实存在（${pv.peer}）`, pv.peerExists ? '' : '⇒ 判据对象不存在，"不可见"无意义')
+  check(pv.volumeDiffers, 'O86：两臂在**不同卷**（相对路径跨不过卷根）', pv.volumeDiffers ? `${pv.volWt} vs ${pv.volPeer}` : '**同卷** ⇒ 长回旋可达')
+  check(!pv.peerInAncestors, 'O86：另一臂不在本树的祖先链上', pv.peerInAncestors ? '**在！**' : '')
+  check(pv.reachable.length === 0, `O86：${pv.probes} 条长回旋相对路径**全部 ENOENT**`, pv.reachable.length ? `${pv.reachable.length} 条可达：${pv.reachable.map((a) => a.rel).join(' , ')}` : '0 条可达')
+  return pv
+}
 
 /**
  * ── ★★ O72：把"干净检出"变成"可编译 / 已构建"（2026-09-22）───────────────────
@@ -222,10 +431,28 @@ if (argv.includes('-h') || argv.includes('--help')) {
 }
 const name = argOf('--name')
 const dirArg = argOf('--dir')
+/** ★ O85：建树根（缺省仍是 `<判据根>/out/_wt` —— **默认行为逐字不变**，只多一句提醒）。 */
+const rootArg = argOf('--root')
+/** ★★ O86：另一臂的实验根。给了它 ⇒ 多跑一步 [10]（两臂互不可见的机器判据）。 */
+const peerArg = argOf('--peer')
+/** ★★ O86：`--peer-only` —— **不起树**，只对**已存在**的两臂场地跑互不可见判据（双向），然后退出。 */
+const PEER_ONLY = argv.includes('--peer-only')
 /** `--no-hygiene`：退回"只排规格点名的两个目录"（`scripts` / `evals`）—— 留给想复现旧行为的人。 */
 const baseExcludes = argv.includes('--no-hygiene') ? ['scripts', 'evals'] : DEFAULT_EXCLUDES
 const extraExcludes = allOf('--exclude')
 const jsonOut = argOf('--json')
+if (rootArg && !path.isAbsolute(rootArg)) {
+  process.stderr.write(`[${NAME}] 用法错误：--root 必须是绝对路径（用 D:/… 而不是 /d/…）\n`)
+  process.exit(2)
+}
+if (rootArg && dirArg) {
+  process.stderr.write(`[${NAME}] 用法错误：--root 与 --dir 不能同时给（--dir 已经直接就是工作树目录）\n`)
+  process.exit(2)
+}
+if (rootArg && !name) {
+  process.stderr.write(`[${NAME}] 用法错误：--root 要与 --name 一起用（工作树 = <root>/<name>）\n`)
+  process.exit(2)
+}
 if (!name && !dirArg) {
   process.stderr.write(`[${NAME}] 用法错误：--name 或 --dir 必须给一个\n\n${USAGE}`)
   process.exit(2)
@@ -234,14 +461,68 @@ if (dirArg && !path.isAbsolute(dirArg)) {
   process.stderr.write(`[${NAME}] 用法错误：--dir 必须是绝对路径（用 D:/… 而不是 /d/…）\n`)
   process.exit(2)
 }
-const DIR = dirArg ? path.resolve(dirArg) : path.join(ROOT, 'out', '_wt', String(name))
+if (peerArg && !path.isAbsolute(peerArg)) {
+  process.stderr.write(`[${NAME}] 用法错误：--peer 必须是绝对路径（用 D:/… 而不是 /d/…）\n`)
+  process.exit(2)
+}
+if (PEER_ONLY && (!dirArg || !peerArg)) {
+  process.stderr.write(`[${NAME}] 用法错误：--peer-only 必须同时给 --dir <本树> 与 --peer <另一臂的实验根>\n\n${USAGE}`)
+  process.exit(2)
+}
+/** ★ 建树根：`--root` 优先；缺省**逐字保持旧值** `<判据根>/out/_wt`。 */
+const ROOTDIR = rootArg ? path.resolve(rootArg) : path.join(ROOT, 'out', '_wt')
+const DIR = dirArg ? path.resolve(dirArg) : path.join(ROOTDIR, String(name))
+
+/**
+ * ── ★★ O86 `--peer-only`：只跑"两臂互不可见"判据（**双向**），不起树、不写任何东西 ─────────
+ * 为什么要这个模式：`[10]` 藏在"建树"流程里 ⇒ 想对**已经在用的**两臂场地复跑这条判据，
+ * 就得再建一棵临时树（会在 `git worktree list` 里留垃圾）。这个模式把判据**单独**拿出来：
+ *   node scripts/eval-wt-new.mjs --peer-only --dir D:/project_develop/_abA/wt --peer C:/_abB-experiment-root
+ * ★ 双向都跑：门要的是"**从任一臂出发**都到不了对方"，只测一个方向不算过。
+ */
+if (PEER_ONLY) {
+  const peerRoot = path.resolve(peerArg)
+  const aRoot = path.dirname(DIR)
+  const peerWt = path.join(peerRoot, 'wt')
+  say(`${NAME} —— ★★ O86：两臂互不可见判据（--peer-only；纯只读，不起树、不写文件）`)
+  say(`  本树（A，被测 agent 的 cwd）: ${DIR}`)
+  say(`  本臂实验根                  : ${aRoot}`)
+  say(`  另一臂（B）的实验根          : ${peerRoot}`)
+  reportPeerCheck(DIR, peerRoot, '  [A→B]')
+  if (fs.existsSync(peerWt)) {
+    reportPeerCheck(peerWt, aRoot, '  [B→A]')
+  } else {
+    say('')
+    say(`  ⊘ 方向 [B→A] 跳过：${peerWt} 不存在（对方没有工作树 ⇒ 该方向无从检起；这不等于通过）`)
+    problems.push('方向 [B→A] 未能检起（对方的 wt 不存在）')
+  }
+  const okPeer = problems.length === 0
+  say('')
+  say('─'.repeat(78))
+  say(`结论：${okPeer ? '✓ 两臂互不可见（**双向**、含长回旋）—— 从任一臂出发，任何相对路径都到不了对方' : `✗ 有 ${problems.length} 条判据不成立`}`)
+  for (const p of problems) say(`  · ${p}`)
+  process.exit(okPeer ? 0 : 1)
+}
+
 const EXCLUDES = [...new Set([...baseExcludes, ...extraExcludes])].map((p) => p.replace(/\\/g, '/').replace(/\/+$/, ''))
 
-const result = { name: name ?? path.basename(DIR), dir: DIR, excludes: EXCLUDES, repo: ROOT, at: new Date().toISOString() }
+/** ★★ O85 的核心读数：判据根在不在工作树的祖先链上。 */
+const ANCESTORS = ancestorsOf(DIR)
+const JUDGE_ROOT_IN_ANCESTORS = ANCESTORS.includes(path.resolve(ROOT))
+const DIR_INSIDE_JUDGE_ROOT = isInside(ROOT, DIR)
+
+const result = { name: name ?? path.basename(DIR), dir: DIR, root: ROOTDIR, excludes: EXCLUDES, repo: ROOT, at: new Date().toISOString() }
 say(`${NAME} —— 起隔离工作树（不含判据）`)
 say(`  仓库      : ${ROOT}`)
+say(`  建树根    : ${ROOTDIR}${rootArg ? '' : '   （缺省：判据根内的 out/_wt/）'}`)
 say(`  目标目录  : ${DIR}`)
 say(`  排除      : ${EXCLUDES.map((e) => e + '/').join(' , ')}`)
+if (DIR_INSIDE_JUDGE_ROOT) {
+  say('')
+  say('  ⚠ 建树根在**判据根内部** ⇒ R1 只挡住了"树里没有判据"，**没挡住**"从这棵树 `..` 上去')
+  say(`     就是 \`${ROOT}\`（scripts/ evals/ out/ 全在祖先链上）" ⇒ 判据在祖先链上。`)
+  say(`     ⇒ 真隔离请显式给 \`--root\`，指到判据根之外（例：--root D:/project_develop/_abA）。`)
+}
 say('')
 
 // ── [0] 前置：目录必须不存在；排除项在主仓里必须真的存在（否则"排除了不存在的东西"是假证据）──
@@ -389,6 +670,50 @@ const mustHave = ['package.json', 'packages/switchboard/src/index.ts']
 for (const rel of mustHave) check(fs.existsSync(path.join(DIR, rel)), `存在：${rel}`, '')
 const trackedWt = String(gitIn(DIR, ['ls-files']).stdout ?? '').split('\n').filter((l) => l.trim()).length
 
+// ── [9] ★★ O85 证据 F：**判据根不在工作树的祖先链上**（这是本轮的要害）──────
+// 上一轮的场地是 `<判据根>/out/_wt/<名字>` ⇒ 从工作树 `cd ../..` 就回到判据根 ⇒
+// scripts/ evals/ out/（含**两臂的记忆库**与全部历史判据产物）全在祖先链上 ⇒
+// ① 判据泄漏 ② 自变量泄漏（A 能读 B 的记忆）。本步把"祖先链"变成**可打印、可断言的读数**。
+say('')
+say('[9] O85 证据 F：工作树的完整祖先链（判据根必须不在其中）')
+say(`    祖先链（自下而上，共 ${ANCESTORS.length} 级）：`)
+say(`      工作树  ${DIR}`)
+for (const a of ANCESTORS) {
+  const face = judgeFaceIn(a)
+  say(`        ↑     ${a}${face.length ? `   ⚠ 该目录下有判据面目录名：${face.join(' / ')}` : ''}`)
+}
+check(!JUDGE_ROOT_IN_ANCESTORS, `判据根**不在**祖先链上（不含 ${ROOT}）`, JUDGE_ROOT_IN_ANCESTORS ? `**在！**祖先链里有 ${ROOT} ⇒ 判据在 agent 够得到的地方` : `${ANCESTORS.length} 级祖先，一个都不是判据根`)
+const faceHits = ANCESTORS.map((a) => ({ dir: a, names: judgeFaceIn(a) })).filter((x) => x.names.length)
+if (DIR_INSIDE_JUDGE_ROOT) {
+  say(`    ⚠ 目标目录在判据根**内部** ⇒ 判据在祖先链上（这是缺省布局的已知代价；用 --root 移出去）`)
+} else if (faceHits.length) {
+  // ★ 诚实：这不是"破了"，因为**同盘符下任何位置都能用 `..`+名字回到判据根**（`..` 是无界的）。
+  //   这条只说明"从工作树用 `..` 加一个目录名就能看到判据根的**名字**"⇒ 本布置不是沙箱。
+  say(`    ⚠ 诚实提示（**不是**失败）：祖先链上有目录含判据面目录名 ——`)
+  for (const h of faceHits) say(`        ${h.dir} → ${h.names.join(' / ')}`)
+  say(`      ⇒ 被测 agent 只要知道名字，用 \`..\` 就能回到判据根 ⇒ **本布置不构成沙箱**（见报告"残余风险"）。`)
+} else {
+  say(`    ✓ 祖先链上没有任何一级目录含判据面目录名（dsh-brain / scripts / evals / out）`)
+}
+// ★ .git 指针：`git worktree` 必在树里留一个文本文件 `.git`，内容是判据根的**绝对路径**。
+//   它不是"判据文件"，但它**指出了判据根在哪** ⇒ 必须如实打印，不许当成没发生。
+// ★★ 比之前先**统一到同一套斜杠**再比 —— 否则 `D:\…` 与 `D:/…` 一比就恒为"未指向"，
+//    这条自检会**静默变瞎**（实测踩过：arm-A 明明指向判据根，却打印"未指向判据根"）。
+const dotGit = path.join(DIR, '.git')
+const slash = (s) => String(s).replace(/\\/g, '/')
+if (fs.existsSync(dotGit) && fs.statSync(dotGit).isFile()) {
+  const txt = fs.readFileSync(dotGit, 'utf8').trim()
+  const pointsIntoJudge = slash(txt).includes(slash(ROOT))
+  say(`    ${pointsIntoJudge ? '⚠' : '✓'} .git 指针（git worktree 内建）：${txt}`)
+  say(`      ${pointsIntoJudge ? '★ 它**指向判据根内部**（.git/worktrees/…）⇒ 被测 agent 读这一个文件就知道判据根在哪（残余风险，见报告）' : '未指向判据根'}`)
+}
+
+// ── [10] ★★ O86 证据 G：**两臂互不可见（含长回旋）** ─────────────────────────
+// ★ 这一步被抽成 `reportPeerCheck()`：正常建树流程里跑一次；
+//   `--peer-only` 模式下**双向各跑一次**（A→B 与 B→A）—— 见文件头 O86 一节。
+let peerVerdict = null
+if (peerArg && !PEER_ONLY) peerVerdict = reportPeerCheck(DIR, peerArg, '[10] ★★ O86 证据 G')
+
 // ── 汇总 ──────────────────────────────────────────────────────────────────
 const ok = problems.length === 0
 result.ok = ok
@@ -401,11 +726,33 @@ result.checks = {
   build: { lib: built.lib, skipped: built.skipped, why: built.why },
   eol: { files: eolRows.length, wCrlf: crlfRows.map((l) => l.trim().split(/\s+/).pop()) },
 }
+result.ancestors = ANCESTORS
+result.judgeRootInAncestors = JUDGE_ROOT_IN_ANCESTORS
+result.dirInsideJudgeRoot = DIR_INSIDE_JUDGE_ROOT
+result.judgeFaceInAncestors = faceHits
+result.peer = peerVerdict
+  ? {
+      root: peerVerdict.peer,
+      exists: peerVerdict.peerExists,
+      volWt: peerVerdict.volWt,
+      volPeer: peerVerdict.volPeer,
+      volumeDiffers: peerVerdict.volumeDiffers,
+      relFromWt: peerVerdict.relRaw,
+      relIsAbsolute: peerVerdict.relIsAbsolute,
+      peerInAncestors: peerVerdict.peerInAncestors,
+      probes: peerVerdict.probes,
+      reachable: peerVerdict.reachable,
+      ok: peerVerdict.ok,
+      ancestorsWt: peerVerdict.ancestorsWt,
+      ancestorsPeer: peerVerdict.ancestorsPeer,
+    }
+  : null
+result.dotGitPointer = fs.existsSync(dotGit) && fs.statSync(dotGit).isFile() ? fs.readFileSync(dotGit, 'utf8').trim() : null
 result.nodeModules = fs.existsSync(path.join(DIR, 'node_modules'))
 result.built = fs.existsSync(built.lib)
 say('')
 say('─'.repeat(78))
-say(`结论：${ok ? '✓ 工作树建好（已构建），且全部证据为真（判据不在树里）' : `✗ 有 ${problems.length} 条证据不成立`}`)
+say(`结论：${ok ? `✓ 工作树建好（已构建），且全部证据为真（判据不在树里${result.judgeRootInAncestors ? '' : '、也不在祖先链上'}${peerVerdict ? '、两臂互不可见（含长回旋）' : ''}）` : `✗ 有 ${problems.length} 条证据不成立`}`)
 if (!ok) for (const p of problems) say(`  · ${p}`)
 say('')
 say(`工作树：${DIR}`)
@@ -417,6 +764,12 @@ say(`    node scripts/check-all.mjs --repo "${DIR}"`)
 say(`    node scripts/memory-judge-poison-check.mjs --wt "${DIR}"`)
 say(`  （也可以只用环境变量：DSH_EVAL_REPO="${DIR}"）`)
 say(`  工作树里 git 跟踪文件 ${trackedWt} 个；node_modules：${result.nodeModules ? '已接（junction → 判据根）' : '**没接上**（构建/判据可能跑不动）'}`)
+say(`  O85 隔离读数：判据根在祖先链上 = ${result.judgeRootInAncestors ? '**是**（判据在 agent 够得到的地方）' : '否'}；` +
+  `工作树在判据根内部 = ${result.dirInsideJudgeRoot ? '**是**' : '否'}（祖先链 ${result.ancestors.length} 级）`)
+if (peerVerdict) {
+  say(`  O86 两臂读数：卷 ${peerVerdict.volWt} vs ${peerVerdict.volPeer}（${peerVerdict.volumeDiffers ? '不同卷' : '**同卷**'}）；` +
+    `另一臂在祖先链上 = ${peerVerdict.peerInAncestors ? '**是**' : '否'}；长回旋相对路径可达 = ${peerVerdict.reachable.length}/${peerVerdict.probes}`)
+}
 say('')
 
 if (jsonOut) {

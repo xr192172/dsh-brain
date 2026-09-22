@@ -23,8 +23,65 @@
  *   · ★ 两个 cwd 的**路径长度刻意取相同**（mem-arm-A / mem-arm-B），
  *     免得 cwd 长度差异泄进 `system`（sandbox policy 里带 workspace 绝对路径）。
  *
+ * ## ★★ O85（2026-09-22）：`--root` —— 把 wt 与 store 一起放到判据根**之外**
+ *
+ * **上一轮的场地错在哪**（两条泄漏都在这一个地方）：
+ *   · 默认值是 `<判据根>/out/mem-store-<臂>` 与 `<判据根>/out/mem-arm-<臂>`
+ *     ⇒ ① 载体目录在判据根内部（`..` 两层回去就是 `dsh-brain/`）；
+ *   · ★★ 更坏的是：**两臂的 store 与产物都在同一个 `out/` 下**
+ *     ⇒ **A 臂的相对路径直接到得了 B 臂的记忆库**（`../mem-store-B/knowledge_base.json`）
+ *     ⇒ **A/B 就不再是两臂了**（自变量泄漏）。
+ *
+ * **新口径**：每臂一个**独立的实验根**，落在判据根之外，且两臂**不共享**实验根：
+ *   ```
+ *   D:/project_develop/_abA/{wt,store}      ← A 臂
+ *   D:/project_develop/_abB/{wt,store}      ← B 臂（与 A 的祖先链只共到 D:/project_develop）
+ *   node scripts/mem-arm.mjs --name A --root D:/project_develop/_abA --expect present
+ *   ```
+ *   ⇒ `--root <R>` 的语义：`store = <R>/store`、`cwd = <R>/wt`（`wt` 必须是
+ *   `scripts/eval-wt-new.mjs --root <R> --name wt` 建出来的**工作树**，否则拒绝跑）。
+ *   · `--store` / `--cwd` 显式给出时**优先于** `--root`（逐字保留旧用法，不弱化任何东西）；
+ *   · 证据文件默认仍写 `out/w29-arm-<name>.json`；给了 `--root` 且没给 `--evidence` 时
+ *     改写 `<root>/evidence/w29-arm-<name>.json`（**臂的产物留在臂的根下**）。
+ * ★★ **这不是沙箱**：被测 agent 有 `pwsh` ⇒ 可以 `cd` 到任何地方、可以 `ls ..`、
+ *   可以走绝对路径。本布置只堵三条：① cwd 子树 ② 祖先链 ③ 两臂互见（朴素相对路径）。
+ *   残余风险见 `out/w31-o85-isolation.md`。
+ *
+ * ## ★★ O86（2026-09-22）：上面那条 O85 的场地**仍然漏了嘴** —— 两臂必须**分处不同卷**
+ *
+ * **实测（O85 的场地，两臂同卷且互为兄弟）**：
+ *   ```
+ *   D:/project_develop/_abA/{wt,store}      ← A 臂
+ *   D:/project_develop/_abB/{wt,store}      ← B 臂
+ *   ```
+ *   `D:/project_develop/_abA/wt/../../_abB/store/knowledge_base.json` **真的存在**
+ *   ⇒ **A 臂用一条相对路径就读到了 B 臂的记忆库** ⇒ 自变量泄漏 ⇒ **A/B 不再是两臂**。
+ *   O85 把它记成"长回旋可达"的**残余**，但那不是残余，那是**判据本身**。
+ *
+ * ★ **为什么"同卷换个非兄弟根"救不了**：`..` 在**同一个卷内是无界的**。
+ *   把 B 挪到 `D:/_abB`（不是兄弟了）只是把"上两级"变成"上三级"——**知道名字就照样到得了**。
+ *   ⇒ 唯一能把"**任意相对路径**"真正堵死的办法是**让两臂不在同一个卷**：
+ *     相对路径**永远跨不过卷根**（`D:\` ↔ `C:\`）。
+ *
+ * **本轮口径（跨卷；A 臂不动，B 臂挪到另一个卷）**：
+ *   ```
+ *   D:/project_develop/_abA/{wt,store}      ← A 臂（判据根所在卷 D:）
+ *   C:/_abB-experiment-root/{wt,store}      ← B 臂（另一个卷；两臂祖先链交集 = ∅）
+ *   node scripts/mem-arm.mjs --name B --root C:/_abB-experiment-root --peer D:/project_develop/_abA --expect absent
+ *   ```
+ *   · ★ **B 的目录名凑成 20 字符是有意的**：本文件下面那条"两臂 cwd 路径长度必须相同"的
+ *     约束要求 `C:/_abB-experiment-root/wt`（26）与 `D:/project_develop/_abA/wt`（26）**等长**。
+ *   · ★★ `--peer <另一臂的实验根>`：**跑会话之前**先机器判定"本臂能不能用相对路径够到对方"，
+ *     够得到就 **exit 2 拒跑**（fail-closed）—— 宁可不给结论，也不在一次已经泄漏的场地上跑会话。
+ *     判据与 `scripts/eval-wt-new.mjs --peer` 的 [10] 步同源（同一条口径、同一批实探）。
+ *   · ★★ **仍然不是沙箱**：A 臂在 D: 卷 ⇒ 长回旋相对路径照样回得到判据根与 `D:` 上的任何东西。
+ *     本文件只保证**臂间**不互见。残余风险见 `out/w32-o86-arms.md`。
+ *
  * ## 用法
  *   node scripts/mem-arm.mjs --name A --store <dir> --cwd <dir> [--expect present|absent] [--phrase <p>]
+ *   node scripts/mem-arm.mjs --name A --root D:/project_develop/_abA --expect present
+ *   ★ O86（跨卷两臂，别忘 --peer）：
+ *   node scripts/mem-arm.mjs --name B --root C:/_abB-experiment-root --peer D:/project_develop/_abA --expect absent
  *   例：
  *   node scripts/mem-arm.mjs --name treat --store out/mem-store-treat --cwd out/mem-arm-treat --expect present
  *   node scripts/mem-arm.mjs --name ctrl  --store out/mem-store-ctrl  --cwd out/mem-arm-ctrl  --expect absent
@@ -49,11 +106,40 @@ const argOf = (k) => { const i = argv.indexOf(k); return i < 0 ? null : (argv[i 
 const has = (k) => argv.includes(k)
 
 const NAME = argOf('--name') ?? 'arm'
-const STORE = path.resolve(REPO, argOf('--store') ?? `out/mem-store-${NAME}`)
-const CWD = path.resolve(REPO, argOf('--cwd') ?? `out/mem-arm-${NAME}`)
+/** ★ O85：实验根。给了它 ⇒ `store=<root>/store`、`cwd=<root>/wt`（两臂各一个，互不共享）。 */
+const ROOT_ARG = argOf('--root')
+const ROOT = ROOT_ARG ? path.resolve(ROOT_ARG) : null
+if (ROOT_ARG && !path.isAbsolute(ROOT_ARG)) {
+  console.log(`[stop] --root 必须是绝对路径（用 D:/… 而不是 /d/…）：${ROOT_ARG}`)
+  process.exit(2)
+}
+/** ★★ O86：另一臂的实验根。给了它 ⇒ 起会话**之前**先判定"本臂够不到对方"（够得到就 exit 2）。 */
+const PEER_ARG = argOf('--peer')
+if (PEER_ARG && !path.isAbsolute(PEER_ARG)) {
+  console.log(`[stop] --peer 必须是绝对路径（用 D:/… 而不是 /d/…）：${PEER_ARG}`)
+  process.exit(2)
+}
+/** `--store` ＞ `--root`/store ＞ 旧缺省 `out/mem-store-<name>`（**旧缺省逐字不变**）。 */
+const STORE = argOf('--store')
+  ? path.resolve(argOf('--store'))
+  : ROOT
+    ? path.join(ROOT, 'store')
+    : path.resolve(REPO, `out/mem-store-${NAME}`)
+/** `--cwd` ＞ `--root`/wt ＞ 旧缺省 `out/mem-arm-<name>`（**旧缺省逐字不变**）。 */
+const CWD = argOf('--cwd')
+  ? path.resolve(argOf('--cwd'))
+  : ROOT
+    ? path.join(ROOT, 'wt')
+    : path.resolve(REPO, `out/mem-arm-${NAME}`)
 const PHRASE = argOf('--phrase') ?? 'ZXQ-MEM-PROBE-7f3a91-DO-NOT-LEAK'
 const EXPECT = argOf('--expect') ?? null // present | absent | null(只报)
 const TASK = argOf('--task') ?? '只回一个字：好'
+/** ★ O85：证据落点。给了 `--root` 且没给 `--evidence` ⇒ 留在**臂的根下**。 */
+const EVIDENCE = argOf('--evidence')
+  ? path.resolve(argOf('--evidence'))
+  : ROOT
+    ? path.join(ROOT, 'evidence', `w29-arm-${NAME}.json`)
+    : path.join(REPO, 'out', `w29-arm-${NAME}.json`)
 
 /* ── 载体模板（唯一的"策略"处，集中在这里，便于审阅与替换）────────────
  * 两臂用**逐字相同**的模板，只有「记忆条目块」不同 ⇒ 差异只有自变量本身。 */
@@ -100,9 +186,100 @@ function readEvents(file) {
 }
 
 /* ── ① 渲染 + ② 落载体 ─────────────────────────────────────── */
+/** ★ O85：祖先链（自下而上到盘符根）。纯只读。 */
+function ancestorsOf(p) {
+  const out = []
+  let cur = path.resolve(p)
+  for (;;) {
+    const parent = path.dirname(cur)
+    if (parent === cur) return out
+    out.push(parent)
+    cur = parent
+  }
+}
+const isInside = (anc, p) => {
+  const rel = path.relative(path.resolve(anc), path.resolve(p)).replace(/\\/g, '/')
+  return rel === '' || (!rel.startsWith('../') && !path.isAbsolute(rel))
+}
+const ANC = ancestorsOf(CWD)
+const JUDGE_ROOT_IN_ANCESTORS = ANC.includes(path.resolve(REPO))
+const INSIDE_JUDGE_ROOT = isInside(REPO, CWD)
+
 console.log(`===== 臂 ${NAME} =====`)
+console.log(`[root  ] ${ROOT ?? `（未给 --root ⇒ 缺省：${path.join(REPO, 'out')} —— ★ 两臂的 store/产物会同处判据根的 out/ 下）`}`)
 console.log(`[store ] ${STORE}`)
 console.log(`[cwd   ] ${CWD}`)
+console.log(`[evidence] ${EVIDENCE}`)
+console.log(`[isolation] 判据根在 cwd 祖先链上 = ${JUDGE_ROOT_IN_ANCESTORS ? '**是**' : '否'}；cwd 在判据根内部 = ${INSIDE_JUDGE_ROOT ? '**是**' : '否'}`)
+console.log(`[ancestors] ${ANC.join('  <  ')}`)
+if (JUDGE_ROOT_IN_ANCESTORS || INSIDE_JUDGE_ROOT) {
+  console.log(`  ⚠ 这条臂的 cwd 在判据根内/其祖先链上 ⇒ 判据（scripts/ evals/ out/，且 out/ 里有**另一臂**的 store）`)
+  console.log(`    对被测 agent 随手可及 ⇒ R1 未成立。要真隔离：--root D:/project_develop/_ab<臂名>`)
+}
+if (ROOT) {
+  console.log(`[root  ] ★ 实验根已在判据根之外；两臂用**各自的根**（互不共享子目录）⇒ 自变量不互见`)
+}
+
+/* ── ★ O85 守卫：给了 --root ⇒ cwd 必须是**已建好的工作树**，不许在这里凭空造目录 ──
+ * 为什么：`--root` 的语义是"这条臂的场地已在那个根下建好了"（wt = 判据够不到的工作树）。
+ * 若 cwd 不存在就 mkdir，会造出一个**没有 git、没有源码**的空壳并照常注入 ⇒ 读数没意义。
+ * ⇒ 拒绝跑，并把建树的命令原样打出来（宁可不给结论，也不给一个用错场地的结论）。 */
+if (ROOT && !argOf('--cwd')) {
+  if (!fs.existsSync(CWD)) {
+    console.log(`[stop] ${CWD} 不存在 ⇒ 先建工作树：`)
+    console.log(`       node scripts/eval-wt-new.mjs --root ${ROOT} --name wt`)
+    process.exit(2)
+  }
+  if (!fs.existsSync(path.join(CWD, '.git'))) {
+    console.log(`[stop] ${CWD} 不是 git 工作树（缺 .git）⇒ 拒绝把注入载体写进一个非工作树的目录`)
+    console.log(`       node scripts/eval-wt-new.mjs --root ${ROOT} --name wt`)
+    process.exit(2)
+  }
+}
+
+/* ── ★★ O86 守卫：给了 `--peer` ⇒ **在起会话之前**判定"本臂够不到另一臂"，够得到就拒跑 ──
+ * 为什么放在这里（而不是只打印一行提醒）：这是**场地判据**，不是礼仪。
+ *   一次已经泄漏的场地里跑出来的读数**没有解释价值**（A 能看到 B 的记忆 ⇒ 自变量不再受控），
+ *   而会话一旦发起就已经产生了"这条臂跑过记忆"的副作用。
+ *   ⇒ fail-closed：**宁可不给结论，也不给一个用错场地的结论**（与上面 `--root` 守卫同一纪律）。
+ * 判据与 `scripts/eval-wt-new.mjs` 的 `[10]` 步**同源**（该文件里有完整的三条依据说明）：
+ *   ① 卷根必须不同（相对路径跨不过卷根）② 对方不在祖先链上 ③ 长回旋候选全部 ENOENT。
+ *   ★ 这条判据用的是**同一份口径**，不是"另一套平行实现"。
+ * 想明知故犯地跑：`--allow-peer-visible`（只在复现实验里用，正常跑别给）。 */
+if (PEER_ARG) {
+  const peer = path.resolve(PEER_ARG)
+  const volumeOf = (p) => path.parse(path.resolve(p)).root.toLowerCase()
+  const volCwd = volumeOf(CWD)
+  const volPeer = volumeOf(peer)
+  const volumeDiffers = volCwd !== volPeer
+  const relRaw = path.relative(path.resolve(CWD), peer)
+  const peerInAncestors = ancestorsOf(CWD).map((a) => a.toLowerCase()).includes(peer.toLowerCase())
+  const peerBase = path.basename(peer)
+  const probes = []
+  for (let k = 1; k <= 5; k++) {
+    for (const sub of ['', 'store', 'store/knowledge_base.json', 'wt']) {
+      const rel = `${'../'.repeat(k)}${peerBase}${sub ? '/' + sub : ''}`
+      probes.push({ rel, exists: fs.existsSync(path.resolve(CWD, rel)) })
+    }
+  }
+  const reachable = probes.filter((p) => p.exists)
+  const peerExists = fs.existsSync(peer)
+  const ok = peerExists && volumeDiffers && !peerInAncestors && reachable.length === 0
+  console.log(`[peer  ] ${peer}   存在=${peerExists}`)
+  console.log(`[peer  ] 卷：本臂 ${volCwd}  vs  另一臂 ${volPeer}  ⇒ ${volumeDiffers ? '不同卷（相对路径跨不过去）' : '**同卷**（`..` 无界 ⇒ 长回旋可达）'}`)
+  console.log(`[peer  ] path.relative(本臂 cwd → 另一臂) = ${relRaw.replace(/\\/g, '/')}${path.isAbsolute(relRaw) ? '   ★ 回落成绝对路径 = 相对路径表达不出这条路' : '   ★ 是相对路径 ⇒ 可达'}`)
+  console.log(`[peer  ] 另一臂在本臂祖先链上？ ${peerInAncestors ? '**是**' : '否'}；长回旋相对路径实探：可达 ${reachable.length}/${probes.length}${reachable.length ? `（${reachable.map((p) => p.rel).join(' , ')}）` : ''}`)
+  if (!ok && !has('--allow-peer-visible')) {
+    console.log('')
+    console.log(`[stop] ★★ O86：本臂**够得到**另一臂 ⇒ 这不是两臂，自变量泄漏 ⇒ **拒跑**（不起会话、不写载体）`)
+    console.log(`       要真隔离：两臂必须落在**不同的卷**（相对路径永远跨不过卷根）。例：`)
+    console.log(`         node scripts/eval-wt-new.mjs --root C:/_abB-experiment-root --name wt --peer D:/project_develop/_abA`)
+    console.log(`         node scripts/mem-arm.mjs --name B --root C:/_abB-experiment-root --peer D:/project_develop/_abA`)
+    console.log(`       明知故犯（只在复现实验里用）：--allow-peer-visible`)
+    process.exit(2)
+  }
+  console.log(`[peer  ] ⇒ ${ok ? '★ 两臂互不可见（含长回旋）✓' : '▲ 已用 --allow-peer-visible 放行（读数**不可解释**）'}`)
+}
 
 if (!fs.existsSync(MEMPROMPT)) {
   console.log(`[stop] 找不到 ${MEMPROMPT}（先在 ai-base/agent-shell 跑 go build -o ${MEMPROMPT} ./cmd/memprompt）`)
@@ -234,6 +411,11 @@ const pass = EXPECT ? verdict === EXPECT : null
 const evidence = {
   arm: NAME,
   at: new Date().toISOString(),
+  root: ROOT,
+  cwd: CWD,
+  ancestors: ANC,
+  judgeRootInAncestors: JUDGE_ROOT_IN_ANCESTORS,
+  insideJudgeRoot: INSIDE_JUDGE_ROOT,
   store: STORE,
   storeCount: rendered.count,
   storeItems: rendered.items,
@@ -262,7 +444,8 @@ const evidence = {
   expect: EXPECT,
   pass,
 }
-const outFile = path.join(REPO, 'out', `w29-arm-${NAME}.json`)
+const outFile = EVIDENCE
+fs.mkdirSync(path.dirname(outFile), { recursive: true })
 fs.writeFileSync(outFile, JSON.stringify(evidence, null, 2) + '\n', 'utf8')
 console.log(`\n=== 判定：短语 ${verdict}（期望 ${EXPECT ?? '(未指定)'}）⇒ ${pass === null ? 'N/A' : pass ? 'PASS' : 'FAIL'} ===`)
 console.log(`SID=${sid}`)

@@ -2756,3 +2756,79 @@ CR 0 → 523     而且 git status --porcelain 仍然为空（静默）
 |---|---|---|
 | **O84** | **把 `AGENTS.md` 适配器升级为"一等公民记忆注入面"**（当前是适配器；升级需换代重启） | 注入的稳定性 |
 | **O85** | ★★ **重布 R1 隔离**（现在记忆与判据同处 `out/`）⇒ **真跑 A/B 前必须做** | **A/B 的真跑** |
+
+---
+
+## 49. ✅ O85 + O86 达成：**场地干净了**（跨卷双臂 + 清场）—— 含我一次抓漏与两次被纠正
+
+### 49.1 ★★ 我抓到的真泄漏（把"残余"升格为致命）
+
+O85 第一版把实验根放成了**兄弟**：`D:/project_develop/_abA` 与 `D:/project_develop/_abB`。
+它报的"残余"里有一句"**长回旋 `../../_abB/store` 实测可达**" —— 我**当场跑了一遍**：
+
+```
+$ ls D:/project_develop/_abA/wt/../../_abB/store
+knowledge_base.json          ← ★ 路径存在！
+```
+⇒ ★★ **A 臂可以直接读到 B 臂的记忆库 ⇒ 自变量泄漏 ⇒ A/B 不再是两臂。**
+⇒ 我把它从"残余风险"**升格为致命泄漏** ⇒ 派 O86。
+
+### 49.2 ★★★ O86 的核心决断（**它纠正我，而且比我对**）
+
+> **"`..` 在【同一个卷内】无界。把 B 挪到 `D:/_abB`（不是兄弟了）只是把'上两级'变成'上三级' —— 知道名字照样到得了。
+> O85 把这条记成'残余风险'，**它不是残余，它就是判据本身**。"**
+
+**⇒ 必须跨卷。** 最终布局：
+```
+A: D:/project_develop/_abA/{wt,store}    ← 判据根所在卷 D:
+B: C:/_abB-experiment-root/{wt,store}    ← 另一个卷；★ 两臂祖先链交集 = ∅
+```
+- ★ **动手前先验**跨卷 `node_modules` junction 可用（readdir **222 一致**），B 在新卷上照常构建成功 ⇒ **跨卷无代价**；
+- ★ **B 的目录名凑成 20 字符是【倒推】的**：`mem-arm.mjs` 有既有约束"**两臂 cwd 必须等长**"（否则影响 face 指纹/读数可比性），
+  `D:/project_develop/_abA/wt` = **26** ⇒ `C:/_abB-experiment-root/wt` = **26** ✓
+
+**三条机器依据（无启发式）**：
+1. `path.relative(A/wt → C:/_abB-experiment-root)` **回落成绝对路径** ⇒ **相对路径表达不出这条路**；
+2. 两条**祖先链交集 = ∅**；
+3. **双向各 25 条**长回旋候选**实探** ⇒ **0/25**。
+
+★ **它纠正我的第二处**：搬走去向**没用**我建议的 `D:/project_develop/_old-arms-…` —— 因为
+**那正是 arm-A 的兄弟目录 ⇒ 会复活 R6 形态** ⇒ 改用 **`D:/_dsh-archive-2026-09-22/`** ✓
+
+### 49.3 清场（**移动不删，全程无 `rm -rf`**）
+
+- 四棵 `out/_wt/*` **全是真 worktree**（不是 `cp -r`），且 **`w24-A` 带未提交改动** ⇒
+  `git worktree remove --force` 会**销毁**它们 ⇒ 改走 **同卷 rename 搬走 + `git worktree prune`**；
+- 先**非递归**摘 `node_modules` junction ⇒ 主仓 `node_modules` **222 → 222**（未受损）。
+
+### 49.4 ★★ 我的复核 + **我补清了 R2**
+
+| 核验 | 结果 |
+|---|---|
+| 两臂回旋（两条） | ✅ `_abA/wt/../../../_abB-experiment-root/store` 与 `_abA/wt/../../_abB/store` **都 No such file or directory** |
+| 祖先链 | ✅ 到 `project_develop` 为止；B 臂在**另一个卷** |
+| 旧臂树 | ✅ `out/_wt/*` **已空** |
+| ★★ **R2（它按分寸没动）** | ❌ 我实测：`D:/project_develop/_wt/{cli0005-A,cli0005-B}` **仍在**、**含判据副本**（`evals/pilot/tasks.jsonl`、`scripts/test-injected-message-shape.mjs`），且 `_abA/wt/../../_wt/` **路径存在** ⇒ **从 arm-A 2 级 `..` 可达** |
+| **我补的处理** | ✅ **搬走 `D:/project_develop/_wt` → 归档 + `worktree prune`** ⇒ 之后：`_abA/wt/../../_wt/` ⇒ **No such file or directory**；`worktree list` ⇒ **只剩 3 个**（主仓 + 两臂），**`cli0005-*` 消失** |
+
+★ **我又踩了铁律 #7**：`git -C /d/...` **不认 MSYS 路径** ⇒ `prune`/`list` 报 `fatal: not a git repository`
+⇒ ★ **搬迁成功了、但 prune 没跑**；换 `D:/...` 重来才成功
+⇒ **该报错极易被误判成"目录不存在"**（铁律里就是这么写的 —— 我今天第二次撞它）。
+
+### 49.5 现有质量门（未回退）
+
+- `poison-check`：正常态 `OK` → `--poison` **`BROKEN` 6/6 点名** → **清理 `_judge_planted/`** → 复跑 `OK`（**场地复位**）；
+- `eval-signal-check --task cli-0001`：**三段全过**（干净绿 / seed 红 / 还原绿，sha 逐字节回改前）；
+- 判据 **8/8** 在两臂 wt 里**都不存在**；主仓 `status` 跑前/跑后**逐行一致**。
+
+### 49.6 ⚠️ 残余两条（它如实报）
+
+1. **R1：这不是沙箱** —— arm-A 在 D: 卷，`../../../project_develop/dsh-brain/scripts/…` **仍可达**；
+   且工作树的 `.git` 文件**明文写着判据根路径** ⇒ **要物理堵死需 3 个卷或真沙箱**（**O87**）；
+2. **R9**：`prune` 后归档的四棵树 `.git` **悬空**（**内容全在，git 关联没了**）—— 这是"保住内容"换来的代价。
+
+### 49.7 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O87** | **要"判据物理不可达"需 3 个卷或真沙箱**（现在的隔离是"抬高门槛"而非"物理隔离"） | R1 的强度上限 |
