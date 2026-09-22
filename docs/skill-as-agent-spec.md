@@ -2911,3 +2911,80 @@ $ grep -o '"kind":"[a-z-]*"' evals/pilot/tasks.jsonl | sort | uniq -c
 | **O89** | ★★ **阳性对照要重新设计**（"预置常驻"形态下 k=1 天然不同 ⇒ 对照失效） | 判据的可解释性 |
 | **O90** | ★ **`tasks.jsonl` 是 3 条 `regression-repair` + 2 条 `capability-task`** ⇒ 设计文档 §2.2 的"5 条同型"前提要修；**题型混在一条序列里**也会干扰读数 | 判据设计的**前提** |
 | **O91** | ★ **face 断言需要"venue 归一化"**（把 cwd 归一），否则跨卷隔离会**因隔离本身而假红** | A1 的正确性 |
+
+---
+
+## 51. ★★★★★ 做 O88 之前"先查三处"⇒ **O88 的性质被改写，并推翻我自己写的一条结论**
+
+> 用户指示："要（做 O88），**先看上游和开源产物**" —— 正是**铁律 #17**（做功能组模块前必须查三处；
+> 红线是"**同一件事开源已经做出了更好的版本，而我还在自己写**"）。★ **这次又抓到了我。**
+
+### 51.1 ★★★ 发现 1：**本机已经装着那个沙箱**（O88 不该自造）
+
+**默认就挂着**（`node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:169-204`，**我复核**）：
+```
+- id: sandbox          name: '@deepseek-ai/dsh-sandbox-local'
+- id: sandbox-policy   name: '@deepseek-ai/dsh-sandbox-policy'
+- id: bash-sandbox     name: '@deepseek-ai/dsh-bash-sandbox'
+- id: pwsh-sandbox     name: '@deepseek-ai/dsh-pwsh-sandbox'
+   … 三档：sandbox: read-only / workspace-write / danger-full-access
+```
+win32 后端 = **`@deepseek-ai/dsh-sandbox-windows-acl`**（**包确实存在**，连同 `dsh-sandbox` / `dsh-sandbox-local` / `dsh-sandbox-policy`）。
+其 `README` 逐字（**我复核**）：
+- `:5` "**Windows write-restriction sandbox backend**… mounted as the **`enforcement: 'partial'`** win32 rung"；
+- `:7` "the caller's token is duplicated into a **`WRITE_RESTRICTED`** token whose restricting SIDs carry separate workspace and private-temp capabilities…
+  **Windows grants a write only where BOTH the caller's normal access AND the restricting-SID intersection allow it**"；
+- `:9` ★★ "**it implements both confinement modes without the problems the rejected container options carry**"，并点名两个被否的选项：
+  **`mxc` 需要 Windows 11 24H2 + 为 arbitrary-path reads 批发写 host DACL**；
+  ★★ **"AppContainer cannot do arbitrary-path reads at all"**。
+
+### 51.2 ★★★ 发现 2：**§50.3 的"主动突破"是【覆盖缺口】，不是机制缺口** —— ⇒ **推翻我 §49.6 的结论**
+
+- 从 `out/ab-run/r1-leak-cli-0005-A-calls.txt` 看，改判据根用的是 **`safe_rename`**（**本仓 `packages/design-canvas-bridge/src/index.ts:451` 注册**，
+  `:557` 自述"**safe_rename 已注册（深度注入，kernelDir=…）**"）与 **`mcp__design-canvas__edit_code`** —— ★ **不是 `pwsh`、不是 `fs`**；
+- **`dsh-mcp-client` 整包检索 `sandbox|confine` 零命中** ⇒ ★ **MCP / 桥接工具这条旁路没被 seam 覆盖**；
+- ★★ **而且沙箱当时【确实挡住了写】**（留证，**我复核**）：
+  `out/ab-run/report.mjs:659` 逐字："| agent **写**判据根 | **成立（被挡住）** | `Error: [sandbox: file access denied under workspace-write mode]`；且主仓 `git status --porcelain` 全程 0 行"；
+  更详细的原文在 `_prev-4c08526b/outside-A-cli-0005-symbol-rename-design-canvas.json:338`：
+  ```
+  Error: [sandbox: file access denied under workspace-write mode]
+  [sandbox: escalation available — retry this exact operation once with sandbox_permissions (…)]
+  ```
+
+⇒ ★★★ **⇒ §49.6 我写的"R1：这不是沙箱"是【错的】。真相应为**：
+**沙箱存在、默认开、且实测挡住了写；漏的是"旁路工具（`safe_rename` / MCP 桥）没走 seam"。**
+⇒ **O88 的性质从"自造沙箱"变成"① 确认档位与 workspace 边界；② 补旁路 seam；③ 决定'读'的边界"。**
+
+### 51.3 ★★ 发现 3：**我点名的两个本地目录都不能复用**（纠正我的怀疑方向）
+
+| 我原本怀疑的 | 真相 |
+|---|---|
+| `ai-base/agent-shell-sandbox/` | 它的 "sandbox" 是**一种【脑模式】**（`git worktree add … brain-sandbox`），**工具零路径限制**（`file.go:39/93` **绝对路径直通**）⇒ **不是隔离机制** |
+| `internal/tools/sandbox/job_object_windows.go:42-47` | 只有 `KILL_ON_JOB_CLOSE` / `ACTIVE_PROCESS` / `PROCESS_MEMORY` ⇒ ★ **不含任何文件系统能力** |
+| `internal/permission/`（`policy.go:49-60`） | **字符串匹配 + 评分** ⇒ **策略级**，不是物理级 |
+
+★ **arXiv:2607.05743 给的数字正是这类"策略级"做法的天花板：真实 denylist 失效率 69%–98%。**
+
+### 51.4 arXiv 已经给这件事命名了（**二手，标明**）
+
+- **BenchJack**（2605.12673）：**八类缺陷、219 个**；★ **9/10 基准"近满分且一题未解"**；
+- **RewardHackingAgents**（2603.11337）：★ **"单机制只能挡一个向量"**；★★ **锁定判据的代价是 `+25~31%` 中位运行时**（**代价被量化了**）；
+- **VeRO 确实是先例**（`guide.md:730-734 / 500 / 741-743`），**但实现是 `chown/chmod` + 容器（Unix-only）**
+  ⇒ ★ **可移植的是【架构分界】，不是实现。**
+
+### 51.5 ⚠️ 硬边界（必须如实记）
+
+**这套机制【只限写】**（`README.md:77` 原文）⇒ **判据根仍然【可读】**；
+要"**读也不可达**"只能上 **AppContainer**（⚠️ DSH 自陈 **"cannot do arbitrary-path reads at all"** ⇒ 它**连正常读都做不到**，所以被否）
+或 **WHP microVM** ⇒ ★ **所以"判据可读"是现行设计的【固有属性】，不是疏漏** —— 这是一个**有意的取舍**。
+
+⇒ **⇒ 推论**：**"判据不可读"这一条 R1 的强形式，在当前技术选型下做不到**（除非上 microVM）。
+可行的强形式是：**"判据不可【改】"（已有）+ "判据不可【枚举发现】"**（把判据根移出任何可达路径 —— 我们已做）+ **旁路工具补 seam**。
+
+### 51.6 新增未闭合（O88 拆成三条）
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O92** | ★★ **补旁路 seam**：让 `safe_rename` 等 **design-canvas-bridge 工具**与 **`mcp__design-canvas__*`** 也受沙箱约束（现在零命中） | **O88 的核心** |
+| **O93** | ★ **决定"读"的边界**：接受"只限写"（现状），还是上 WHP microVM 换"读也不可达" | 代价 vs 强度 |
+| **O94** | **确认实际生效的沙箱档位**（`read-only` / `workspace-write` / `danger-full-access` 里，跑 A/B 时到底是哪一档；`danger-full-access` 若被用到就白隔离） | 隔离的前提 |
