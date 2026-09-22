@@ -116,6 +116,38 @@
       "expect": { "visible": false }
     },
     {
+      "id": "invalidated-trigger-match-hidden",
+      "kind": "l3",
+      "role": "negative-control",
+      "why": "★ O52 补的向量：invalidated ∧ triggers 命中 taskHint ⇒ 必须不可见。契约原文的 invisibleStates 只列了 pending/archived，漏了这一态 ⇒ 严格按 invisibleStates 判的实现会把它判成「可见」（假绿）。这条把「四态都不可见」变成机器可判。",
+      "node": {
+        "id": "n-invalidated-trigger-match-hidden",
+        "type": "skill",
+        "status": "invalidated",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": false }
+    },
+    {
+      "id": "suspicious-trigger-match-hidden",
+      "kind": "l3",
+      "role": "negative-control",
+      "why": "★ O52 补的向量：suspicious ∧ triggers 命中 taskHint ⇒ 必须不可见。★ 注意与检索侧的区别：suspicious 在【检索路径】是「降权而不排除」（states.meaning），但本契约管的是【注入路径】，注入侧一律要求 active ⇒ 不可见。",
+      "node": {
+        "id": "n-suspicious-trigger-match-hidden",
+        "type": "skill",
+        "status": "suspicious",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": false }
+    },
+    {
       "id": "transition-pending-to-active-no-receipt",
       "kind": "transition",
       "role": "negative-control",

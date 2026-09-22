@@ -18,7 +18,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * 它存在的全部意义：**证明向量集有分辨力**
  *
- * `evals/gate/vectors.json` 里那 12 条如果对"参考实现"和"坏实现"给出一模一样的结果，
+ * `evals/gate/vectors.json` 里那 14 条如果对"参考实现"和"坏实现"给出一模一样的结果，
  * 那它就是一批**装饰向量**（"全绿也叫过"——本项目花了两天修的那类失败：保险自己失效）。
  * 拿本文件跑 runner（`scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs"`）
  * **必须有一批向量 FAIL**，尤其是 `l3-pending-trigger-match-hidden`。
@@ -36,9 +36,13 @@
  * 与现状的一处**刻意的不忠实**（如实记录，报告里也有）：
  *   Go 现状在 L3 之前还有一条更上层的 `if node.Status == "archived" { continue }`，
  *   所以现状真正漏出去的只有 `pending`。本文件的 L3 分支是**完全没有状态逻辑**，
- *   因此 `archived` 也会一起漏 ⇒ 除 `l3-pending-trigger-match-hidden` 之外，
- *   `l3-archived-trigger-match-hidden` 也会 FAIL。
- *   ★ 两个都 FAIL 更好用：它同时说明这批向量能分辨"漏了 pending"和"漏了不可见态"。
+ *   因此 `archived`、`invalidated`、`suspicious` 也会一起漏 ⇒ 除 `l3-pending-trigger-match-hidden`
+ *   之外，`l3-archived-trigger-match-hidden`、`invalidated-trigger-match-hidden`、
+ *   `suspicious-trigger-match-hidden` 也会 FAIL。
+ *   ★ 全都 FAIL 更好用：它同时说明这批向量能分辨"漏了 pending"和"漏了不可见态"（O52 补的两条也在其中）。
+ *
+ * ★ 本文件**只**坏 L3 状态判据这一处：状态写回约定（O51）与迁移的回执完整性规则（O53）
+ *   都**照原样继承**契约 ⇒ 两者不能靠"坏实现"来证，只能用门 3（反向自证）证。
  *
  * 退出码：与参考实现一致（0 = 有判决；2 = 用法/输入错）。
  */

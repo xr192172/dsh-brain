@@ -29,7 +29,8 @@
  *
  * --selftest 干什么：在**内存里**构造若干坏契约（L3 不要求 active、unenforced 缺 L2、
  *   回执缺 proofLevel、词汇表缺 pending、词表重复、迁移丢了 passed 要求、可见性未声明 L3、
- *   实现协议 stdout 形状坏），断言校验器**会拒绝**，并打印每份坏契约被**哪条规则**挡下。
+ *   实现协议 stdout 形状坏、★ 没声明状态写回约定(O51)、不可见集漏 invalidated/suspicious(O52)、
+ *   迁移没要求回执必填字段可读(O53)），断言校验器**会拒绝**，并打印每份坏契约被**哪条规则**挡下。
  *   ★ 同时跑一份**阳性对照**（未改动的真契约必须全过）——否则"全红"的校验器也能通过自检，
  *     那是"过度封锁"，与"假绿"同等有害。
  *
@@ -60,6 +61,12 @@ const RECEIPT_STATUSES = ['passed', 'failed', 'unknown']
 const TRANSITION_RESULT_FIELDS = ['ok', 'status', 'reason']
 /** 必须声明"缺读数 ⇒ unknown"这条不变量。 */
 const UNKNOWN_INVARIANT = 'missing-reading-is-unknown'
+/** ★ O52：states.values 里的这两个态也必须被明确声明为不可见。 */
+const REQUIRED_INVISIBLE_EXTRA = ['invalidated', 'suspicious']
+/** ★ O51：runner 读回状态用的字段名（写回结果里那个"状态"字段）。 */
+const STATE_READBACK_FIELD = 'status'
+/** ★ O53：过门时回执里至少要可读的那个必填字段。 */
+const REQUIRED_RECEIPT_FIELD_FOR_ADOPTION = 'proofLevel'
 
 // ── 校验器主体 ──────────────────────────────────────────────────────────────
 
@@ -212,6 +219,24 @@ function checkContract(c) {
     conflict.length ? `冲突：${conflict.map((r) => `${r.level}=${JSON.stringify(r.requiresStatus)}`).join(', ')}` : '无冲突',
   )
 
+  // ★ O52：不可见集必须与词汇表口径一致（漏 invalidated / suspicious ⇒ 假绿）
+  //   ★ 只认【枚举】形式：散文提到这两个词不算声明（散文不可断言，同 kind:"ref" 的教训）。
+  const declaredInvisible = (s) => invisible.includes(s)
+  const missingExtraInvisible = REQUIRED_INVISIBLE_EXTRA.filter((s) => !declaredInvisible(s))
+  const adoptedState = c?.states?.adoptedState
+  const maybeInvisible = Array.isArray(values) && typeof adoptedState === 'string'
+    ? values.filter((s) => s !== adoptedState)
+    : []
+  const undeclaredByVocab = maybeInvisible.filter((s) => !declaredInvisible(s))
+  add(
+    'visibility-invalidated-and-suspicious-invisible',
+    missingExtraInvisible.length === 0 && undeclaredByVocab.length === 0,
+    '★ O52：states.values 有 5 个状态，不可见集只列 pending / archived ⇒ 严格按 invisibleStates 判的实现会把 invalidated / suspicious 判成「可见」（假绿）。这两个态必须【枚举进 invisibleStates】（不可见集要与词汇表口径一致：凡 != adoptedState 的态都必须列出来）；★ 写成散文不算 —— 散文不可断言。',
+    missingExtraInvisible.length || undeclaredByVocab.length
+      ? `invisibleStates = ${JSON.stringify(invisible)}；未声明不可见的态：${JSON.stringify([...new Set([...missingExtraInvisible, ...undeclaredByVocab])])}`
+      : `不可见集（含 O52 补全）= ${invisible.join(', ')}（= states.values 减去 ${JSON.stringify(adoptedState)}）`,
+  )
+
   // ══ D. 状态迁移 ════════════════════════════════════════════════════════════
 
   const tRules = Array.isArray(c?.transitions?.rules) ? c.transitions.rules : []
@@ -226,6 +251,29 @@ function checkContract(c) {
       ? gated
         ? `pending → active 的 require = ${JSON.stringify(reqs)}`
         : `pending → active 的 require 不含 receipt.status=="passed"（现为 ${JSON.stringify(reqs)}）`
+      : '契约里没有 pending → active 规则',
+  )
+
+  // ★ O53：过门不只要 receipt.status=="passed"，回执必填字段（至少 proofLevel）必须【可读】
+  const requireReadsField = (r, field) => {
+    if (r?.path !== `receipt.${field}`) return false
+    if (r?.op === 'in' && Array.isArray(r?.value)) return r.value.length > 0 && r.value.every((v) => v !== null && v !== undefined)
+    if (r?.op === '!=' && r?.value === null) return true
+    if (r?.op === '==' && r?.value !== null && r?.value !== undefined) return true
+    return false
+  }
+  const readableReceipt =
+    reqs.some((r) => requireReadsField(r, REQUIRED_RECEIPT_FIELD_FOR_ADOPTION)) ||
+    (Array.isArray(pa?.requireFieldsComplete?.atLeast) &&
+      pa.requireFieldsComplete.atLeast.includes(REQUIRED_RECEIPT_FIELD_FOR_ADOPTION))
+  add(
+    'transition-pending-active-requires-readable-receipt',
+    readableReceipt,
+    '★ O53：向量 transition-pending-to-active-receipt-missing-prooflevel 要求「passed 但缺 proofLevel ⇒ ok:false」，而 transitions.rules 字面只写 receipt.status=="passed" ⇒ 这条更严的判据只活在实现里。必须写进契约：过门不仅要求 status==passed，回执的必填字段（至少 proofLevel）必须可读（缺失 / null / 不在取值集内一律拒绝）。',
+    pa
+      ? readableReceipt
+        ? `pending → active 已要求回执必填字段可读（至少 ${REQUIRED_RECEIPT_FIELD_FOR_ADOPTION}）；require = ${JSON.stringify(reqs)}`
+        : `pending → active 的 require 没有要求 receipt.${REQUIRED_RECEIPT_FIELD_FOR_ADOPTION} 可读（现为 ${JSON.stringify(reqs)}；requireFieldsComplete.atLeast = ${JSON.stringify(pa?.requireFieldsComplete?.atLeast)}）`
       : '契约里没有 pending → active 规则',
   )
 
@@ -265,6 +313,24 @@ function checkContract(c) {
     tOutOk,
     'transition 的 stdout 必须是 {"ok":bool,"status":string,"reason":string}，与 transitions.result.fields 逐字对齐（否则 runner 与实现两套形状）。',
     `transition.stdout = ${JSON.stringify(tOut)}`,
+  )
+
+  // ★ O51：状态"写回哪里 / 怎么读回"必须在契约里声明
+  const stDecl = c?.implementations?.state
+  const wb = stDecl?.writeback
+  const rb = stDecl?.readback
+  const wbMode = wb?.mode
+  const wbModeOk = typeof wbMode === 'string' && ['in-place', 'sidecar'].includes(wbMode)
+  const wbArgOk = typeof wb?.arg === 'string' && wb.arg.trim() !== ''
+  const rbFieldOk = rb?.field === STATE_READBACK_FIELD
+  const rbTargetOk = typeof rb?.file === 'string' && rb.file.trim() !== ''
+  add(
+    'impl-state-writeback-declared',
+    wbModeOk && wbArgOk && rbFieldOk && rbTargetOk,
+    '★ O51：向量的 expect.statusUnchanged 依赖「状态写回哪里、runner 怎么读回」。这只活在实现的私下约定里 ⇒ Go 侧接上时若不照做，该判据会【静默失真】（「读不到文件」与「状态未变」不可区分）。契约必须显式声明写回模式（二者择一写死）+ 读回字段/文件。',
+    wbModeOk && wbArgOk && rbFieldOk && rbTargetOk
+      ? `写回：mode=${JSON.stringify(wbMode)} arg=${JSON.stringify(wb.arg)}；读回：field=${JSON.stringify(rb.field)} file=${JSON.stringify(rb.file)}`
+      : `写回 mode=${JSON.stringify(wbMode)}（需 in-place|sidecar）／arg=${JSON.stringify(wb?.arg)}；读回 field=${JSON.stringify(rb?.field)}（需 "${STATE_READBACK_FIELD}"）／file=${JSON.stringify(rb?.file)}`,
   )
 
   return { checks }
@@ -374,6 +440,32 @@ const BAD_CASES = [
     expect: ['impl-visible-stdout'],
     mutate: (c) => {
       c.implementations.commands.visible.stdout = { message: 'string' }
+    },
+  },
+  {
+    name: '★ O51：契约没声明状态写回约定（runner 只能靠私下约定读回）',
+    why: '状态写到哪里 / 怎么读回没进契约 ⇒ statusUnchanged 判据会静默失真（读不到文件与"状态未变"不可区分）。',
+    expect: ['impl-state-writeback-declared'],
+    mutate: (c) => {
+      delete c.implementations.state
+    },
+  },
+  {
+    name: '★ O52：不可见集漏了 invalidated / suspicious',
+    why: '只列 pending/archived ⇒ 严格按 invisibleStates 判的实现会把这两态判成"可见"（假绿）。',
+    expect: ['visibility-invalidated-and-suspicious-invisible'],
+    mutate: (c) => {
+      c.visibility.invisibleStates = ['pending', 'archived']
+    },
+  },
+  {
+    name: '★ O53：迁移规则丢掉「回执必填字段（至少 proofLevel）必须可读」',
+    why: '退回原字面（只要求 receipt.status=="passed"）⇒ passed 但缺 proofLevel 的回执会被放行。',
+    expect: ['transition-pending-active-requires-readable-receipt'],
+    mutate: (c) => {
+      const r = c.transitions.rules.find((x) => x.from === 'pending' && x.to === 'active')
+      r.require = r.require.filter((q) => q.path !== 'receipt.proofLevel')
+      delete r.requireFieldsComplete
     },
   },
 ]

@@ -113,14 +113,26 @@
         "from": "pending",
         "to": "active",
         "require": [
-          { "path": "receipt.status", "op": "==", "value": "passed" }
+          { "path": "receipt.status", "op": "==", "value": "passed" },
+          {
+            "path": "receipt.proofLevel",
+            "op": "in",
+            "value": ["L0", "L1"],
+            "reasonTemplate": "回执没有可读的 proofLevel（实为 {actual}）⇒ 回执残缺 ⇒ 拒绝 pending → active（不变量 receipt-is-recorded-on-adoption；O45 §3 验收门第 5 条「过了门却读不到证到哪一级 = 没有回执位」）",
+            "note": "★ O53：把向量 transition-pending-to-active-receipt-missing-prooflevel 的更严判据写进契约 —— passed 但 proofLevel 缺失 / 为 null / 不在 [\"L0\",\"L1\"] 内 ⇒ 回执不可读 ⇒ 不得当 passed。"
+          }
         ],
+        "requireFieldsComplete": {
+          "source": "receipt.schema.required",
+          "atLeast": ["proofLevel"],
+          "why": "「回执必填字段齐」本身是过门条件的一部分：'齐' 的清单取自 receipt.schema.required（kind / status / proofLevel / unenforced），此处额外把「至少 proofLevel」显式写死为门的规则。"
+        },
         "onFail": {
           "ok": false,
           "keepStatus": true,
           "reasonTemplate": "receipt.status != \"passed\"（实为 {actual}）⇒ 拒绝 pending → active"
         },
-        "why": "★ 这就是「门」本身。没有这条，pending 永远出不去（技能全废）或随便什么都能出去（门不存在）。O45 §2 落点 (c)。"
+        "why": "★ 这就是「门」本身。没有这条，pending 永远出不去（技能全废）或随便什么都能出去（门不存在）。O45 §2 落点 (c)。★ O53 收紧：原字面只要求 receipt.status == \"passed\"，比向量「passed 但缺 proofLevel ⇒ ok:false」更松 ⇒ 现把「回执必填字段必须可读（至少 proofLevel）」并入门，使这条判据不再只活在实现里。"
       },
       {
         "id": "archived-reimport-returns-to-pending",
@@ -141,7 +153,9 @@
 
   "visibility": {
     "note": "注入可见性：一个条目是否可以被注入 prompt。两条路径都必须在契约里显式声明。",
-    "invisibleStates": ["pending", "archived"],
+    "invisibleStates": ["pending", "archived", "invalidated", "suspicious"],
+    "invisibleRule": "凡 status != adoptedState（= active）者一律不可注入；invisibleStates 就是它的【枚举形式】= states.values 减去 adoptedState。★ 判定的机器可读形式只有这个枚举 —— 本字段只是文字说明，不参与判定（与「散文引用 kind:\"ref\" 不得当作通过」同一条纪律：散文不可断言）。",
+    "invisibleWhy": "★ O52（补全）：原文只列 [\"pending\",\"archived\"]，而 states.values 有 5 个值 ⇒ 严格按 invisibleStates 判的实现会把 invalidated / suspicious 判成「可见」（假绿）。补全后「不可见集」与词汇表口径一致：任何非 active 态都进不来（两条路径都 requireStatus == \"active\"）。★ 与检索侧的区别：states.meaning 里 suspicious 是「检索侧降权而不排除」——那是【检索路径】的行为；本契约管的是【注入路径】，注入侧一律不可见（降权 ≠ 可注入）。",
     "rules": [
       {
         "level": "L0",
@@ -174,6 +188,29 @@
         "argv": ["<impl>", "transition", "--node", "<jsonfile>", "--to", "<status>", "[--receipt", "<jsonfile>]"],
         "stdout": { "ok": "bool", "status": "string", "reason": "string" },
         "why": "拒绝必须可解释：调用方拿 reason 才能知道被哪条规则挡下，而不是只有一张红脸。"
+      }
+    },
+    "state": {
+      "note": "★ O51：状态写回约定。transition 的结果状态【写到哪里】、runner【怎么读回】，必须是契约的一部分 —— 不许是实现与 runner 之间的私下约定（否则 statusUnchanged 这类判据会静默失真）。",
+      "writeback": {
+        "mode": "in-place",
+        "arg": "--node",
+        "rule": "transition 必须把迁移后的节点（含 status；ok:true 时另写 receipt）写回 --node 指向的【同一个文件】（原地回写）。理由：照抄既有范式「读节点 → 改字段 → Upsert」（ai-base/agent-shell/internal/memory/builder.go:491 InvalidateNodes），不另开一条旁路写状态（ai-base/AGENTS.md 禁止行为第 2 条）。",
+        "overrideArg": "--state",
+        "overrideRule": "调用方给了 --state <file> 时改写该文件（旁挂），且该文件已存在时以它的 status 为「当前状态」。默认（不给 --state）就是原地回写 —— 两种模式已在契约里【择一写死为 in-place】，实现不许自行另定。",
+        "supportedModes": ["in-place"],
+        "note": "★ 「二者择一、写死」：本契约选 in-place（默认原地回写 --node 文件）。sidecar（--state 旁挂）只作为【显式 override】存在，不是默认。"
+      },
+      "readback": {
+        "reader": "scripts/gate-vector-run.mjs",
+        "file": "transition 调用时传给实现的同一个 --node 文件（未给 --state ⇒ 它就是写回文件）",
+        "field": "status",
+        "rule": "runner 判 expect.statusUnchanged 与迁移后的 expect.status 时，必须【读回该文件的 status 字段】，不采信实现 stdout 里的 status（stdout 只是实现的自述，文件才是写回结果）。",
+        "missingFileRule": "读不回该文件 ⇒ 视为「读不到写回结果」⇒ runner 必须让它变成 FAIL（偏严方向），不得当作 statusUnchanged 成立。"
+      },
+      "goSide": {
+        "rule": "Go 侧实现必须同款：写回 --node 对应的那个节点（经 GraphWriter channel，ai-base/AGENTS.md 禁止行为第 2 条），runner 读同一个文件的同一个字段。",
+        "why": "★ 否则 statusUnchanged 判据【静默失真】：「读不到文件」与「状态未变」不可区分 —— 这正是本项目花了两天修的那类失败（保险自己失效）。"
       }
     }
   }

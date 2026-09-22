@@ -1899,3 +1899,52 @@ README 的 **R1**（判据不得在被测 agent 读写范围内）已写进设�
 | **O51** | **契约补"状态写回约定"**（否则 `statusUnchanged` 判据失真） | 见 33.4 |
 | **O52** | **契约补 `invalidated`/`suspicious` + 对应向量** | 见 33.4 |
 | **O53** | **把 `missing-prooflevel` 的"更严判断"写进契约**（否则只活在实现里） | 见 33.4 |
+
+---
+
+## 34. ✅ O51 / O52 / O53 三处契约缺口已修（**我逐条复核过**）
+
+### 34.1 修法（都在允许改的七个文件内）
+
+| 缺口 | 修法 | 守着它的**新检查** |
+|---|---|---|
+| **O51** | `contract.json` 新增 `implementations.state`：**`writeback.mode = "in-place"`** 写死、`readback.field = "status"`；★ **实现与 runner 都从契约读**（缺声明 ⇒ 实现 exit 2 **拒绝跑**、runner exit 3 **拒绝跑**） | `impl-state-writeback-declared` |
+| **O52** | 选**补全枚举**：`invisibleStates` = **四态**（`pending`/`archived`/`invalidated`/`suspicious`） | `visibility-invalidated-and-suspicious-invisible` |
+| **O53** | 写进迁移规则**本体**：`require` 增 `receipt.proofLevel in ["L0","L1"]`（新 `in` 算子）+ `requireFieldsComplete.atLeast=["proofLevel"]`；★ **实现里写死的 `PLAUSIBLE_PROOF_LEVELS` 已删除**，改从契约 enum 读 | `transition-pending-active-requires-readable-receipt` |
+
+### 34.2 ★ 我的独立复核（全部实跑）
+
+| 项 | 结果 |
+|---|---|
+| 契约校验器 | **`失败：0 / 22`** ⇒ exit 0（19 → 22，**原有项零删除**） |
+| 参考实现 | **`14/14 PASS / 0 FAIL / 0 NEEDS-EVIDENCE ⇒ exit 0`** |
+| 坏实现 | **非零退出**；★ **`l3-pending-trigger-match-hidden` FAIL**（`expect={"visible":false} got={"visible":true}`）；关键对照行 `PASS/FAIL` |
+| 状态写回约定**真在契约里** | 校验器输出含 `states.values = ["pending","active","archived","invalidated","suspicious"]`；顶层键 10 个（含 `implementations`） |
+| **两条新向量在** | `vectors.json:119/135` —— `invalidated-trigger-match-hidden` / `suspicious-trigger-match-hidden` ✓ |
+| 语法 / BOM | 四脚本 `node --check` 全过；BOM 0 |
+
+### 34.3 ★★ 子代理**自己抓到**的一处（很值得记，因为它是"反向自证"直接抓出来的）
+
+> O52 的**第一版**实现允许"**散文里提到就算声明**"。**反向自证立刻证明这样没有分辨力** ⇒ 已收紧为**只认枚举**。
+
+⇒ ★ **这正是"反向自证"的价值**：**不是我在审它，是它自己的门在审它**。
+⇒ 与本项目既有纪律一致（**"判据读不到差别 ⇒ 先证明读数有效"**）。
+
+### 34.4 ⚠️ 两处残留（子代理如实标，我照记）
+
+1. ★ **O51 / O53 没有"坏实现"对照** —— `gate-impl-broken.mjs` **只坏 L3 一处** ⇒
+   **"若实现不按 O51 写回、或不按 O53 判回执，runner 会不会挂"【未被实测】** ⇒ **新增 O54**。
+2. 坏实现的 FAIL 由 **2 条变 4 条**（新增的两条 O52 向量也会挂）—— **属预期**（坏实现删的正是 L3 的 `requiresStatus`）。
+
+### 34.5 两个我自己的小教训（顺手记）
+
+- ★ **`out/gate-vector-run.txt` 会在两次运行间被覆盖** ⇒ 我一度读到的是**上一次（坏实现）**的 `10/14`。
+  ⇒ **纪律：核验读数要抓"当场那一次"的输出，不要把"某个输出文件"当成当次结果的证据。**
+- ★ 我又一次用内联 `printf` 写含 `\n` 的 JS ⇒ **被 shell 吃掉反斜杠导致 SyntaxError**（**铁律 #11 的老坑**）。
+  ⇒ **一律用 Write 工具写文件，别用内联 printf/echo 造代码。**
+
+### 34.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O54** | **补"故意坏"的实现变体**（不按 O51 写回 / 不按 O53 判回执）⇒ 让这两条也有对照 | 否则这两条判据**只被正向跑过** |

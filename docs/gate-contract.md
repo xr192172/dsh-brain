@@ -98,9 +98,23 @@ pending | active | archived | invalidated | suspicious
 
 | 规则 | from → to | 要求 | 为什么 |
 |---|---|---|---|
-| `pending-to-active-requires-passed-receipt` | `pending` → `active` | ★ **`receipt.status == "passed"`** | ★ **这条就是「门」本身**。没有它：要么 `pending` 永远出不去（**技能全废**），要么什么都能出去（**门不存在**）。O45 §2 落点 (c) 说得很直白：**没有 (c)，`pending` 永远出不去** |
+| `pending-to-active-requires-passed-receipt` | `pending` → `active` | ★ **`receipt.status == "passed"`** **且** ★ **回执必填字段必须可读（至少 `proofLevel`）** | ★ **这条就是「门」本身**。没有它：要么 `pending` 永远出不去（**技能全废**），要么什么都能出去（**门不存在**）。O45 §2 落点 (c) 说得很直白：**没有 (c)，`pending` 永远出不去** |
 | `archived-reimport-returns-to-pending` | `archived` → `pending` | 无 | 重新导入 ≠ 重新采纳（O45 §3 验收门第 4 条）。**不是 `active`** —— 否则"复活"绕开门 |
 | `invalidated-and-suspicious-unchanged` | `*` → `invalidated` / `suspicious` | 无 | 沿用现值：这两态由失效/检索路径写入，**本契约不新增门**（别把不属于门的东西也管起来） |
+
+★ **O53：第二条要求（回执必填字段必须可读）是补上去的，理由如下** ——
+
+- 向量的 `transition-pending-to-active-receipt-missing-prooflevel` 的判据是
+  **`receipt.status=="passed"` 但缺 `proofLevel` ⇒ `ok:false`**；
+- 而本契约 `transitions.rules` 的**字面**原本只要求 `receipt.status == "passed"` ⇒
+  **这条更严的判据只活在实现里**（`gate-impl-reference.mjs` 靠 `receipt.schema.required`
+  + 不变量 `receipt-is-recorded-on-adoption` 自己补的）；
+- ⇒ 现写进契约的**规则本体**（`transitions.rules[0].require` 第二条 +
+  `requireFieldsComplete.atLeast = ["proofLevel"]`），实现**从契约读**，不再自己补；
+- 依据：不变量 `receipt-is-recorded-on-adoption`（"过了门却读不到证到哪一级 = 没有回执位"）
+  与 O45 §3 验收门第 5 条。★ 注意这比 `receipt.schema` **更严**：
+  schema 允许 `proofLevel: null`，但**过门时不允许**（`null` / 缺失 ⇒ 拒绝）。
+- 守着它的是校验项 `transition-pending-active-requires-readable-receipt`。
 
 **为什么失败也必须返回 `reason`**：`ok:false` 单独存在时，调用方只知道"被拒了"，
 不知道**被哪条规则拒**。拒绝必须**可解释**，否则下一个人会绕过它（`capability-gate.mjs:307-309` 有先例：
@@ -127,7 +141,7 @@ pending | active | archived | invalidated | suspicious
 |---|---|---|
 | **L0**（高分配稳定技能） | `score > 0.7 ∧ useCount > 10` | ✅ **要求** |
 | ★ **L3**（触发词命中） | `triggers` 命中 `taskHint` | ✅ ★ **也要求** |
-| 其它 | — | `archived` / `pending` ⇒ **不可见** |
+| 其它 | — | ★ **任何非 `active` 态**（`pending` / `archived` / `invalidated` / `suspicious`，见 §4.1）⇒ **不可见** |
 
 **为什么 L3 的 `active` 要求是本契约最不能少的一条**：
 
@@ -149,6 +163,33 @@ pending | active | archived | invalidated | suspicious
 - ★ **`pending` 不可见**：这是**门存在的全部意义**。若 `pending` 仍可注入，那么"过了门才 active"只是记账，
   **对真实行为零影响**。
 
+### 4.1 ★ 不可见集必须**列全**：`invalidated` / `suspicious`（O52）
+
+**改前的洞**：`visibility.invisibleStates` 只写 `["pending","archived"]`，而 `states.values` 有 **5** 个值
+⇒ ★ 一个**严格按 `invisibleStates` 判**的实现会把 `invalidated` / `suspicious` 判成"**可见**"
+（= 已失效 / 可疑的东西照样被注入 prompt）。这是**假绿**，而且**没有任何向量覆盖** ⇒ 洞是静默的。
+
+**怎么补的（本契约的选择）**：把四态**枚举完整**：
+
+```json
+"invisibleStates": ["pending", "archived", "invalidated", "suspicious"]
+"invisibleRule": "凡 status != adoptedState（= active）者一律不可注入；invisibleStates 就是它的【枚举形式】= states.values 减去 adoptedState。"
+```
+
+- **选的是「补全枚举」**（另一种写法是"只写一条规则"，本契约**不**采用它作为机器可读形式）：
+  ★ 因为 **散文不可断言** —— 校验器只认枚举，写成散文提到这两个词**不算声明**
+  （与 §2 那条教训同源：`kind:"ref"` 的散文引用曾是假回执，**散文不是判据**）。
+- 契约里同时留了 `invisibleRule` / `invisibleWhy` 两段**文字**（说明这条规则从哪来、为什么），
+  但**判定只用枚举**。
+- ★ **口径一致**：`invisibleStates` 必须 = `states.values` 减去 `adoptedState`。
+  将来往词汇表加第 6 个状态却忘了列进不可见集 ⇒ **校验项会响**（不是静默漏掉）。
+- ★ **与检索侧的区别（别混）**：`states.meaning` 里 `suspicious` 是"**检索侧降权而不排除**"——
+  那是**检索路径**（`retriever_DeepRetriever.go`）的行为；本契约管的是**注入路径**。
+  **降权 ≠ 可注入**：注入侧只认 `active`，所以 `suspicious` 一律不可见。
+- 守着它的是校验项 `visibility-invalidated-and-suspicious-invisible`；
+  机器判据由两条向量补齐：`invalidated-trigger-match-hidden` / `suspicious-trigger-match-hidden`
+  （都走 **L3** 路径、`expect.visible:false`）。
+
 ---
 
 ## 5. ⑤ 实现协议（runner 对任意实现说的话）
@@ -166,6 +207,45 @@ pending | active | archived | invalidated | suspicious
   runner 只认这两条子命令 + stdout 形状 ⇒ 「策略走接口」落地成**可替换的实现**。
 - **`stdout` 必须是机器可读的单行 JSON**：自然语言输出**不可断言**，等于没判据。
   `transition.stdouts` 与 `transitions.result.fields` **逐字对齐**，避免 runner 与实现两套形状。
+
+### 5.1 ★ 状态**写回哪里 / runner 怎么读回**（O51）
+
+**改前的洞**：向量的 `expect.statusUnchanged`（"被拒时状态必须没变"）**依赖一个只在实现里存在的约定**——
+"`--node` 那个文件会被原地回写"。契约 `implementations.commands` 里**一个字都没有**，
+`transitions.result.fields` 也只有 `["ok","status","reason"]`（**没有**"状态去哪了"）。
+⇒ 那是**实现与 runner 的私下约定**，不是契约。
+
+**为什么这必须进契约（"静默失真"）**：`statusUnchanged` 的判法是"**读回写回文件，看 status 有没有变**"。
+若将来 Go 侧实现**不**按同一个约定写回（比如自己另开一个文件、或干脆不落盘），runner 就读不到 →
+**"读不到文件" 与 "状态未变" 不可区分**：
+- 判 `statusUnchanged: true` 的向量会**假绿**（读不到 ⇒ 当成没变）；
+- 判 `statusUnchanged: false` 的向量会**假红**。
+两种都不是报错，是**判决静默失真** —— 正是本项目花了两天修的那类失败（**保险自己失效**）。
+
+**怎么补的（二者择一，写死）**：`contract.json` → `implementations.state`：
+
+| 字段 | 值（本契约写死） | 含义 |
+|---|---|---|
+| `writeback.mode` | `"in-place"` | ★ **默认原地回写**：把迁移后的节点写回 **`--node` 指向的同一个文件**（含 `status`；`ok:true` 时另写 `receipt`） |
+| `writeback.arg` | `"--node"` | 写回位置由这个参数决定（**不是**另开旁路） |
+| `writeback.overrideArg` / `overrideRule` | `"--state"` | 仅作为**显式 override** 存在（旁挂文件），**不是**默认；给了且该文件已存在 ⇒ 以它的 `status` 为"当前状态" |
+| `readback.field` | `"status"` | ★ runner 读回**哪个字段** |
+| `readback.file` | 传实现的那个 `--node` 文件 | ★ runner 读回**哪个文件** |
+| `readback.missingFileRule` | —— | 读不回来 ⇒ 按"读不到写回结果"处理 ⇒ runner 必须让它 **FAIL**（偏严方向），**不得**当作"状态未变" |
+| `goSide.why` | —— | ★ **Go 侧必须同款，否则 `statusUnchanged` 判据静默失真** |
+
+**为什么选 `in-place`**：照抄 §3.1 的既有范式「**读节点 → 改字段 → Upsert**」
+（`builder.go:491 InvalidateNodes`），而不是另开一条旁路写状态（`AGENTS.md` 禁止行为第 2 条）。
+`sidecar`（`--state`）只作为显式 override，**契约已择一写死为 `in-place`**。
+
+**实现与 runner 都真的按契约走**（不是靠隐含约定）：
+
+- `gate-impl-reference.mjs` 的 `stateFileFor()` **从契约读 `writeback.mode`**；
+  契约没声明 ⇒ **exit 2**（拒绝猜）；声明了不支持的模式 ⇒ 也 exit 2（宁可答不上来）。
+- `gate-vector-run.mjs` 的 `loadStateProtocol()` **从契约读 `writeback.mode` + `readback.field`**
+  来决定"读哪个文件的哪个字段"；契约里**没有**这段声明 ⇒ runner **exit 3 拒绝跑**
+  （不再退回 runner 自己知道的默认值）。
+- 判据：校验项 `impl-state-writeback-declared`。
 
 ---
 
@@ -216,7 +296,11 @@ pending | active | archived | invalidated | suspicious
 3. **`builder.go:546` 与 `retriever_DeepRetriever.go` 对 `pending` 的行为未定义** —— 属未闭合 **O49**
    （`§32.5`）。本契约**没有**对这两处下任何结论。
 4. **校验器只验"契约自洽"，不验"契约被实现遵守"**。要证明"门被尊重"，需要 O45 §3 的 5 条验收门
-   （含**阳性对照**：同两条改成 `active` 必须**出现**）—— 那需要一份**实现**，目前没有。
+   （含**阳性对照**：同两条改成 `active` 必须**出现**）—— 那需要一份**实现**。
+   ★ 现状（W15/W16 后）：**实现与向量 runner 已经有了**（`scripts/gate-impl-reference.mjs` /
+   `gate-impl-broken.mjs` / `gate-vector-run.mjs`，14 条向量），所以"门被尊重"由
+   `node scripts/gate-vector-run.mjs` 证明 —— 但**只覆盖向量覆盖到的那部分判据**，
+   且**仍是 mjs 夹具，不是 Go 侧真实调用路径**（见第 1 条）。
 5. **`unenforced = ["L2","L3","L4"]` 是"本项目当前事实"的硬编码**：若将来 L2 被实施，
    必须**同时**改契约与 `capability-gate.mjs:55`。契约里没有"自动同步"，只有"两边不一致时会响"
    （校验器会把缺 `L2` 判为不合格）。
@@ -229,15 +313,35 @@ pending | active | archived | invalidated | suspicious
 ## 9. 怎么用
 
 ```bash
-# 校验契约自洽（19 项检查，每项打印「防的是什么」；任一项失败 ⇒ 非零退出）
+# 校验契约自洽（22 项检查，每项打印「防的是什么」；任一项失败 ⇒ 非零退出）
 node scripts/gate-contract-check.mjs
 
-# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 12 份内存坏契约必须被指定规则挡下
+# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 15 份内存坏契约必须被指定规则挡下
 node scripts/gate-contract-check.mjs --selftest
 
 # 校验一份别的契约（例如你把 L3 的 active 要求删掉试试）
 node scripts/gate-contract-check.mjs --contract <path>
+
+# ★ 把契约喂给一份实现（14 条向量；runner 的状态读回约定也从契约读，O51）
+node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-reference.mjs"   # 14/14 PASS ⇒ exit 0
+node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs"      # 必须有一批 FAIL ⇒ exit 1
 ```
 
-**改这份契约时必须跑的两条**：`node scripts/gate-contract-check.mjs` 与 `--selftest`。
-后者是**insurance 的 insurance**：它保证**校验器自己**不会变成"全绿"或"全红"的装饰品。
+**改这份契约时必须跑的三条**：`node scripts/gate-contract-check.mjs`、
+`--selftest`、以及 `gate-vector-run.mjs`（对参考实现与坏实现各一次）。
+第二条是**insurance 的 insurance**：它保证**校验器自己**不会变成"全绿"或"全红"的装饰品；
+第三条保证**契约→实现**这条路没断（且"坏一处必须挂"）。
+
+---
+
+## 10. 三处缺口的修补记录（O51 / O52 / O53）
+
+| 缺口 | 改前的洞 | 修法 | 守着它的校验项 | 补的向量 |
+|---|---|---|---|---|
+| **O51** | `implementations.commands` **没声明**状态写回哪里、runner 怎么读回 ⇒ `statusUnchanged` 靠私下约定 | 新增 `implementations.state`（`writeback.mode` 写死 `in-place` + `readback.field/file`），实现与 runner **都从契约读** | `impl-state-writeback-declared` | —— （由 runner 每次运行都走这条约定来证） |
+| **O52** | `invisibleStates` 只列 `pending`/`archived`，漏 `invalidated`/`suspicious` ⇒ 严格按它判的实现会把这两态判成可见（假绿） | 枚举补全为四态（`invisibleRule`/`invisibleWhy` 只作文字说明，**不参与判定**） | `visibility-invalidated-and-suspicious-invisible` | `invalidated-trigger-match-hidden`、`suspicious-trigger-match-hidden` |
+| **O53** | 向量 `…-missing-prooflevel` 的判据比 `transitions.rules` 字面更严（缺 `proofLevel` ⇒ `ok:false`）⇒ 只活在实现里 | `transitions.rules[0].require` 增加 `receipt.proofLevel in ["L0","L1"]` + `requireFieldsComplete.atLeast=["proofLevel"]` | `transition-pending-active-requires-readable-receipt` | —— （原有 `…-missing-prooflevel` 现在有契约依据了） |
+
+★ 三处**都只新增/收紧**：原有 19 项检查一项未删（21 + 1 = 22 项），
+原有 12 条向量的 `expect` 一个都没改（只新增 2 条 ⇒ 14 条）。
+逐条原始输出见 `out/w16-contract-gaps.md`。

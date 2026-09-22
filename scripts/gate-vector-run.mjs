@@ -33,11 +33,16 @@
  *   3. 全量原始输出写 `out/gate-vector-run.txt`（默认），便于贴进报告当证据。
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * 状态文件约定（与实现一致，见 out/w15-gate-runner.md）
- *   每条 transition 向量：**先把 `{...vector.node}` 写成一份临时节点文件**，
- *   再把 `--node <该文件> --to <status> [--receipt <回执临时文件>]` 喂给实现。
- *   状态写回位置默认 = **`--node` 那个文件本身（原地回写）** ⇒ runner 事后读同一个文件
- *   就能验 `statusUnchanged` / 迁移后 `status`，不需要实现额外暴露状态（也不改契约 argv）。
+ * 状态写回约定（★ O51 后：**从契约读**，不再是 runner 与实现的私下约定）
+ *
+ * 每条 transition 向量：**先把 `{...vector.node}` 写成一份临时节点文件**，
+ * 再把 `--node <该文件> --to <status> [--receipt <回执临时文件>]` 喂给实现。
+ * 写回位置与读回方式来自 `evals/gate/contract.json` → `implementations.state`：
+ *   - `writeback.mode = "in-place"`（契约写死）⇒ 实现把结果写回 `--node` 那个文件本身；
+ *   - `readback.field = "status"` ⇒ runner 事后**读该文件的 status 字段**来判
+ *     `statusUnchanged` / 迁移后 `status`（不采信实现 stdout 的自述）。
+ * ★ 契约里**没有**声明这套约定 ⇒ runner **exit 3 拒绝跑**（宁可答不上来，也不靠隐含约定）；
+ *   契约声明了 runner 未支持的模式 ⇒ 同样 exit 3 并点名该模式。
  *
  * 依赖：无。只写 `out/`（临时目录 + 报告 txt），**不改 vectors.json / contract.json**。
  */
@@ -108,6 +113,41 @@ function firstJsonLine(stdout) {
   return null
 }
 
+/**
+ * ★ O51：从**契约**读出状态写回/读回约定。读不到 ⇒ 抛错（调用方 exit 3），
+ * 绝不退回"runner 自己知道一个默认值"那种隐含约定。
+ * @returns {{contractFile:string, mode:string, writeArg:string, readField:string, readTarget:string}}
+ */
+export function loadStateProtocol(vectorsRaw) {
+  const rel = vectorsRaw?.contract
+  if (typeof rel !== 'string' || rel.trim() === '') {
+    throw new Error('向量文件没有声明 contract ⇒ runner 无法按契约读回状态（O51：不许靠隐含约定）')
+  }
+  const contractFile = path.resolve(ROOT, rel)
+  let contract
+  try {
+    contract = JSON.parse(fs.readFileSync(contractFile, 'utf8'))
+  } catch (e) {
+    throw new Error(`契约不可读/非法：${contractFile}（${e.message}）`)
+  }
+  const st = contract?.implementations?.state
+  const mode = st?.writeback?.mode
+  const writeArg = st?.writeback?.arg
+  const readField = st?.readback?.field
+  const readTarget = st?.readback?.file
+  if (typeof mode !== 'string' || typeof writeArg !== 'string' || typeof readField !== 'string') {
+    throw new Error(
+      '契约未声明 implementations.state.writeback/readback（状态写回约定）⇒ runner 拒绝跑（O51：宁可答不上来，也不靠隐含约定）',
+    )
+  }
+  if (mode !== 'in-place') {
+    throw new Error(
+      `契约声明的状态写回模式 "${mode}"（readback.file=${JSON.stringify(readTarget)}）本 runner 未支持（已支持：in-place）⇒ 拒绝猜`,
+    )
+  }
+  return { contractFile, mode, writeArg, readField, readTarget: readTarget ?? '' }
+}
+
 const oneLine = (s, max = 200) => {
   const t = String(s ?? '').trim().replace(/\s+/g, ' ')
   return t.length > max ? `${t.slice(0, max)}…` : t
@@ -117,11 +157,12 @@ const oneLine = (s, max = 200) => {
 // 跑一条向量
 // ─────────────────────────────────────────────────────────────────────────────
 
-function runCase(implArgv, c, idx, tmpDir, log) {
+function runCase(implArgv, c, idx, tmpDir, log, stateProto) {
   const tag = `${String(idx + 1).padStart(2, '0')}-${c.id}`
   const nodeFile = path.join(tmpDir, `${tag}.node.json`)
   const receiptFile = path.join(tmpDir, `${tag}.receipt.json`)
-  const stateFile = nodeFile // ★ 状态文件约定：默认就是 --node 那个文件（原地回写）
+  // ★ O51：写回位置**由契约的 state 约定决定**（mode=in-place ⇒ 就是 --node 那个文件）
+  const stateFile = stateProto.mode === 'in-place' ? nodeFile : null
 
   fs.writeFileSync(nodeFile, `${JSON.stringify(c.node, null, 2)}\n`, 'utf8')
   const originalStatus = typeof c.node?.status === 'string' ? c.node.status : null
@@ -175,12 +216,13 @@ function runCase(implArgv, c, idx, tmpDir, log) {
       return { id: c.id, role: c.role, kind: c.kind, result: 'NEEDS-EVIDENCE', ev, checks: [] }
     }
     const want = c.expect ?? {}
-    // 迁移后的状态：以**状态文件**（= --node 那份，原地回写）为准
+    // ★ O51：迁移后的状态以**契约声明的写回文件**为准（mode=in-place ⇒ --node 那份）
     let afterStatus = null
     try {
-      afterStatus = JSON.parse(fs.readFileSync(stateFile, 'utf8'))?.status ?? null
+      const readField = stateProto.readField
+      afterStatus = JSON.parse(fs.readFileSync(stateFile, 'utf8'))?.[readField] ?? null
     } catch {
-      afterStatus = null
+      afterStatus = null // 读不回 ⇒ 与 originalStatus 不等 ⇒ statusUnchanged 会 FAIL（偏严方向）
     }
     if (want.ok !== undefined) {
       got.ok === want.ok ? good('ok') : bad('ok', want.ok, got.ok)
@@ -191,11 +233,11 @@ function runCase(implArgv, c, idx, tmpDir, log) {
     if (want.statusUnchanged !== undefined) {
       const unchanged = afterStatus === originalStatus
       unchanged === want.statusUnchanged
-        ? good('statusUnchanged(状态文件)')
+        ? good('statusUnchanged(契约声明的写回文件)')
         : bad(
-            'statusUnchanged(状态文件)',
+            'statusUnchanged(契约声明的写回文件)',
             want.statusUnchanged,
-            `状态文件里 status=${JSON.stringify(afterStatus)}（原 ${JSON.stringify(originalStatus)}）`,
+            `写回文件里 ${stateProto.readField}=${JSON.stringify(afterStatus)}（原 ${JSON.stringify(originalStatus)}）`,
           )
     }
     if (typeof got.reason !== 'string' || got.reason.trim() === '') {
@@ -248,12 +290,24 @@ function main(argv) {
     return 3
   }
 
+  // ★ O51：状态写回/读回约定必须来自契约；读不到 ⇒ exit 3（不靠隐含约定）
+  let stateProto
+  try {
+    stateProto = loadStateProtocol(vectorsRaw)
+  } catch (e) {
+    process.stderr.write(`${e.message}\n`)
+    return 3
+  }
+
   log('════════════════════════════════════════════════════════════════════════')
   log('gate-vector-run.mjs —— 门向量 runner')
   log(`  impl    : ${opts.impl}`)
   log(`  vectors : ${path.relative(ROOT, opts.vectors).replace(/\\/g, '/')}  (${cases.length} 条)`)
   log(`  形状    : ${vectorsRaw.vectors}${vectorsRaw.vectors === EXPECTED_VECTORS_SHAPE ? '' : `  ⚠️ 期望 ${EXPECTED_VECTORS_SHAPE}`}`)
   log(`  契约    : ${vectorsRaw.contract ?? '(未声明)'}`)
+  log(`  ★ 状态写回: 契约 ${path.relative(ROOT, stateProto.contractFile).replace(/\\/g, '/')} → implementations.state`)
+  log(`              writeback.mode=${JSON.stringify(stateProto.mode)}（arg ${stateProto.writeArg}）⇒ 原地回写 --node 文件`)
+  log(`              readback.field=${JSON.stringify(stateProto.readField)}（runner 读回该字段判 statusUnchanged / status）`)
   log(`  out     : ${path.relative(ROOT, opts.out).replace(/\\/g, '/')}`)
   log('════════════════════════════════════════════════════════════════════════')
 
@@ -263,7 +317,7 @@ function main(argv) {
 
   const results = []
   cases.forEach((c, i) => {
-    const r = runCase(implArgv, c, i, opts.tmp, log)
+    const r = runCase(implArgv, c, i, opts.tmp, log, stateProto)
     results.push(r)
     log(`[${r.result.padEnd(14)}] ${c.id.padEnd(56)} ${String(c.kind).padEnd(10)} ${String(c.role).padEnd(18)} expect=${JSON.stringify(c.expect)} got=${r.ev.stdout}`)
   })
