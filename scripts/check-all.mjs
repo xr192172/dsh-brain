@@ -23,6 +23,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const argv = process.argv.slice(2)
 /**
@@ -32,13 +33,33 @@ const argv = process.argv.slice(2)
  * 优先级：`--repo <path>` ＞ 环境变量 `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）。
  * ★ **不许弱化判据**：两个都没给时 `REPO` **就是改动前那个字符串** ⇒ 行为逐字不变
  *   （门列表、`--only` / `--list`、判据口径、退出码全部照旧）。
+ *
+ * ## ★★ 2026-09-22（O73）：子门必须从**判据根**起跑，`--repo` 只当"被测树"传下去
+ *
+ * **事故**：`DSH_EVAL_REPO=<隔离树>` 时，本脚本原先拿它当**子进程的 cwd** 用
+ * ⇒ 而隔离树按 R1 **排除了 `scripts/`** ⇒ 每道门都是
+ * `node scripts/xxx.mjs` + cwd=隔离树 ⇒ `MODULE_NOT_FOUND` ⇒ **regression 假红**
+ * （实测：`node scripts/check-all.mjs --repo <wt>` 15 道门全崩）。
+ *
+ * **正确设计**（`scripts/eval-validate.mjs` 头部逐字写明的同一条）：
+ *   **判据脚本住在【判据根】（主仓），它【检查】的是被测树。**
+ *   ⇒ 子进程 `cwd = JUDGE_ROOT`（本脚本自己所在的仓库），
+ *     被测树通过环境变量 `DSH_EVAL_REPO`（= `--repo` 的值）**传给那些读它的门**。
+ *
+ * ⚠️ **诚实交代**：本仓目前只有 `test-injected-message-shape.mjs` 与
+ *   `test-handover-drain.mjs` 两道门读 `DSH_EVAL_REPO`（下面标了 `repoAware: true`）
+ *   ⇒ 传了 `--repo` 时**只有它们真的在查那棵树**，其余门在判据根上跑。
+ *   这一点会**打印出来**（不打印就等于让人以为"全都在查被测树" = 假绿）。
  */
+const JUDGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const repoArg = (() => {
   const i = argv.indexOf('--repo')
   return i < 0 ? null : (argv[i + 1] ?? null)
 })()
 const REPO_GIVEN = repoArg ?? process.env.DSH_EVAL_REPO ?? null
 const REPO = REPO_GIVEN ? path.resolve(REPO_GIVEN) : 'D:/project_develop/dsh-brain'
+/** 子进程的 cwd：给了 `--repo`/`DSH_EVAL_REPO` ⇒ **判据根**；没给 ⇒ 与改动前逐字相同。 */
+const CWD = REPO_GIVEN ? JUDGE_ROOT : REPO
 const only = (() => {
   const i = argv.indexOf('--only')
   return i < 0 ? null : argv[i + 1]
@@ -135,11 +156,13 @@ const GATES = [
     id: 'test:message-shape',
     what: '注入会话的消息必须带身份（id/source）+ 反模式扫描',
     cmd: ['node', 'scripts/test-injected-message-shape.mjs'],
+    repoAware: true,
   },
   {
     id: 'test:handover-drain',
     what: '换代前必须真的停写（drain 三方向 + 封口顺序两方向自证）',
     cmd: ['node', 'scripts/test-handover-drain.mjs'],
+    repoAware: true,
   },
 ]
 
@@ -180,9 +203,25 @@ if (listOnly) {
 
 const t0 = Date.now()
 const rows = []
+// ★★ 2026-09-22（O73）：给了 `--repo` / `DSH_EVAL_REPO` 时，如实交代"谁真的在查被测树"。
+if (REPO_GIVEN) {
+  const aware = selected.filter((g) => g.repoAware).map((g) => g.id)
+  console.log(`被测树（--repo / DSH_EVAL_REPO）：${REPO}`)
+  console.log(`判据根（各道门的 cwd，判据脚本住这儿）：${CWD}`)
+  console.log(`★ 读 DSH_EVAL_REPO、**真的在查被测树**的门：${aware.join(', ') || '（无）'}`)
+  console.log(`  其余门不读该变量 ⇒ 它们查的是**判据根**（不查被测树）—— 别把它们的绿当成被测树的绿。`)
+  console.log('')
+}
 for (const g of selected) {
   const start = Date.now()
-  const r = spawnSync(g.cmd[0], g.cmd.slice(1), { cwd: REPO, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+  const r = spawnSync(g.cmd[0], g.cmd.slice(1), {
+    // ★ O73：**判据根**，不是被测树（被测树按 R1 没有 scripts/ ⇒ 用它当 cwd 会 MODULE_NOT_FOUND）
+    cwd: CWD,
+    // ★ O73：把被测树**传给**门（不给 `--repo` 时不加环境变量 ⇒ 与改动前逐字相同）
+    ...(REPO_GIVEN ? { env: { ...process.env, DSH_EVAL_REPO: REPO } } : {}),
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  })
   const out = (r.stdout ?? '') + (r.stderr ?? '')
   let ok = (r.status ?? 1) === 0
   const notes = []

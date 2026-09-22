@@ -1050,9 +1050,17 @@ function dshFacts() {
 }
 
 /**
- * **每臂工作区**：确保该目录是一份 git worktree，并把 `node_modules` 接过去。
+ * **每臂工作区**：确保该目录是一份 git worktree，把 `node_modules` 接过去，并**构建**它。
  * 为什么必须：worktree 是干净检出，**没有 node_modules / 没有构建产物** ⇒ 判据脚本在里面跑不起来。
  * 只建一次；已存在就跳过。失败**如实报**（不静默降级成"跑在主仓库"）。
+ *
+ * ★★ 2026-09-22（O72 的**第二处**）：原先只接 `node_modules`，**没有构建** ⇒
+ *   oracle（`scripts/test-injected-message-shape.mjs` 的 A 段）import 的
+ *   `packages/switchboard/lib/index.js` 不存在 ⇒ 报"编译产物存在 — … 不存在，先构建 switchboard"
+ *   ⇒ **假红**（不是隔离破了，是树没建）。同一个洞在 `scripts/eval-wt-new.mjs` 也有，那边一并修了。
+ *   ⚠️ 为什么不复制主仓的 `lib/`：seed 打在 **src**，复制来的 lib 是**旧 src 的产物**
+ *   ⇒ "未 seed 绿"能骗过，seed 之后 oracle 依旧绿 ⇒ 把判据变成瞎的（假绿比假红更坏）。
+ *   ⇒ 缺则建（幂等），失败如实进 `problems`。
  */
 /**
  * ★ 纯函数：**某 worktree 的 HEAD 与主仓 HEAD 是否一致**（可两方向自测，`--self-test-harness` 覆盖三态）。
@@ -1124,6 +1132,23 @@ function ensureWorktree(dir) {
     out.nodeModules = r.status === 0
     if (!out.nodeModules) out.problems.push('node_modules junction 失败（判据可能跑不动）')
   } else out.nodeModules = true
+  // ★★ 构建（O72 第二处）：干净检出没有 packages/switchboard/lib/ ⇒ oracle 假红。缺则建。
+  const pkgDir = path.join(abs, 'packages', 'switchboard')
+  const buildScript = path.join(pkgDir, 'scripts', 'build.mjs')
+  const libIndex = path.join(pkgDir, 'lib', 'index.js')
+  if (!fs.existsSync(buildScript)) {
+    out.built = null
+  } else if (fs.existsSync(libIndex)) {
+    out.built = 'already'
+  } else {
+    const b = sh(process.execPath, ['scripts/build.mjs'], { cwd: pkgDir })
+    out.built = b.status === 0 && fs.existsSync(libIndex) ? 'built' : false
+    if (out.built === false)
+      out.problems.push(
+        `树内构建失败（oracle 的 A 段读 ${path.relative(abs, libIndex)}，没有它就会**假红**）：` +
+          `${String(`${b.stdout ?? ''}${b.stderr ?? ''}`).trim().split(String.fromCharCode(10)).slice(-2).join(' | ')}`,
+      )
+  }
   return out
 }
 
@@ -1741,7 +1766,7 @@ if (has('--pair')) {
     const info = ensureWorktree(wt)
     pair.arms[label].worktree = info
     console.log(
-      `  [工作区] ${label}: ${info.dir}（新建=${info.created} node_modules=${info.nodeModules}）` +
+      `  [工作区] ${label}: ${info.dir}（新建=${info.created} node_modules=${info.nodeModules} 构建=${info.built ?? 'n/a'}）` +
         (info.problems?.length ? ` ⚠ ${info.problems.join('; ')}` : ''),
     )
   }

@@ -36,6 +36,19 @@
  *   CRLF 又变回 523。⇒ ★ **每一条可能碰工作区的 git 命令都要带 `-c core.autocrlf=false`**，
  *   而且要在**最后**再量一次 CRLF（本脚本的 [4] 就是在量这个）。
  *
+ * ── ★★ 构建产物：干净检出没有 `lib/` ⇒ oracle 假红（O72，2026-09-22）──────────
+ *   干净检出里**没有** `packages/switchboard/lib/`（gitignore 的），而 oracle
+ *   （`scripts/test-injected-message-shape.mjs` 的 A 段）import 的正是它 ⇒ 直接报
+ *   `FAIL 编译产物存在 — … 不存在，先构建 switchboard` ⇒ **假红**。
+ *   实测（`out/_wt/w25-R1`，本文件作者复核）：
+ *     `node scripts/test-injected-message-shape.mjs --repo out/_wt/w25-R1`
+ *     → `结果：1 passed, 1 failed`（唯一那条失败就是"编译产物存在"）。
+ *   ⇒ 本脚本 [3] 步做两件事：**接一条 `node_modules` junction**（tsc 与 `@types/node` 要它）
+ *     + **在树内跑 `packages/switchboard/scripts/build.mjs`**。
+ *   ⇒ 为什么**不复制主仓的 lib/**：seed 打在 `src`（`tasks.jsonl` 的 `seed.edits` 全是 `.ts`），
+ *     复制来的 lib 是**旧 src 的产物** ⇒ "未 seed 绿"能骗过，**seed 之后 oracle 依旧绿**
+ *     ⇒ 把判据变成瞎的（假绿比假红更坏）。树内构建则让树里的 src 与 lib **同源**。
+ *
  * ── 用法 ────────────────────────────────────────────────────────────────
  *   node scripts/eval-wt-new.mjs --name w25-R1
  *   node scripts/eval-wt-new.mjs --name w25-R1 --dir D:/tmp/w25-R1 --exclude docs --exclude .workbuddy
@@ -109,6 +122,54 @@ function sh(cmd, args, opts = {}) {
 }
 /** ★ 所有会碰工作区的 git 命令都必须走它（见文件头"行尾坑"）。 */
 const gitIn = (dir, args) => sh('git', ['-C', dir, '-c', 'core.autocrlf=false', ...args])
+
+/**
+ * ── ★★ O72：把"干净检出"变成"可编译 / 已构建"（2026-09-22）───────────────────
+ *
+ * **症状**：oracle（`scripts/test-injected-message-shape.mjs` 的 A 段）import 的是
+ * **编译产物** `packages/switchboard/lib/index.js`，而 `lib/` 是 gitignore 的
+ * ⇒ 干净检出里**没有**它 ⇒ oracle 第一条断言就报
+ * `FAIL 编译产物存在 — … 不存在，先构建 switchboard` ⇒ **假红**（不是隔离破了，是树没建）。
+ *
+ * **为什么选"树内构建"而不是"复制主仓的 lib/"**：
+ *   · 复制 lib 只能骗过"未 seed 时绿"这一半 —— seed 打在 **src**（`tasks.jsonl` 的
+ *     `seed.edits` 指的全是 `.ts`），复制来的 lib 是**旧 src 的产物**
+ *     ⇒ seed 之后 oracle 依旧绿 ⇒ **把判据变成瞎的**（比假红更坏：它是假绿）。
+ *   · 树内构建让"这棵树里的 src ↔ 这棵树里的 lib"**同源**，判据读的就是这棵树自己
+ *     （实测：seed 之后 oracle 确实变红，见 `out/w26-o72-o73-o74.md` 门 3）。
+ *   · 也不选"在树上挂个 tsc 的壳"：`packages/switchboard/scripts/build.mjs` 是**树里自带的、
+ *     幂等的**构建入口（版本化 `out/<buildId>` + `lib` junction 翻转），复用它比自己拼命令行稳。
+ *
+ * **为什么必须先接一条 `node_modules`**：tsc 与 `types:["node"]` 要按 tsconfig 所在位置
+ * 向上找 `node_modules`，而干净检出里没有它（它也是 gitignore 的）⇒ 构建直接失败。
+ * 接的是 **junction**（`fs.symlinkSync(..., 'junction')`，Windows 上不需要管理员）；目标在
+ * 判据根 ⇒ 依赖解析从"树自己的 node_modules 起、最后落到判据根"，与运行期 node 的解析方向
+ * 一致。★ `node_modules/` 在 `.gitignore` 里 ⇒ **树仍然 `git status` 干净**（证据 D 会验）。
+ *
+ * ★ **"缺则建"**：已有 `lib/index.js` 就跳过（避免每跑一次树里多一个 `out/b<id>/`）。
+ */
+function ensureDepsLink(dir) {
+  const link = path.join(dir, 'node_modules')
+  const target = path.join(ROOT, 'node_modules')
+  if (fs.existsSync(link)) return { linked: false, why: '已存在，未动' }
+  if (!fs.existsSync(target)) return { linked: false, why: `判据根没有 node_modules（${target}）` }
+  try {
+    fs.symlinkSync(target, link, 'junction')
+    return { linked: true, why: `junction → ${target}` }
+  } catch (e) {
+    return { linked: false, why: `建链接失败：${String(e?.message ?? e)}` }
+  }
+}
+function buildInTree(dir) {
+  const pkg = path.join(dir, 'packages', 'switchboard')
+  const script = path.join(pkg, 'scripts', 'build.mjs')
+  const lib = path.join(pkg, 'lib', 'index.js')
+  if (!fs.existsSync(script)) return { ok: true, skipped: true, lib, why: '树里没有 packages/switchboard/scripts/build.mjs（无需构建）' }
+  if (fs.existsSync(lib)) return { ok: true, skipped: true, lib, why: '已有构建产物（缺则建）' }
+  const r = sh(process.execPath, ['scripts/build.mjs'], { cwd: pkg })
+  const tail = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split('\n').slice(-3).join(' | ')
+  return { ok: r.status === 0, skipped: false, lib, why: `exit=${r.status}  ${tail}`.trim() }
+}
 
 const say = (s) => console.log(s)
 const problems = []
@@ -198,9 +259,18 @@ if (set.status !== 0) {
 }
 say(`  ✓ 模式：${patterns.join('  ')}`)
 
-// ── [3] 证据：排除生效 + 工作树是"干净"的 ─────────────────────────────────
+// ── [3] O72：接依赖 + **树内构建**（干净检出没有 lib/ ⇒ oracle 假红）────────────
 say('')
-say('[3] 证据 A：排除生效 且 工作树没被改脏')
+say('[3] O72：让树"可编译 / 已构建"（依赖 junction + 树内构建，缺则建）')
+const link = ensureDepsLink(DIR)
+check(fs.existsSync(path.join(DIR, 'node_modules')), 'node_modules 就位（构建与运行判据都要它）', link.why)
+const built = buildInTree(DIR)
+check(built.ok, `树内构建 switchboard：${built.skipped ? '跳过（已有产物）' : '已构建'}`, built.why.slice(0, 240))
+check(fs.existsSync(built.lib), 'O72 要害：packages/switchboard/lib/index.js 在**这棵树里**存在', built.lib)
+
+// ── [4] 证据：排除生效 + 工作树是"干净"的 ─────────────────────────────────
+say('')
+say('[4] 证据 A：排除生效 且 工作树没被改脏（★ 含上一步的链接与构建产物）')
 for (const e of EXCLUDES) {
   const abs = path.join(DIR, e)
   check(!fs.existsSync(abs), `已排除：${e}/ 不存在于工作树`, fs.existsSync(abs) ? `（仍在！${abs}）` : '')
@@ -213,9 +283,9 @@ check(String(diffStat.stdout ?? '').trim() === '', 'git -C <wt> diff --stat 为�
 const wtHead = String(gitIn(DIR, ['rev-parse', 'HEAD']).stdout ?? '').trim()
 check(wtHead === repoHead, '工作树 HEAD == 主仓 HEAD', `${wtHead} vs ${repoHead}`)
 
-// ── [4] 证据 B：行尾（CRLF 坑）真的被治住 ─────────────────────────────────
+// ── [5] 证据 B：行尾（CRLF 坑）真的被治住 ─────────────────────────────────
 say('')
-say('[4] 证据 B：行尾 —— 工作树里必须是 LF（否则 seed.find 的 \\n 匹配 0 次）')
+say('[5] 证据 B：行尾 —— 工作树里必须是 LF（否则 seed.find 的 \\n 匹配 0 次）')
 const seedTargets = [...new Set(readTasks().flatMap((t) => (t.seed?.edits ?? []).map((e) => e.file)))]
 for (const rel of seedTargets) {
   const abs = path.join(DIR, rel)
@@ -227,9 +297,9 @@ for (const rel of seedTargets) {
   check(crlf === 0, `CRLF 计数为 0：${rel}`, `实得 ${crlf}${crlf > 0 ? '  ★ autocrlf 又把行尾改回 CRLF 了' : ''}`)
 }
 
-// ── [5] 证据 C：seed 锚点在**这棵树**里"恰好 1 次"（这才是 CRLF 坑的最终判据）──
+// ── [6] 证据 C：seed 锚点在**这棵树**里"恰好 1 次"（这才是 CRLF 坑的最终判据）──
 say('')
-say('[5] 证据 C：每题 seed.find 在工作树里**恰好命中 1 次**（CRLF 会让它变 0）')
+say('[6] 证据 C：每题 seed.find 在工作树里**恰好命中 1 次**（CRLF 会让它变 0）')
 const seedRows = []
 for (const t of readTasks()) {
   for (const e of t.seed?.edits ?? []) {
@@ -245,9 +315,9 @@ for (const t of readTasks()) {
   }
 }
 
-// ── [6] 证据 D：R1 —— 判据清单在树里"一个都不存在"（存在性断言，无启发式）────
+// ── [7] 证据 D：R1 —— 判据清单在树里"一个都不存在"（存在性断言，无启发式）────
 say('')
-say('[6] 证据 D：R1 —— 判据文件在工作树里的存在性（全部必须为"不存在"）')
+say('[7] 证据 D：R1 —— 判据文件在工作树里的存在性（全部必须为"不存在"）')
 const judgeRows = []
 for (const rel of JUDGE_FILES) {
   const exists = fs.existsSync(path.join(DIR, rel))
@@ -258,9 +328,9 @@ for (const rel of JUDGE_FILES) {
 const judgeInRepo = JUDGE_FILES.filter((rel) => fs.existsSync(path.join(ROOT, rel)))
 check(judgeInRepo.length > 0, `反向自证：判据在主仓里确实存在（${judgeInRepo.length}/${JUDGE_FILES.length}）`, '否则"工作树里没有"是在空集上为真')
 
-// ── [7] 证据 E：工作树确实**有东西**（没被执行错误地清空）────────────────────
+// ── [8] 证据 E：工作树确实**有东西**（没被执行错误地清空）────────────────────
 say('')
-say('[7] 证据 E：工作树不是空壳（被测代码要在）')
+say('[8] 证据 E：工作树不是空壳（被测代码要在）')
 const mustHave = ['package.json', 'packages/switchboard/src/index.ts']
 for (const rel of mustHave) check(fs.existsSync(path.join(DIR, rel)), `存在：${rel}`, '')
 const trackedWt = String(gitIn(DIR, ['ls-files']).stdout ?? '').split('\n').filter((l) => l.trim()).length
@@ -269,21 +339,23 @@ const trackedWt = String(gitIn(DIR, ['ls-files']).stdout ?? '').split('\n').filt
 const ok = problems.length === 0
 result.ok = ok
 result.head = wtHead
-result.checks = { problems, seedRows, judgeRows, judgeInRepo }
+result.checks = { problems, seedRows, judgeRows, judgeInRepo, build: { lib: built.lib, skipped: built.skipped, why: built.why } }
 result.nodeModules = fs.existsSync(path.join(DIR, 'node_modules'))
+result.built = fs.existsSync(built.lib)
 say('')
 say('─'.repeat(78))
-say(`结论：${ok ? '✓ 工作树建好，且全部证据为真（判据不在树里）' : `✗ 有 ${problems.length} 条证据不成立`}`)
+say(`结论：${ok ? '✓ 工作树建好（已构建），且全部证据为真（判据不在树里）' : `✗ 有 ${problems.length} 条证据不成立`}`)
 if (!ok) for (const p of problems) say(`  · ${p}`)
 say('')
 say(`工作树：${DIR}`)
+say(`  ★ 已接依赖（node_modules junction）并**在树内构建**过：packages/switchboard/lib/index.js ${result.built ? '存在' : '**不存在**'}`)
 say(`  改用 --repo 指认这棵树（判据脚本**在主仓里跑**，被检的树是它）：`)
 say(`    node scripts/eval-validate.mjs --repo "${DIR}" --only <id> --prepare <id>`)
 say(`    node scripts/test-injected-message-shape.mjs --repo "${DIR}"`)
 say(`    node scripts/check-all.mjs --repo "${DIR}"`)
 say(`    node scripts/memory-judge-poison-check.mjs --wt "${DIR}"`)
 say(`  （也可以只用环境变量：DSH_EVAL_REPO="${DIR}"）`)
-say(`  工作树里 git 跟踪文件 ${trackedWt} 个；node_modules 链接：${result.nodeModules ? '有' : '无（判据在主仓跑，不需要它）'}`)
+say(`  工作树里 git 跟踪文件 ${trackedWt} 个；node_modules：${result.nodeModules ? '已接（junction → 判据根）' : '**没接上**（构建/判据可能跑不动）'}`)
 say('')
 
 if (jsonOut) {

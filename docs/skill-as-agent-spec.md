@@ -2443,3 +2443,54 @@ cells=OK:0 / NEEDS-EVIDENCE:86 / FAIL:0 / N-A:4
 | **O73** | ★★ **修 regression 子门的 cwd/环境变量传递**（否则 `MODULE_NOT_FOUND` 假红） | **A/B 的真跑** |
 | **O74** | ★ **收紧毒检的中文信号**（消除假阳性；不是弱化） | R1 门能给出 `OK` |
 | **O75** | `eval-isolation-audit.mjs` 自己写死主仓 | 隔离审计的完整性 |
+
+---
+
+## 43. ✅ O72 / O73 / O74 修好并验证 —— 但**又抓到一个"假绿"级缺陷（CRLF ⇒ seed 打不上）**
+
+### 43.1 三处修复（**我逐条复核**）
+
+| # | 修法 | 我的验证 |
+|---|---|---|
+| **O72** | `eval-wt-new.mjs` 新增第 [3] 步：接 `node_modules` junction + **在树内构建** (`packages/switchboard/scripts/build.mjs`) | ✅ `out/_wt/w26-fix/packages/switchboard/lib/index.js` **存在（25136 B）**；**未 seed 时 oracle = `9 passed, 0 failed`（绿）** ⇒ **假红消失** |
+| **O73** | ★ **根因不在 `eval-run`**（它已按 `eval-validate.mjs:63-65` 的设计做）—— 是 **`check-all.mjs` 自己把 `DSH_EVAL_REPO` 误用成了 cwd** ⇒ 改 `check-all.mjs`：子进程 `cwd = JUDGE_ROOT`，被测树靠 `env` 传下去 | ✅ `node scripts/check-all.mjs --repo <wt>` ⇒ **`15 通过 / 0 失败`**，**无 MODULE_NOT_FOUND** |
+| **O74** | 中文词**单凭不再定罪**；新表三组：**判据结构（单条即定罪）/ 文件名像判据（须再满足内容有结构或父目录是判据目录）/ 佐证（永不定罪）** | ✅ ★ **在【干净树】上**：`scanned=165 files=133 **suspects=0** isolation=OK exit=0`；带毒 ⇒ `suspects=6 BROKEN` **6/6 点名**；反证（真复制 `tasks.jsonl`）⇒ 仍被检出 |
+
+★ **O72 的取舍理由值得记**：它**选"树内构建"而不是"复制 `lib/`"**，因为 `seed.edits` 打的是 `src/*.ts`，
+**复制来的 `lib/` 是旧 `src` 的产物 ⇒ 未 seed 能骗过、seed 之后 oracle 依旧绿** ⇒
+★ **"把判据变瞎 = 假绿，比假红更坏"** —— 与我们的价值观一致。
+★ 它还在 `eval-run.mjs` 的 `ensureWorktree`（`--pair --worktreeA/B` 那条路）**补了同一个洞**。
+★ `check-all.mjs` 还**多印一行**："只有 2 道门真的在查被测树，其余查判据根" —— ★ **否则"15 通过"会被误读成"被测树全绿"**（防误读，好）。
+
+### 43.2 ⚠️ 我自己又踩了一个同族陷阱（**场地未复位**）
+
+我第一次跑"正常态"得到 `suspects=6 isolation=BROKEN` —— 看似"O74 没修好"。
+★ **真相**：该脚本 `--poison` **跑完不清理**（汇总行 `wt-cleanup=kept`），那 6 个嫌疑**全在 `_judge_planted/p1..p6/`**（上次植入的诱饵）
+⇒ **我在一棵残留着诱饵的树上跑基线** ⇒ **读数无效**。
+⇒ ★ **纪律（第五个同族陷阱）**：**跑"基线/正常态"之前必须确认实验场地已复位**；工具"不清理"时尤其危险。
+
+### 43.3 ★★★ 新发现：**工作树是 CRLF ⇒ `seed` 匹配 0 次 ⇒ 会让 A/B **假绿**（比假红更坏）
+
+| 检查 | 结果 |
+|---|---|
+| `out/_wt/w26-fix/packages/switchboard/src/index.ts` 里那行在不在 | ✅ 在（`:43  id: randomUUID(),`） |
+| ★ **该文件的 CR 计数** | **523** ⇒ **CRLF** |
+| **主仓同文件** CR 计数 | **0** ⇒ **纯 LF** |
+| `evals/pilot/tasks.jsonl` 的 `find` | `"    id: randomUUID(),\n"` ⇒ **LF** |
+
+⇒ ★★ **工作树里是 CRLF、`find` 是 LF ⇒ `find` 匹配 0 次 ⇒ seed 打不上**
+⇒ **"seed 后应该红"的任务在这个树里【不会红】** ⇒ **A/B 会拿到假绿**（任务看起来"本来就修好了"）。
+⇒ **⇒ 我因此【未能独立复核】"seed ⇒ 红"这条**（子代理报了该证据 —— 它要么用了行尾归一化的 seed，要么用了另一棵树
+  ⇒ **这条差异必须先解决**）。
+
+### 43.4 主仓状态
+
+只有**本次修复的 4 个脚本**被改（`check-all.mjs` / `eval-run.mjs` / `eval-wt-new.mjs` / `memory-judge-poison-check.mjs`，**未提交**）；
+工作树 `git -C <wt> status` 0 行。
+
+### 43.5 新增未闭合
+
+| # | 项 | 挡住 |
+|---|---|---|
+| **O76** | ★★ **工作树 CRLF vs `find` LF ⇒ seed 匹配 0 次 ⇒ 假绿** ⇒ 必须让"工作树文件行尾"与"`find` 的期望"一致（建树时强制 LF），**或**让 seed 做**行尾归一化匹配**；并补一条**"seed 后必须红"的自证门** | ★ **A/B 的真跑**（当前它是**假绿源**） |
+| **O77** | **毒检 `--poison` 后不清理** ⇒ 后续"正常态"必然 `BROKEN` ⇒ **容易把"场地未复位"误读成"隔离破了"**（我今天就误读了一次） | 判据的可重复使用 |
