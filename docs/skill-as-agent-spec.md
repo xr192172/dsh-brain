@@ -1452,3 +1452,70 @@ if (this.retained?.text === snapshot) return;      // ★ 纯文本等值比较
 | # | 项 | 挡住 |
 |---|---|---|
 | **O37** | ★ **裁决 P0「记忆宿主进程形态」**（§24.4 的 a/b/c） | **P1 / P2 后半 / O34 / O35 全部**（关键路径） |
+
+---
+
+## 25. ★★★★★ P0 **已有答案**（在 `memory-asset-triage.md:388-392` 里早就定了）+ 用户两问的答复
+
+> 用户提问：**① 如果选 (c)，(a) 里的论文系统不就被废弃了？② 如果选 (a)，能不能做成"和 DSH 一同启动" —— DSH 启动时自动拉起它即可？**
+> **⇒ 查证后发现：这两问的答案文档里都已写好，而 §24.4 我给的"三选一"是【我把已定的处置当成了未决问题】。**
+
+### 25.1 ★★★★ 决定性证据：`docs/memory-asset-triage.md:388-392` 的分层表（逐字）
+
+| 层 | 语言 | 理由 |
+|---|---|---|
+| **存储 / 图 / 检索 / 睡眠 / 论文 / 技能树**（`sqlite_store`·`graph_*`·`retrieval*`·`rrf`·`gravity_field`·`sleep_*`·`knowledge`·`skill_tree`·`tool_feedback`） | **Go 保留** | ① 纯数据+算法，语言无关 ② **全部 Go test 是资产** ③ ★ **独立进程不需要和 cordis 同进程** ④ **`sleep_experiment.go` 的进程隔离（Windows Job Object）在 Go 侧已实现** —— 沙箱执行天然留在这里 |
+| provider 注册 / 工具声明 / 委派 / 注入 / 决策层接入 | **必须 TS** | 要进 cordis 插件体系、要动 tools 段 |
+| **两者之间** | ★ **MCP（首选）或 loopback JSON-RPC** | ★ **"DSH 侧用现成 `mcp-client`"**；Go 侧加一个面 —— 而**加面的成本已被 `memory_view` 插件证明很低** |
+
+⇒ ★★★★ **⇒ 所以 P0 的答案早在这张表里**：
+1. **记忆宿主那一整块（含论文系统）保留 Go、作为【独立进程】** ⇒ **直接否掉 (b)**（DSH 插件内 = 要把它重写成 TS）**与 (c)**（文件式 = 砍掉检索/图，也就砍坏论文系统）；
+2. **接口 = MCP（首选）**，且 **"DSH 侧用现成 `mcp-client`" 是文档逐字写的**；
+3. `:390` 的第 ③ 条理由正是 **"独立进程不需要和 cordis 同进程"**。
+
+**⇒ §24.4 的"三选一"作废** —— 那是我把**已定的处置**当成了未决问题（**又一个"没登记导致误判"的同源病**：这张表没人登记进索引）。
+
+### 25.2 ✅ 答复用户问题 ②：「和 DSH 一同启动，DSH 启动时自动拉起」—— **能，而且不用发明**
+
+**我核验了 `dsh-mcp-client` 的实际机制**（逐字）：
+- `:16` `transport: stdio`；`:40-43` **`command` = "**Executable to spawn**"**、`args`、`env`（"merged on top of scrubbed ambient env"）、**`cwd` = "Working directory for the **child process**"**；
+- ★ `:115` **"Reconnect triggers on transport close — a crashed stdio child fires it"** ⇒ **有 supervisor，子进程崩了会重连**；
+- 现场先例：`~/.dsh/profiles/exp-base/cordis.patch.yml:34-48` 那一行就是**用 `mcp-client` 拉起 `design-canvas/dist/src/server.js`** —— **已经在这么跑了**。
+
+⇒ **⇒ 记忆宿主做成一个 MCP server ⇒ 由 `mcp-client` 在 DSH 启动时拉起、由 DSH 的 supervisor 管** ⇒ **用户不用手动起任何进程**。
+⇒ ★ 额外收获：它**同时就是 `capability-registry` 的一条 `kind: mcp-server` 能力源**（与既有分类天然对齐），
+  **将来实现后，它本身就是 O35 需要的那条【真实候选】**。
+⚠️ **未逐字验证**：mcp-client 的子进程**生命周期是否严格绑定 DSH 进程**（README 只写了 reconnect）⇒ 记为待确认（**O38**）。
+⚠️ **我撤回一处**：上一会话记忆里的 "`dsh-init-boot` 的 `init_file`（once per launch, out-of-process）" —— **`node_modules/@deepseek-ai/` 里【没有】`dsh-init-boot`**（只有 `dsh-app-boot`）⇒ 那条**未找到**，且**不需要它**（`mcp-client` 已足够）。
+
+### 25.3 ✅ 答复用户问题 ①：「选 (c) 的话论文系统就被废弃了？」—— **会，而且比"废弃"更糟：退化成"能存不能找"**
+
+**逐字证据（`docs/memory-asset-triage.md`）**：
+- `:51` `knowledge.go` —— `KnowledgeBase` + `KnowledgeEntry`（**"知识 = 论文"**：Claim/Scope/Transferability/Limitations/SourceNodes/Verified/`JournalTier`/Experiment）
+- ★ `:60` **`sleep_rem.go` Phase 2 **REM 跨社区关联（论文推论文）**：`related_to`/`depends_on`/`contradicts`/`supersedes`**
+- `:30` `graph_cache.go` —— "the single source of truth for in-memory **graph** state"；读写分离
+- `:227`/`:398` —— **"发表门的判据持有者（作者/审稿分身）+ **谱系毒性召回**的执行者都住它里面"**
+
+⇒ ★ **论文系统的核心价值是"论文推论文"（跨社区关联）与"谱系毒性召回"** —— 这两者靠的是**图 + 检索**，
+  而 **`graph_*` / `retrieval*` / `rrf` 全在"Go 保留"的那一块里**。
+⇒ **⇒ (c) 不是"论文系统被废弃"，而是它退化成"能存不能找"** —— 而"找"正是它的用途。
+⇒ 并且 `:390` 的理由 ④（**Windows Job Object 进程隔离在 Go 侧已实现**）意味着：**连"沙箱执行"都天然留在那一侧** ⇒ 拆散它代价更大。
+
+### 25.4 ⇒ 结论：**O37 / O34 解除**，可以直接往下走
+
+| 项 | 原状态 | 现状态 |
+|---|---|---|
+| **O37（裁决 P0）** | 待裁决 | ✅ **有答案**：**(a) 独立进程 + MCP 面 + 由 `mcp-client` 拉起**，依据 `memory-asset-triage.md:388-392` —— **这不是新决定，是执行既有处置** |
+| **O34（`skill-tree` 候选池）** | 卡在 P0 | ✅ **路径明确**：候选池住在 Go 宿主里，DSH 侧经 MCP 取 ⇒ 不再需要"给 skill-tree 补 TS store" |
+
+### 25.5 新增：把这条处置**登记**（病根是它没人登记）
+
+⇒ **`MEMORY.md` 主题索引补记**：`memory-asset-triage.md:388-392` **已定"存储/图/检索/睡眠/论文/技能树 = Go 保留 + MCP 面 + `mcp-client` 拉起"** ——
+**任何人（含未来的我）想知道"记忆宿主放哪"都要先读这一行，不要再当成未决问题重开。**
+
+### 25.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O38** | **`mcp-client` 子进程的生命周期是否严格绑定 DSH 进程**（README 只写 reconnect） | 影响"DSH 退出后宿主是否残留" |
+| **O39** | **Go 宿主项目的当前位置与状态**（`ai-base/agent-shell` 是只读上游 ⇒ 宿主是"给上游加一个 MCP 面"还是"新建一个仓"？） | P1 的落点 |

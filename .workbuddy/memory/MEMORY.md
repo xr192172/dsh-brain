@@ -244,6 +244,16 @@
 - ★ **它与 `packages/skill-tree`（自学习 skill 树，**孤儿包**：只被自己包内引用、未挂载）双向零引用、关系未裁决** ⇒ **O30**。
 - 评估与更正过程见 `docs/skill-as-agent-spec.md` **§20**。
 
+★★ **记忆宿主的形态【已定，别再当未决问题重开】**（2026-09-22 补登；病根同"没登记"）：
+- **`docs/memory-asset-triage.md:388-392`** 的分层表逐字定过：
+  **「存储 / 图 / 检索 / 睡眠 / 论文 / 技能树（`sqlite_store`·`graph_*`·`retrieval*`·`rrf`·`gravity_field`·`sleep_*`·`knowledge`·`skill_tree`·`tool_feedback`）= 【Go 保留】**（理由：纯数据+算法；**Go test 是资产**；**独立进程不必与 cordis 同进程**；**`sleep_experiment.go` 的 Windows Job Object 隔离在 Go 侧已实现**）；
+  **provider 注册 / 工具声明 / 委派 / 注入 / 决策层接入 = 必须 TS**；
+  **两者之间 = 【MCP 首选】或 loopback JSON-RPC —— 且逐字写着「DSH 侧用现成 `mcp-client`」**。
+- ⇒ **所以"记忆宿主"= 独立 Go 进程 + MCP 面，由 `mcp-client` 在 DSH 启动时拉起**（`mcp-client` 实测：`command` = "Executable to spawn"、**子进程崩了会触发 reconnect**；现场先例 = design-canvas 那一行）。
+- ⇒ **推论**：`skill-tree` **不需要**在 TS 侧补存储（原 O34 解除）；**P1 的落点** = 给上游 Go 加一个 MCP 面（成本"已被 `memory_view` 插件证明很低"）。
+- ⚠️ 不要把 (b)「DSH 插件内重写」或 (c)「TS 文件式」当成候选 —— 它们会**砍坏论文系统**：
+  `sleep_rem.go` 的"**论文推论文**（跨社区关联）"与"**谱系毒性召回**"依赖 `graph_*`/`retrieval*`，**而它们都在"Go 保留"那一侧**。
+
 | 主题 | 文件 | 什么时候读 |
 |---|---|---|
 | **接手指南（下一项）** | `topics/next-task-handover.md` | **新会话接手先读这个**（顶部=回执结构） |
