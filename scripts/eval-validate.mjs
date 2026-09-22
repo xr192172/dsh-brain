@@ -26,26 +26,87 @@
  *   node scripts/eval-validate.mjs [--tasks evals/pilot/tasks.jsonl] [--only <id>] [--json out/eval-validate.json]
  *   node scripts/eval-validate.mjs --prepare <id>    # 只把题打坏（留给 Agent 修），写还原清单
  *   node scripts/eval-validate.mjs --restore         # 按清单还原（幂等）
+ *   node scripts/eval-validate.mjs --repo <工作树> …  # ★ 判据作用于**你指定的那棵树**（R1 隔离树用它）
+ *
+ * ★★ `--repo <path>`（＞ 环境变量 `DSH_EVAL_REPO` ＞ 硬编码 fallback）：
+ *   - **不给** ⇒ 一切照旧（`REPO` 就是原来那个字符串，判据、任务集、cwd、退出码逐字不变）。
+ *   - **给了** ⇒ seed 打在 `<path>`、oracle 判 `<path>`；而**判据本身**仍从本脚本所在的
+ *     **判据根**跑（因为隔离树里按 R1 没有 `scripts/`、没有 `evals/`），并用 `DSH_EVAL_REPO`
+ *     把被测树告诉它。任务集在被测树里找不到时回落到判据根那一份。
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
-const REPO = 'D:/project_develop/dsh-brain'
 const argv = process.argv.slice(2)
 const argOf = (k) => {
   const i = argv.indexOf(k)
   return i < 0 ? null : (argv[i + 1] ?? null)
 }
-const TASKS = path.resolve(REPO, argOf('--tasks') ?? 'evals/pilot/tasks.jsonl')
+/** ★ 判据根：**本脚本所在的仓库** —— 判据（含任务集）住在这里，永远是被信的那一侧。 */
+const JUDGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+/**
+ * ★★ 2026-09-22（O69 / R1「判据必须在 Agent 够不到的地方」）——
+ * 判据脚本必须能被**指向你指定的工作树**，否则隔离在原理上不可能生效
+ * （旧版硬编码 `REPO='D:/project_develop/dsh-brain'` + `process.cwd` 出现 0 次 ⇒ 判据永远看主仓）。
+ *
+ * 优先级：`--repo <path>` ＞ 环境变量 `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）。
+ * ★ **不许弱化判据**：两个都没给时 `REPO` **就是改动前那个字符串**、`JUDGE_ROOT` 与它同值
+ *   ⇒ 路径、`cwd`、判据口径、退出码全部逐字不变。
+ *
+ * ## `REPO`（被测树）与 `JUDGE_ROOT`（判据根）是**两件事**
+ * - `REPO`：seed 打在它身上、oracle 判的是它 —— 隔离工作树（`scripts/eval-wt-new.mjs`）就是它。
+ * - `JUDGE_ROOT`：**判据从哪儿跑**。R1 要求判据不在被测树里 ⇒ 隔离树按规格排除了 `scripts/` 与 `evals/`
+ *   ⇒ 被测树里**没有** `scripts/test-*.mjs`，也**没有** `evals/pilot/tasks.jsonl`。
+ *   ⇒ 所以：① 子进程（oracle/regression）从 `JUDGE_ROOT` 起、用 `DSH_EVAL_REPO` 指认被测树；
+ *            ② 任务集在被测树里找不到时**回落到判据根**的那一份。
+ *   ⚠️ 这两条**只在显式给了 `--repo` / `DSH_EVAL_REPO` 时才生效**（不给时 `REPO === JUDGE_ROOT`，见上）。
+ */
+const REPO_GIVEN = argOf('--repo') ?? process.env.DSH_EVAL_REPO ?? null
+const REPO = REPO_GIVEN ? path.resolve(REPO_GIVEN) : 'D:/project_develop/dsh-brain'
+/** 任务集：显式 `--tasks` 优先；否则先看被测树里有没有；再回落到**判据根**（`--repo <工作树>` 时就是这条）。 */
+const TASKS = (() => {
+  const given = argOf('--tasks')
+  if (given) return path.resolve(REPO, given)
+  const local = path.resolve(REPO, 'evals/pilot/tasks.jsonl')
+  if (!REPO_GIVEN || fs.existsSync(local)) return local
+  return path.resolve(JUDGE_ROOT, 'evals/pilot/tasks.jsonl')
+})()
 const ONLY = argOf('--only')
-const JSON_OUT = path.resolve(REPO, argOf('--json') ?? 'out/eval-validate.json')
-const BACKUP_DIR = path.join(REPO, 'out', 'eval-backup')
-const MANIFEST = path.join(REPO, 'out', 'eval-prepare.json')
+/**
+ * ★★ 判据自己的产物（**改前字节的备份** / 还原清单 / 校验报告）**绝不写进被测树**。
+ *
+ * 为什么是 R1 的要害：`prepare` 备份的是**改前**字节 —— 对"把已修好的改动打回去"这类题，
+ * 那份备份**就是答案**。2026-09-22 实测：把它放在 `<wt>/out/eval-backup/` 里时，
+ * `memory-judge-poison-check --wt <wt>` **真的把它列成了疑点**
+ * （`out/eval-backup/b5593b3bb6344807-index.ts`，命中 `content/zh-expected`）——
+ * 也就是"答案躺在 Agent 能读能写的目录里"。
+ * ⇒ 给了 `--repo` 时，产物一律落到**判据根**的 `out/eval-wt-state/<被测树 8 位指纹>/`
+ *   （**按被测树分桶**，让并发跑不同工作树时不会互相踩同一个清单）；
+ *   不给 `--repo` 时就是原来的 `<REPO>/out/…`，**逐字不变**。
+ */
+const STATE_DIR = REPO_GIVEN
+  ? path.join(JUDGE_ROOT, 'out', 'eval-wt-state', crypto.createHash('sha1').update(REPO).digest('hex').slice(0, 8))
+  : path.join(REPO, 'out')
+const JSON_OUT = REPO_GIVEN
+  ? argOf('--json')
+    ? path.resolve(argOf('--json'))
+    : path.join(STATE_DIR, 'eval-validate.json')
+  : path.resolve(REPO, argOf('--json') ?? 'out/eval-validate.json')
+const BACKUP_DIR = path.join(STATE_DIR, 'eval-backup')
+const MANIFEST = path.join(STATE_DIR, 'eval-prepare.json')
 
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
-const run = (cmd) => spawnSync(cmd[0], cmd.slice(1), { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+/** 判据（oracle / regression）一律从**判据根**跑；给了 `--repo` 才带上 `DSH_EVAL_REPO`（不给 ⇒ 与改动前同路）。 */
+const run = (cmd) =>
+  spawnSync(cmd[0], cmd.slice(1), {
+    cwd: JUDGE_ROOT,
+    ...(REPO_GIVEN ? { env: { ...process.env, DSH_EVAL_REPO: REPO } } : {}),
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
 const results = []
 const say = (s) => console.log(s)
 

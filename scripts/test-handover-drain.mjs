@@ -24,7 +24,17 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const REPO = 'D:/project_develop/dsh-brain'
+/**
+ * ★★ 2026-09-22（O69 / R1「判据必须在 Agent 够不到的地方」）——
+ * 本题（cli-0002 / cli-0003）的 oracle 也必须能被**指向你指定的工作树**。
+ * 优先级：`--repo <path>` ＞ 环境变量 `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）。
+ * ★ **不许弱化判据**：两个都没给时 `REPO` **就是改动前那个字符串** ⇒ 输出与退出码逐字不变。
+ */
+const REPO_GIVEN = (() => {
+  const i = process.argv.indexOf('--repo')
+  return (i < 0 ? null : (process.argv[i + 1] ?? null)) ?? process.env.DSH_EVAL_REPO ?? null
+})()
+const REPO = REPO_GIVEN ? path.resolve(REPO_GIVEN) : 'D:/project_develop/dsh-brain'
 const LIB = path.join(REPO, 'packages/switchboard/lib/drain.js')
 const IDX = path.join(REPO, 'packages/switchboard/src/index.ts')
 const COORD = path.join(REPO, 'packages/switchboard/src/coordinator.ts')

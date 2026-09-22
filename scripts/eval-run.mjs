@@ -19,6 +19,10 @@
  *   node scripts/eval-run.mjs --list                            # 列出任务
  *   node scripts/eval-run.mjs --plan --task cli-0001            # 只打印计划（不动任何东西）
  *   node scripts/eval-run.mjs --task cli-0001 --session <sid>   # 真跑（见下面的"安全和副作用"）
+ *   node scripts/eval-run.mjs --task cli-0001 --session <sid> --worktree <dir>
+ *                                                               # ★ 跑在**隔离工作树**上（R1：
+ *                                                               #   seed/oracle/regression/记账全作用于它；
+ *                                                               #   判据从主仓跑，用 DSH_EVAL_REPO 指认该树）
  *
  * ## 安全和副作用（真跑会动东西，先读）
  *
@@ -583,7 +587,14 @@ if (!NO_TASK_FLAGS.some((f) => has(f)) && (has('--plan') || (!sid && !has('--pai
   console.log(` 工作区是否干净：${wt.clean ? '已跟踪文件无改动 ✓' : '**有已跟踪文件被改**（真跑会被拒绝）'}`)
   if (wt.untracked.length) console.log(` 未跟踪的新文件（不拦实验）：${wt.untracked.slice(0, 5).join(' / ')}${wt.untracked.length > 5 ? ` …等 ${wt.untracked.length} 项` : ''}`)
   console.log(` 会话：${sid ? sid : '(未指定 —— 真跑必须 --session <sessionId>，会往那份会话里发题面)'}`)
-  console.log(`\n真跑：node scripts/eval-run.mjs --task ${task.id} --session <sessionId>`)
+  // ★ 给了 `--worktree` 才多打这一行（不给时输出与改动前逐字相同）
+  if (argOf('--worktree')) {
+    console.log(` 被测工作区：${path.resolve(argOf('--worktree'))}（seed / oracle / regression / 记账都作用在它身上）`)
+  }
+  console.log(
+    `\n真跑：node scripts/eval-run.mjs --task ${task.id} --session <sessionId>` +
+      (argOf('--worktree') ? ` --worktree "${path.resolve(argOf('--worktree'))}"` : ''),
+  )
   console.log(`（计划里含 ${task.metrics?.length ?? 0} 项要记账的指标：${(task.metrics ?? []).join(', ')}）`)
   process.exit(0)
 }
@@ -594,10 +605,18 @@ if (!NO_TASK_FLAGS.some((f) => has(f)) && (has('--plan') || (!sid && !has('--pai
  * @returns {Promise<object>} report（含 stages）
  */
 async function runArm({ task, sid, arm = null, label = '', profile = null, ignoreWindows = [], armLabel = null, worktree = null }) {
-  // ★ 该臂的工作区（不给 = 主仓库）。判据脚本都在这里面跑；`sh` 的 cwd 跟着走。
+  // ★ 该臂的**被测工作区**（不给 = 主仓库）。Agent 的改动 / seed / 还原 / git 读数都作用在它身上。
   const WORK = worktree ? path.resolve(worktree) : REPO
-  const shW = (cmd, args) => sh(cmd, args, { cwd: WORK }) // 判据/seed 用
-  const shJudgeW = (cmd) => sh(cmd[0], cmd.slice(1), { cwd: WORK, env: { ...process.env, CODEBUDDY_SAFE_DELETE_ENABLED: '0' } })
+  // ★★ 2026-09-22（O69 / R1「判据必须在 Agent 够不到的地方」）：
+  //   **判据不在这棵树里** —— 隔离工作树（`scripts/eval-wt-new.mjs`）按 R1 排除了 `scripts/` 与 `evals/`
+  //   ⇒ 判据一律从**主仓（判据根）**跑，并用环境变量 `DSH_EVAL_REPO` 告诉它"被测的是哪棵树"。
+  //   ★ 不给 `--worktree` 时 `WORK === REPO` ⇒ 既不传 `--repo`、也不加环境变量 ⇒ **与改动前同路**。
+  //   （原先写的是 `cwd: WORK`：在隔离树上它连 `scripts/eval-validate.mjs` 都找不到 ⇒ 装置根本跑不起来。）
+  const judgeEnv = (extra = {}) => ({ ...process.env, ...(worktree ? { DSH_EVAL_REPO: WORK } : {}), ...extra })
+  // ★ 名字沿用改动前的 `shW` / `shJudgeW`（调用点都不用动 ⇒ diff 最小、可读性最好）；
+  //   变的只是**它们从哪儿跑**：从判据根（主仓），并带上 `DSH_EVAL_REPO`。
+  const shW = (cmd, args) => sh(cmd, args, { env: judgeEnv() }) // eval-validate（seed / 还原）
+  const shJudgeW = (cmd) => sh(cmd[0], cmd.slice(1), { env: judgeEnv({ CODEBUDDY_SAFE_DELETE_ENABLED: '0' }) }) // oracle / regression
   const t0 = Date.now()
   const tag = label ? `${label} ` : ''
   const report = { task: task.id, arm, session: sid, at: new Date().toISOString(), stages: {} }
@@ -608,7 +627,7 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
   // ★★ 2026-09-21 修（**跑错仓库**）：这里**没传 cwd** ⇒ 默认落在主仓 `REPO`，而 seed/还原应作用于
   //   **该臂的 `WORK`** ⇒ 早退路径（prepare 失败 / 无信号 / 并发写者 / 发题面失败）会把改动**留在臂的 worktree 里**，
   //   下一轮 `--prepare` 连环失败，且"看起来跑过"⇒ **假绿**。改成与 ⑤ 同族的 `{cwd: WORK}`。
-  const restoreAll = () => sh('node', ['scripts/eval-validate.mjs', '--restore', '--force'], { cwd: WORK })
+  const restoreAll = () => shW('node', ['scripts/eval-validate.mjs', '--restore', '--force'])
   /** 跑完必须干净：否则后面的（尤其成对的后续跑）会在 `--prepare` 上连环失败（2026-09-20 实测）。
    *  判据只看**代码/脚本**有没有残留（文档/记忆被别的会话改是常态，不该算残留）。 */
   const assertClean = (where) => {
@@ -1413,11 +1432,15 @@ if (!Number.isFinite(REPEAT) || REPEAT > 10) {
 }
 
 /** 跑同一 (task, preset) k 次：每次都用**新建空会话** + preset 回读验证；返回每次的 stages。 */
-async function runArmRepeated(task, preset, k, label) {
+async function runArmRepeated(task, preset, k, label, worktree = null) {
   const runs = []
   for (let i = 1; i <= k; i++) {
     const tag = k > 1 ? `${label} 第 ${i}/${k} 次` : label
-    const sidArm = path.basename(String(sh('node', ['scripts/session-create.mjs']).stdout).trim())
+    // ★ 工作树模式下把会话的 cwd 也指到那棵树（Agent 必须真的在那棵树里干活）；
+    //   不给 worktree 时展开为空 ⇒ 命令行与改动前逐字相同。
+    const sidArm = path.basename(
+      String(sh('node', ['scripts/session-create.mjs', ...(worktree ? ['--cwd', worktree] : [])]).stdout).trim(),
+    )
     if (!sidArm || !sidArm.startsWith('session-')) {
       console.error(`${tag}: 建会话失败 ⇒ 中断`)
       break
@@ -1949,7 +1972,35 @@ if (has('--pair')) {
 }
 
 // ── 单臂 CLI（`--repeat k` 时就是 pass^k）─────────────────────────────────
-const wtRun = worktreeState()
+// ★★ 2026-09-22（O69 / R1）：单臂也支持 `--worktree <path>` ——
+//   seed / oracle / regression / 记账（git diff --stat、status、还原）**全部**作用在指定工作树上。
+//   ★ 缺省（不给 `--worktree`）= 主仓 ⇒ 与改动前**同路**。
+//   ★ 这里只做**只读**校验（不建树、不刷新、**不接 node_modules**）：
+//     判据树由 `scripts/eval-wt-new.mjs` 建，而它按 R1 排除了 `scripts/` 与 `evals/`
+//     ⇒ 判据从**主仓**跑，用 `DSH_EVAL_REPO` 指认这棵树（见 `runArm` 的 `judgeEnv`）。
+const wtSingleArg = argOf('--worktree')
+const WORK_SINGLE = wtSingleArg ? path.resolve(wtSingleArg) : null
+if (WORK_SINGLE) {
+  const repoHeadSingle = String(sh('git', ['rev-parse', 'HEAD']).stdout ?? '').trim() || null
+  const hs = worktreeHeadState(WORK_SINGLE, repoHeadSingle)
+  if (!hs.exists) {
+    console.error(
+      `--worktree ${WORK_SINGLE} 不是一份 git worktree（缺 .git）⇒ 拒绝跑。\n` +
+        `  先起一棵隔离树：node scripts/eval-wt-new.mjs --name <名字>`,
+    )
+    process.exit(1)
+  }
+  if (!hs.matches) {
+    console.error(
+      `--worktree 陈旧，拒绝跑：\n     worktree HEAD = ${hs.head}\n     主仓     HEAD = ${repoHeadSingle}\n` +
+        `  ⇒ 题面会取自一个版本、判据脚本取自另一个版本 ⇒ 结果不可信（假绿）。刷新：\n` +
+        `     git -C "${WORK_SINGLE}" checkout --detach ${repoHeadSingle}`,
+    )
+    process.exit(1)
+  }
+  console.log(`被测工作区：${WORK_SINGLE}（HEAD=${hs.head} 与主仓一致；判据从主仓跑，用 DSH_EVAL_REPO 指认它）\n`)
+}
+const wtRun = worktreeState(WORK_SINGLE ?? REPO)
 if (!wtRun.clean) {
   console.error(
     '有**已跟踪的代码/脚本被改动**，拒绝跑（seed/还原以 HEAD 为基准）：\n' +

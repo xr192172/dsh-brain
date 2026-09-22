@@ -2392,3 +2392,54 @@ cells=OK:0 / NEEDS-EVIDENCE:86 / FAIL:0 / N-A:4
 | **O69** | ★★ **修 R1**：给 `eval-validate.mjs` / `test-injected-message-shape.mjs` / `check-all.mjs` 等**加工作树参数**（或环境变量），并把判据移出被测 cwd | **A/B 的前置**（当前是主线的真阻塞） |
 | **O70** | **face 指纹的权威算法**应当可被独立调用（现在 `face-audit.mjs` 无导出 ⇒ 别人只能重写一份，容易出现我俩数值不一致这种局面） | 复核能力 |
 | **O71** | **`eval-run.mjs` 的单臂路径不传 worktree**（`WORK = REPO`）⇒ 现有装置无法在隔离树里跑 | 与 O69 同源 |
+
+---
+
+## 42. ✅ R1 修复（O69/O71 实质达成）—— 但**暴露三处待修**，其中两条会直接毁掉 A/B
+
+### 42.1 交付
+
+| 类型 | 内容 |
+|---|---|
+| **改 5** | `eval-validate.mjs` / `test-injected-message-shape.mjs` / `check-all.mjs` / `test-handover-drain.mjs` —— 统一 **`--repo <path>` ＞ 环境变量 `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）**；`eval-run.mjs` 单臂路径支持 **`--worktree <path>`** |
+| **增 1** | ★ **`scripts/eval-wt-new.mjs`** —— `git worktree add` + **`sparse-checkout` 排除 `scripts/` 与 `evals/`**（**排除 ≠ 删除** ⇒ 工作树 `git status` 仍干净、`git diff --stat` 不受影响），全程 **`-c core.autocrlf=false`**（治上次那 CRLF 坑） |
+| 工作树 | `out/_wt/w25-R1` |
+
+### 42.2 我的独立复核
+
+| 项 | 结果 |
+|---|---|
+| **三优先改造** | ✅ `eval-validate.mjs:67` `const REPO_GIVEN = argOf('--repo') ?? process.env.DSH_EVAL_REPO ?? null`；文档逐字："`--repo` ＞ `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）" |
+| ★★ **判据能否作用于指定树** | ✅ **`--repo <wt>` 红 / `--repo <主仓>` 绿**（我复跑：wt = `1 passed, 1 failed`；主仓 = `9 passed, 0 failed`） |
+| ★★ **被测树里有没有判据** | ✅ **我抽查 4/4 全不存在**（`test-injected-message-shape.mjs` / `check-all.mjs` / `eval-validate.mjs` / `evals/pilot/tasks.jsonl`）⇒ **R1 的实质目标达成** |
+| 工作树干净度 / 主仓未污染 | ✅ wt `git status` 0 行；主仓只有**本次修的 5 个脚本**（未提交），无其它污染 |
+
+⚠️ **一处读数差异要如实记**：子代理报 wt 红为 `0 passed, 2 failed`，我复跑得到 **`1 passed, 1 failed`** ⇒ **两次的 wt 状态不同**（或它 seed 过）。
+★ 而且**我这次的红，原因是【缺编译产物】而非 seed 生效**（见 O72）⇒ **"红"本身成立，但红的理由要看清**。
+
+### 42.3 ⚠️ 三处待修（**我全部复核证实**）
+
+| # | 问题 | 证据 | 后果 |
+|---|---|---|---|
+| **O72** | ★★ **工作树缺编译产物**：`out/_wt/w25-R1/packages/switchboard/lib/index.js` **不存在** | 我实测不存在；oracle 直接报"编译产物存在 — … 不存在，**先构建 switchboard**" | ⇒ **oracle 假红** ⇒ **A/B 前必须让工作树可编译**（或用带 `lib/` 的树） |
+| **O73** | ★★ **`eval-run` 给子门也传了 `DSH_EVAL_REPO`** ⇒ 子门 cwd = 工作树 ⇒ `scripts/` 被 sparse 排除 ⇒ **`MODULE_NOT_FOUND`** | 我实测 `node scripts/check-all.mjs --repo <wt>` **崩了**（Node 报错尾巴） | ⇒ **regression 子门假红** ⇒ **A/B 前必修**（要么固定子门 cwd 为判据根、要么 regression 不带该变量） |
+| **O74** | ★★ **毒检假阳性**：`memory-judge-poison-check.mjs` 的 `content/zh-expected` 信号把**任何提到"期望值 / 判据 / 答案"的中文文本**当嫌疑 | 我实测：正常态 `scanned=124 files=97 **suspects=15** isolation=BROKEN exit=3`；命中的就是它自己文档里那句中文字样 | ⇒ **在有真实内容的树里必然 `BROKEN`** ⇒ 门 3 的 `OK` 侧拿不到。★ **修它是"修假阳性"，不是"弱化判据"**（同 `capability-sources.mjs` 头部那句"**假漂移比不报更坏**"） |
+
+### 42.4 子代理守住的纪律（值得记）
+
+**它明确拒绝为让门 3 变绿去弱化判据** —— 原话意思：修它＝弱化判据，纪律禁止，故留原样。
+⇒ ★ **这是正确的取舍**：**门没绿，但它报的是"工具假阳性"，而不是把工具改松** ⇒ 把判断留给上游（我们）来定"是该修工具还是该改布置"。
+
+### 42.5 其它边界（如实记）
+
+- **未真跑 `runArm`**（无合法会话 + 禁起 DSH 服务）⇒ `--worktree` 那条只验证到守卫与静态路径。
+- `scripts/eval-isolation-audit.mjs`（做隔离审计却**自己写死主仓**）在改动范围外 ⇒ 建议单独立项（**O75**）。
+
+### 42.6 新增未闭合
+
+| # | 项 | 挡住 |
+|---|---|---|
+| **O72** | ★★ **隔离工作树要可编译**（或 oracle 要能容忍未构建） | **A/B 的真跑** |
+| **O73** | ★★ **修 regression 子门的 cwd/环境变量传递**（否则 `MODULE_NOT_FOUND` 假红） | **A/B 的真跑** |
+| **O74** | ★ **收紧毒检的中文信号**（消除假阳性；不是弱化） | R1 门能给出 `OK` |
+| **O75** | `eval-isolation-audit.mjs` 自己写死主仓 | 隔离审计的完整性 |

@@ -21,13 +21,26 @@
  *    ※ 注意：注释里别写 `packages` + `*` + `/src` 那种连写的通配路径 ——
  *      里面的 `*` `/` 会**提前闭合块注释**，报错还会指向后面某一行（踩过）。
  *
- * 用法：node scripts/test-injected-message-shape.mjs
+ * 用法：node scripts/test-injected-message-shape.mjs [--repo <工作树>]
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const REPO = 'D:/project_develop/dsh-brain'
+/**
+ * ★★ 2026-09-22（O69 / R1「判据必须在 Agent 够不到的地方」）——
+ * 判据脚本必须能被**指向你指定的工作树**，否则隔离在原理上不可能生效。
+ *
+ * 优先级：`--repo <path>` ＞ 环境变量 `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）。
+ * ★ **不许弱化判据**：两个都没给时 `REPO` **就是改动前那个字符串** ⇒ 行为逐字不变。
+ *   （不给 worktree 时仍然看主仓，这是"默认"的定义；给了才改看别处。）
+ */
+const REPO_ARG = (() => {
+  const i = process.argv.indexOf('--repo')
+  return i < 0 ? null : (process.argv[i + 1] ?? null)
+})()
+const REPO_GIVEN = REPO_ARG ?? process.env.DSH_EVAL_REPO ?? null
+const REPO = REPO_GIVEN ? path.resolve(REPO_GIVEN) : 'D:/project_develop/dsh-brain'
 const LIB = path.join(REPO, 'packages/switchboard/lib/index.js')
 
 let pass = 0

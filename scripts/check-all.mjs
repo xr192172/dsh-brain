@@ -19,12 +19,26 @@
  *   node scripts/check-all.mjs
  *   node scripts/check-all.mjs --only capability
  *   node scripts/check-all.mjs --list
+ *   node scripts/check-all.mjs --repo <工作树>      # ★ 把各道门指向指定的工作树跑
  */
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
-const REPO = 'D:/project_develop/dsh-brain'
 const argv = process.argv.slice(2)
+/**
+ * ★★ 2026-09-22（O69 / R1「判据必须在 Agent 够不到的地方」）——
+ * 判据脚本必须能被**指向你指定的工作树**，否则隔离在原理上不可能生效。
+ *
+ * 优先级：`--repo <path>` ＞ 环境变量 `DSH_EVAL_REPO` ＞ **原来的硬编码值**（fallback）。
+ * ★ **不许弱化判据**：两个都没给时 `REPO` **就是改动前那个字符串** ⇒ 行为逐字不变
+ *   （门列表、`--only` / `--list`、判据口径、退出码全部照旧）。
+ */
+const repoArg = (() => {
+  const i = argv.indexOf('--repo')
+  return i < 0 ? null : (argv[i + 1] ?? null)
+})()
+const REPO_GIVEN = repoArg ?? process.env.DSH_EVAL_REPO ?? null
+const REPO = REPO_GIVEN ? path.resolve(REPO_GIVEN) : 'D:/project_develop/dsh-brain'
 const only = (() => {
   const i = argv.indexOf('--only')
   return i < 0 ? null : argv[i + 1]
