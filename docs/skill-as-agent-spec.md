@@ -2611,3 +2611,148 @@ CR 0 → 523     而且 git status --porcelain 仍然为空（静默）
 | # | 项 | 挡住 |
 |---|---|---|
 | **O80** | ★★ **接线**：把记忆面接进被测 agent（**(b) 注入优先**），且**store 可按臂隔离** | **A/B 的真跑**（唯一剩下的前置） |
+
+---
+
+## 46. ★★★★ 用户质疑"这个 DeepSeek V4 Flash 是哪里来的" ⇒ **查清了，并牵连出一处归因更正**
+
+### 46.1 用户的问题（成立）
+
+> "你这些测试调用的都是 DeepSeek V4 Flash，但**我们实际上是没有 DeepSeek V4 Flash 的**。我只给你配了一个 AGNES 的 provider。
+> **这个 DeepSeek V4 Flash 是哪里来的？**"
+
+### 46.2 逐条查证（三条证据）
+
+| # | 证据 | 结论 |
+|---|---|---|
+| **1** | `~/.dsh/profiles/exp-base/node_modules/@dsh-brain/key-pool-proxy/cordis.patch.yml`：<br>`poolEnv: AGENTSHELL_MAIN_LLM_API_KEYS` + **`upstreamBase: https://apihub.agnes-ai.com`** + `port: 3101` | ★ **实际请求发到 AGNES**（免费）⇒ **用户没记错** |
+| **2** | `~/.dsh/profiles/exp-base/cordis.patch.yml:5-8`：<br>**`- id: agent-default-model`** / **`provider: agnes`** / **`model: agnes-2.5-flash`** | ★ **profile 层把默认模型覆盖成了 AGNES** |
+| **3** | `~/.dsh/settings.yaml:21-26`：<br>`agent-presets.default: council`；**`agent-default-model: {provider: deepseek-official, model: deepseek-v4-flash, reasoningEffort: high}`** | ★★ **`deepseek-official` / `deepseek-v4-flash` 是【陈旧标签】** —— 该 settings 里**唯一定义的 provider 是 `agnes`**（`baseURL: http://127.0.0.1:3101/v1` = 我们的 key-pool-proxy，模型 `agnes-2.5-flash`） |
+
+**⇒ 回答**：`deepseek-v4-flash` 来自 **`~/.dsh/settings.yaml` 里一个未更新的旧值**；
+**行为**已被 `exp-base` profile 覆盖为 AGNES，**但那个标识符没跟着改** ⇒ 所以**会话日志里记的是一个不存在的模型名**（标签 ≠ 实物）。
+
+### 46.3 ⚠️⚠️ 由此牵连出的**归因更正**（我必须自己提出来）
+
+**我此前用《DeepSeek 官方 Context Caching 文档》去解释实测的 `cacheReadTokens`**（"cache prefix unit / 固定 token 间隔"那套，§14）。
+★ **但那个字段是【AGNES】返回的**（经 `key-pool-proxy` → `apihub.agnes-ai.com`）⇒ **它在语义上未必等价于 DeepSeek 的磁盘前缀缓存**。
+
+⇒ **⇒ 正确的表述应当是**：
+- **数值**（`cr` 1:1 增长、命中 99.69%、父代窗口净增 +269、fork 时"刚发过就 fork"）—— **是观测事实，仍然成立**；
+- ★ **"为什么会这样"的机制归因**（引用 DeepSeek 官方 prefix-unit 规则）—— **不能直接套用，须标注为"疑似/待重核"**。
+- ★ 而且这**恰好解释了**我当时就觉得的那处张力：**官方"固定 token 间隔切单元"的说法，与实测的"近 1:1 线性"并不完全吻合** —— **因为它们是两套机制。**
+
+⇒ **⇒ 本条登记为 O81（重核缓存归因）**，并在 §14 顶部加"归因待重核"的标注。
+
+### 46.4 用户的新指示（已收到）
+
+1. **以后测试都用 AGNES**（免费）；
+2. ★ **token 计数**：AGNES 侧的**用量口径**要与 **DeepSeek 的开源 tokenizer** 对齐（"因为 DeepSeek 是开源的，分词器也应该是开源的 ⇒ 去网上找一套来给它计数"）；
+3. **接线走 (b) 注入**。
+
+### 46.5 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O81** | ★★ **重核"缓存复用"的机制归因**：数值成立，但**机制解释要从"DeepSeek 磁盘前缀缓存"改为"AGNES（OpenAI-compat）的实际行为"**；必要时用**可复现的 A/B**（同前缀 / 变前缀）去测 AGNES 到底按什么规则命中 | 所有"缓存"结论的**解释**（不影响数值） |
+| **O82** | ★ **纠正 `settings.yaml` 的陈旧标签**（`deepseek-official/deepseek-v4-flash` ⇒ 反映真实链路），避免日志里继续记不存在的模型名 | 可追溯性（**动手前先备份**） |
+| **O83** | **AGNES 的 token 计数**：接入 **DeepSeek 开源 tokenizer**，给出"DeepSeek 计价口径"的 token 数 | 成本可估 |
+
+---
+
+## 47. ✅ O80 达成：**agent 现在能被动感知记忆了**（走 (b) 注入，且**工具面未变**）
+
+### 47.1 ★★ 子代理纠正了我的**任务前提**（重要）
+
+> **"真跑 agent 的是 DSH（Node），不是 `ai-base`（Go）"** ⇒ 我让它"启 Go 侧的注入开关"**走不通**：
+> **那条注入在 2026-07-21 已被删除**（`ai-base/.../v2_manager.go:814-818` 原文）
+> ⇒ ★ **缺的不是开关，是"记忆库 → 文件"那条线。**
+
+⇒ 它改用 **DSH 既有且活着的注入面** `dsh-agent-instructions`（`council/agent.cordis.yml:30-33` 的 `maxBytes: 65536` **本来就开着**）。
+
+### 47.2 交付（**改动最小，用户配置零改动**）
+
+| 类型 | 内容 |
+|---|---|
+| **新增（Go）** | `ai-base/agent-shell/cmd/memprompt/{main.go,main_test.go}` —— 薄适配，**复用 `KnowledgeStore`**，零策略（`go vet` 干净、`go test` ok） |
+| **新增（dsh-brain）** | `scripts/mem-arm.mjs` —— 按臂跑 |
+| **用户级配置** | ★ **一个都没改**（4 份 sha256 与备份**逐字一致**）⇒ **无需回退、无需换代重启** |
+
+- **记忆库** = 显式 **`--db <目录>`**（无 env/全局默认）；**注入载体 = 会话 `cwd`**（`session.create {cwd}` 决定扫描链终点）。
+- 一行复用（现场重建渲染器 + 跑一条臂）：
+  ```
+  (cd D:/project_develop/ai-base/agent-shell && go build -o D:/project_develop/dsh-brain/out/memprompt.exe ./cmd/memprompt)
+  node D:/project_develop/dsh-brain/scripts/mem-arm.mjs --arm X --store D:/project_develop/dsh-brain/out/mem-store-X
+  ```
+
+### 47.3 ★★ 我的独立复核（**用我自己的探针**，不是它的）
+
+| 臂 | 那条独特短语 `ZXQ-MEM-PROBE` 命中 | 工具数 | 名字数组 sha8 | system 长度 |
+|---|---|---|---|---|
+| **处理臂 `d7b51a46`** | ★ **1 次**，位置 **`user/message@seq=8`** | **102** | **`0339ee00`** | **6475** |
+| **控制臂 `3c7c8de3`** | ★ **0 次** | **102** | **`0339ee00`** | **6475** |
+
+⇒ ★★ **"agent 能感知自变量"成立**（前置清单**第 1 条**终于满足），**且"不改工具面"成立**（两臂工具名集合与 system 长度完全相同）。
+★ 子代理另外用**三条独立路径**（自己的探针 / 行为臂 E/F / `face-audit.txt`）互校，结论一致。
+
+### 47.4 ⚠️ 边界（它如实报的，我照记）
+
+1. **只接了 `KnowledgeStore`（`knowledge_base.json`）一层** —— `memory.db` / heat / `skill_tree` **未接**；
+2. ★ **载体是 `AGENTS.md`（适配器，非一等公民记忆注入面）** ⇒ **O84**（升级为一等公民需换代重启）；
+3. ★★ **R1 隔离未重布**（记忆与判据同处 `out/`）⇒ **真跑 A/B 前必须做** ⇒ **O85**；
+4. **n=1**，不声称显著；**任务级（甲）序列型读数仍 `NEEDS-EVIDENCE`**。
+
+---
+
+## 48. ✅ O83 达成：**官方 DeepSeek tokenizer 已接入**（并纠正了我一处**出处错误**）
+
+### 48.1 用的是**官方**分词器（不是近似）
+
+- **`deepseek-ai/DeepSeek-V4-Flash` 的 `tokenizer.json`**（普通 git blob，非 LFS）；
+  ★ **本地算出的 git blob sha1 = HF API 的 oid，字节级 MATCH**；
+- 加载器 = **HF 官方 JS 实现**（`@huggingface/tokenizers@0.2.0`）**固化单文件、零依赖、无需 `npm install`**；
+- 资产：`vendor/deepseek-tokenizer/`（**6.2 MiB**，含 `PROVENANCE.md` + `lib/` + `v4-flash/`）；
+  ★ **没有改 `package.json`/`package-lock.json`**（靠固化包体而非 `node_modules` —— 后者会被 `.gitignore` 吞掉，**离线固化就会是假的**）。
+
+### 48.2 ★★ 它纠正了我给的"靶子"出处（**我说的不对**）
+
+| | 我说的 | 真相 |
+|---|---|---|
+| `chars/token ≈ 2.87` 的出处 | ❌ "**中文含量高的文本**" | ✅ `out/probe-face-truth.mjs:63-72` = **【脸】（system + 工具 JSON schema，英文/JSON 为主）** |
+| 按我的理解测**中文** | — | **1.76 ~ 1.97**（比 2.87 低 31%~39%）—— ★ **但不是实现错**：已与 **Python HF 的 Rust 参考实现对拍 8/8 完全一致**（含 12.4 万字中文） |
+| 按**真口径（脸）**比 | — | DeepSeek 官方给 **3.099 ~ 3.160** ⇒ 比 2.87 高 **8.0%~10.1%** ⇒ **吻合** |
+
+⇒ ★★ **它既纠正了我的出处错误，又用"与参考实现对拍"证明了自己的实现对** —— 这正是我们反复强调的那种独立性。
+
+### 48.3 ★★★ 与 provider usage **系统性不一致 ⇒ 两套口径不可混用**（我抽验过）
+
+| 对比 | DeepSeek 口径 | provider(AGNES) | 比值 |
+|---|---|---|---|
+| `a6ae3e54` 第 1 步 | 37,295 | 41,071 | **×1.1012** |
+| `a6ae3e54` 最后一步 | 46,615 | 55,163 | **×1.1834** |
+| 72 条 council 会话「脸」合计 | 2,631,263 | 2,923,638 | **×1.111** |
+
+★ **缺口随上下文变长而增大 ⇒ 不是恒定换算系数** ⇒ 所以它**没有塞任何"校准系数"** ✓（纪律正确）
+★ 已量化的一项解释（工具按 OpenAI 风格包装 **+668 tok**）**只能解释 17.7%**，其余 **8.3% 如实标为未验证**。
+
+### 48.4 ★ 边界与一条"旁证"
+
+**这个 tokenizer 代表【DeepSeek 计价参考口径】，不代表实际上游的分词器**；
+★★ **而那个 +10%~18% 的缺口本身，就是"上游不是 DeepSeek"的旁证**（与 §46 的链路查证互相印证）。
+
+### 48.5 我的抽验（与它报的一致）
+
+| 抽验 | 结果 |
+|---|---|
+| `--text "你好，世界"` | `{"chars":5,"tokens":3,"charsPerToken":1.667}` exit 0 ✓ |
+| **中文段** | `charsPerToken = 1.966`（**落在它报的 1.76~1.97 区间内**）✓ |
+| **纯英文** | `charsPerToken = 5.0`（**明显更高**，符合"英文 token 密度更高"）✓ |
+| 资产体积 | `vendor/deepseek-tokenizer/` = **6.2M** ✓ |
+| 用户配置 | `~/.dsh/settings.yaml` sha256 = **`9b2c60f8…`（与它报的前后一致值相同）⇒ 未被改** ✓ |
+
+### 48.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O84** | **把 `AGENTS.md` 适配器升级为"一等公民记忆注入面"**（当前是适配器；升级需换代重启） | 注入的稳定性 |
+| **O85** | ★★ **重布 R1 隔离**（现在记忆与判据同处 `out/`）⇒ **真跑 A/B 前必须做** | **A/B 的真跑** |
