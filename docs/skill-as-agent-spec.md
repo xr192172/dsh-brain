@@ -1650,3 +1650,54 @@ if (this.retained?.text === snapshot) return;      // ★ 纯文本等值比较
 
 **另**：新增 **O44**（"记忆没效果" vs "记忆没被用上"必须分开 ⇒ 需要"人工直接写记忆"的阳性对照）；
 README 的 **R1**（判据不得在被测 agent 读写范围内）已写进设计，并要求**带毒自检**证明隔离真的生效。
+
+---
+
+## 29. 四路并行落地（判据机器三件套 + O41 取证）（2026-09-22；**关键指控我已逐条复核**）
+
+### 29.1 交付（三个新脚本 + 一份取证）
+
+| 文件 | 是什么 | 自检结果 |
+|---|---|---|
+| **`scripts/memory-stub.mjs`** | ★ **记忆面的 stub**（`count` / `recall` / `remember` / `reset`），**契约形状 = 将来 MCP 面的形状** | 六门全过；**中文往返实测**（`cat` 出正常中文、无 `\uXXXX`、无 BOM） |
+| **`scripts/memory-effect-judge.mjs`** | ★ **判据机器**（两臂 + 三断言 + 四态 + 反自欺守卫） | 六门全过：`--plan` **真的什么都不做**（`ls mtime` 前后 `diff` 为空）；`--selftest` 四态齐（`OK=81/NEEDS-EVIDENCE=4/FAIL=1/N-A=4`）；**故意破坏 ⇒ `BATCH-INVALID` + exit 1 / `CONTROL-FAILED` + exit 3** |
+| **`scripts/memory-judge-poison-check.mjs`** | ★ **R1 隔离自检**（判据被误放进被测目录时必须报警） | 六门全过；★ **反向自证**：把 `evals/pilot/tasks.jsonl` 真复制进 `_wt` ⇒ **被检出（6 条信号全来自内容侧，文件名信号一条不中）** ⇒ **证明"只看文件名不够"** |
+| `out/w14-o41-go-skill-registry.md` | **O41 取证**（Go 侧 `skill_registry.go`） | 见 29.3 |
+
+**两处值得单独记住的实现纪律（子代理自己做的）：**
+- ★ **判据机器带两道"反自欺守卫"**（触发即 exit 4 拒绝产出）：**报告里出现断言式说法**、或**汇总区出现"通过"二字** —— 它说**写的时候真被自己的门拦下过一次**。
+- ★ **带毒自检把"没检出"与"读不到"分开**：`suspects=0` 在正常态是 `OK`、在 `_wt` 不可读时是 `UNKNOWN`（**exit 4**）⇒ 正是"无证据不冒充"。
+
+### 29.2 ★★ 但要说清骨架期的边界（**"一格都不冒充"**）
+
+- **REAL 模式下**：`OK:0 / NEEDS-EVIDENCE:86`，三断言全 `NEEDS-EVIDENCE` ⇒ **不产出任何关于记忆效果的读数**；
+- **判据机器报告顶部固定一句**：**"本报告只证明判据机器可用，不构成关于记忆效果的结论"** ⇒ **这是把"无证据不冒充"的纪律用在它自己身上** ✓
+- ⚠️ **本机四路里没有一路驱动真实会话** ⇒ **真实读数尚未接入**（属 O42 的下一步）。
+- ⚠️ 带毒自检**只覆盖一类泄漏面**（被测目录），**不覆盖** `~/.dsh/sessions/**`、`out/` 历史报告、共享记忆库
+  ⇒ ★ **它绿 ≠ R1 全绿**（子代理主动这么标的）。
+
+### 29.3 ★★★ O41 结论与**四条我复核过的指控**：Go 侧"有入池出口，但**没有"过门才入池"的语义**"
+
+**一句话结论**：**绕开 TS `skill-tree` 没 store 的阻塞成立**（Go 侧候选池**有**持久化 store），
+**但绕不开 `capability-gate` 的判据缺位** —— 因为 **Go 侧压根没有那道门**。
+
+**我复核过的四条（逐字）**：
+
+| 指控 | 我的核验 |
+|---|---|
+| ★ **Go 侧"导入即 active"** | ✅ **`internal/memory/skill_import.go:394-402` 逐字带 `Status: "active"`** ⇒ **无 `pending` 态、导入即可注入 prompt** |
+| `SkillRegistry` 不维护独立索引 | ✅ `internal/external/skill_registry.go:56-57` 逐字："**Match/Get/List delegate to SkillTree — SkillRegistry does NOT maintain an independent index.**" |
+| ★ **"加面成本很低"需要限定** | ⚠️ **`ExportMCP` 的接口在 `hub/v2/mcp_server_plugin.go:16`、生产调用点在 `mcp_server_plugin_MCPServerPlugin.go:60`，但【唯一实现是测试桩】`mcp_server_plugin_test.go:26`** ⇒ **生产实现缺失** ⇒ **"加面"= 写一个生产 `ToolProvider`，不是"已经能用"** |
+| ★ **文档 vs 代码矛盾** | ✅ `docs/memory-asset-triage.md:169` 逐字裁决过"导入后视为**候选能力**而非注入物"，**而现役代码是"导入即 `active` + 可注入"** |
+
+**⇒ ★★ 于是暴露出一个比"没测过效果"更前置的问题**：
+**Go 侧的技能导入路径【没有门】—— 外部 `.md` 一进来就 `active` 并被注入 prompt。**
+⇒ 而 **TS 侧 `capability-registry` 的语义是【注册 ≠ 采纳】**（`register` 只建 `pending`，过门并写回 `acceptance` 才 `active`）
+⇒ ★ **两侧是【语义相反】的两种实践。** ⇒ **在这道门补上之前，"测记忆效果"测的是一个"未经筛选就被注入的东西"。**
+
+### 29.4 新增未闭合
+
+| # | 项 | 挡住 |
+|---|---|---|
+| **O45** | ★★ **Go 侧 skill 导入缺门**：把 `memory-asset-triage.md:169` 已裁决的"**候选能力而非注入物**"落成代码（`import` ⇒ 不应直接 `active`/可注入）；并决定与 TS 侧 `capability-registry` 的 `pending/acceptance` **语义如何对齐** | **O42 的前置**（没有门，测效果没有意义） |
+| **O46** | **`ExportMCP` 的生产 `ToolProvider` 实现缺失** ⇒ "加面成本很低"只在**桥**这一层成立 | P1 的工作量估计 |

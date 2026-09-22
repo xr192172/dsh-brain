@@ -1,0 +1,1019 @@
+#!/usr/bin/env node
+/**
+ * scripts/memory-effect-judge.mjs —— 记忆效果【判据机器骨架】（O42 的落地形状）
+ *
+ * 设计依据：docs/memory-effect-judge-design.md
+ *   §2 两条腿（(甲) 序列/学习曲线型 + (乙) 单次型，两条都要报）
+ *   §2.4 k=1 应无差别 ⇒ 它是【阳性对照】，不是顺带的观察
+ *   §3.2 两臂同器具、同一张脸，只让【记忆库内容】不同
+ *   §3.3 三条对照断言（任一不满足 ⇒ 该批数据作废）
+ *   §5   缺读数一律 NEEDS-EVIDENCE，绝不许当通过
+ *   §6   判据自身的门（有信号 / 对照体检 / 无证据不冒充 / 可复算）
+ *
+ * ── 它是什么 ─────────────────────────────────────────────────────────────
+ *   把上面那份设计落成一台**可跑、能自证、不会假绿**的机器骨架：
+ *     · 两臂：臂 A = 控制（空库）/ 臂 B = 处理（累积），**每臂一个独立 db 文件**
+ *     · 逐题读数表：(甲) 序列型（k≥2 相对 k=1 的差）+ (乙) 单次型
+ *     · 每格读数四态：OK / NEEDS-EVIDENCE / FAIL / N/A
+ *     · 对照体检三断言 + 阳性对照（k=1 应无差别）
+ *   ★ 它**不驱动任何真实会话**（那是后续驱动器的事），也**不产任何结论**：
+ *     输出只有「机器读数 + 断言结果」。
+ *
+ * ── 三个模式 ─────────────────────────────────────────────────────────────
+ *   node scripts/memory-effect-judge.mjs --plan      只打印计划：不建库/不写报告/不调 stub/不开会话
+ *   node scripts/memory-effect-judge.mjs --selftest  注入假读数 + **真调 memory-stub** 跑完整流程做机器自检
+ *   node scripts/memory-effect-judge.mjs             REAL 模式（骨架态）：无真实读数 ⇒ 逐格 NEEDS-EVIDENCE，
+ *                                                    只对两臂 db 做**只读** count
+ *
+ * 其它参数：
+ *   --readings <file>   用外部读数 JSON 取代内置假数据（schema 见 loadReadings）
+ *   --arm-a/--arm-b <p> 两臂 db 路径（默认 out/memory-judge/arm-a.json / arm-b.json；
+ *                       --selftest 时默认落到 out/memory-judge/selftest/ 下，避免误写真实臂的库）
+ *   --out <path>        报告路径（默认 out/memory-judge-report.txt）
+ *   --break <name>      ★ 故意破坏注入数据（只许配 --selftest）：
+ *                         control-nonempty  让控制臂 count>0      ⇒ 应 BATCH-INVALID（exit 1）
+ *                         k1-differs        让 k=1 两臂就有差别  ⇒ 应 CONTROL-FAILED（exit 3）
+ *
+ * 退出码：0 = 无硬失败（VALID 或 NEEDS-EVIDENCE）／1 = BATCH-INVALID／2 = 用法错误／
+ *         3 = CONTROL-FAILED／4 = 自检机器自身坏了（注入数据被污染、禁用词泄漏等）
+ *
+ * ── 不变量（改这个文件必须保住） ──────────────────────────────────────────
+ *   1. 报告顶部固定那句免责声明；脚本自身**绝不**输出任何「关于效果的结论」
+ *   2. 缺读数 ⇒ NEEDS-EVIDENCE，**绝不当 OK**
+ *   3. 汇总区不出现「通过」二字（避免「缺读数冒充通过」）
+ *   4. --plan 无任何副作用
+ *
+ * ── face 指纹：为什么是【本地移植】而不是【调用 face-audit.mjs】 ──────────
+ *   1) scripts/face-audit.mjs 是**无任何导出的顶层脚本**：import 它就会跑完整套会话扫描，
+ *      并重写 out/face-audit.txt（一个既有产物）⇒ 与本任务「--plan 什么都不做 / 只新增两个文件」冲突；
+ *   2) 它没有「给一份 system+tools 算 face」的 CLI，而两臂的 face 输入在骨架期
+ *      **还不存在于任何日志里**（没有真实会话可言）。
+ *   ⇒ 照它的算法（dsh-face/v1）移植一份，并加【漂移哨兵】：每次运行都检查上游源码里
+ *     算法锚点字面量是否还在；缺失就在报告里显式报警（**不静默**）。
+ *   ⚠ 哨兵只查锚点，**不证明逐字等价** —— 这条进报告的「不确定/未验证」。
+ *   · 与上游的**唯一有意差异**：断言用的指纹先做**端口归一化**（设计 §3.3 明确要求，
+ *     spec §21.4 / O33 的实测教训：端口是能力无关的易变量）。
+ *     报告里 raw（逐字同构上游，可与日志比对）与 normalized（用于断言）两个值都打印。
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+
+// ───────────────────────── 常量 ─────────────────────────
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const STUB = path.join(ROOT, 'scripts', 'memory-stub.mjs')
+const FACE_AUDIT_SRC = path.join(ROOT, 'scripts', 'face-audit.mjs')
+const DEFAULT_REPORT = path.join(ROOT, 'out', 'memory-judge-report.txt')
+const DEFAULT_ARM_DB = {
+  A: path.join(ROOT, 'out', 'memory-judge', 'arm-a.json'),
+  B: path.join(ROOT, 'out', 'memory-judge', 'arm-b.json'),
+}
+const SELFTEST_ARM_DB = {
+  A: path.join(ROOT, 'out', 'memory-judge', 'selftest', 'arm-a.json'),
+  B: path.join(ROOT, 'out', 'memory-judge', 'selftest', 'arm-b.json'),
+}
+const REPORT_NAME = 'memory-effect-judge'
+
+const DISCLAIMER = '★ 本报告只证明判据机器可用，不构成关于记忆效果的结论'
+const SELFTEST_BANNER = 'SELFTEST — 数据为注入的假读数，无任何外部含义'
+
+/** 四态（§5 纪律：缺读数一律 NEEDS-EVIDENCE）。 */
+const ST = { OK: 'OK', NE: 'NEEDS-EVIDENCE', FAIL: 'FAIL', NA: 'N/A' }
+
+/** (甲) 序列型要逐题读的指标。 */
+const METRICS_SEQ = ['toolCalls', 'tokens', 'wallClock', 'rework']
+/** (乙) 单次型要逐题读的指标。 */
+const METRICS_ONE = ['oracle', 'regression']
+
+/** ★ 脚本自证：报告里**不许**出现这些断言式说法（机器自检 S6 会扫）。 */
+const FORBIDDEN_IN_REPORT = [
+  /记忆有效/,
+  /记忆无效/,
+  /记忆起作用/,
+  /证明记忆/,
+  /记忆提升/,
+  /记忆没有效果/,
+  /记忆是有效/,
+  /记忆是无效/,
+]
+
+const BREAKS = {
+  'control-nonempty': '让控制臂（臂 A）的 count>0 ⇒ 断言 2 应变红',
+  'k1-differs': '让 k=1 两臂读数就有差别 ⇒ 阳性对照应变红',
+}
+
+const USAGE = `${REPORT_NAME} —— 记忆效果判据机器骨架（不驱动真实会话，不产结论）
+
+用法：
+  node scripts/memory-effect-judge.mjs --plan
+  node scripts/memory-effect-judge.mjs --selftest
+  node scripts/memory-effect-judge.mjs                       # REAL 模式（无真实读数 ⇒ 全部 NEEDS-EVIDENCE）
+
+参数：
+  --readings <file>   外部读数 JSON 取代内置假数据
+  --arm-a <path>      臂 A（控制，空库）的 db 文件
+  --arm-b <path>      臂 B（处理，累积）的 db 文件
+  --out <path>        报告路径（默认 ${path.relative(ROOT, DEFAULT_REPORT)}）
+  --break <name>      故意破坏注入数据（仅配 --selftest）：${Object.keys(BREAKS).join(' | ')}
+
+退出码：0 无硬失败 / 1 BATCH-INVALID / 2 用法错误 / 3 CONTROL-FAILED / 4 自检机器自身坏了
+`
+
+// ───────────────────────── 参数 ─────────────────────────
+
+function parseArgs(argv) {
+  const opts = Object.create(null)
+  const flags = new Set()
+  const rest = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (!a.startsWith('--')) {
+      rest.push(a)
+      continue
+    }
+    const eq = a.indexOf('=')
+    if (eq > 2) {
+      opts[a.slice(2, eq)] = a.slice(eq + 1)
+      continue
+    }
+    const key = a.slice(2)
+    const val = argv[i + 1]
+    if (val === undefined || val.startsWith('--')) {
+      flags.add(key)
+      continue
+    }
+    opts[key] = val
+    i++
+  }
+  return { opts, flags, rest }
+}
+
+function usage(msg) {
+  process.stderr.write(`[${REPORT_NAME}] 用法错误：${msg}\n\n${USAGE}`)
+  process.exit(2)
+}
+
+// ───────────────────────── face 指纹（dsh-face/v1，本地移植） ─────────────────────────
+// 逐字同构 scripts/face-audit.mjs 的 canonical / sha8 / toolNameOf / faceOf。
+
+const FACE_VERSION = 'dsh-face/v1'
+
+/** 递归规范化 JSON：对象键按码位升序、无空白；数组保序。 */
+function canonical(v) {
+  if (v === null || typeof v !== 'object') {
+    const s = JSON.stringify(v)
+    return s === undefined ? 'null' : s
+  }
+  if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']'
+  const keys = Object.keys(v).sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}'
+}
+
+const sha8 = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 8)
+const toolNameOf = (t) => t?.name ?? t?.function?.name ?? ''
+const PORT_RE = /127\.0\.0\.1:\d+/g
+const normalizePorts = (t) => String(t).replace(PORT_RE, '127.0.0.1:PORT')
+
+/**
+ * 算一次「脸」。normalize=true 时先做端口归一化（**断言用**；raw 对得上日志里的 face）。
+ * @returns {{face:string,namesHash:string,names:string[],count:number,sysLen:number}}
+ */
+function faceOf(system, tools, { normalize = false } = {}) {
+  const sysRaw = typeof system === 'string' ? system : String(system ?? '')
+  const sys = normalize ? normalizePorts(sysRaw) : sysRaw
+  const list = Array.isArray(tools) ? tools : []
+  const byName = new Map()
+  for (const t of list) {
+    const n = toolNameOf(t)
+    if (!byName.has(n)) byName.set(n, t) // 同名取首个（上游已知假阴性，照搬）
+  }
+  const names = [...byName.keys()].sort() // ★ 字典序
+  const parts = [FACE_VERSION, '|S|' + sys.length, sys, '|T|' + names.length]
+  for (const n of names) {
+    const body = canonical(byName.get(n))
+    parts.push(n, normalize ? normalizePorts(body) : body)
+  }
+  return {
+    face: sha8(parts.join('\n')),
+    namesHash: sha8(names.join('\n')),
+    names,
+    count: list.length,
+    sysLen: sys.length,
+  }
+}
+
+/** 漂移哨兵：只查上游源码里的算法锚点字面量（**不证明逐字等价**，见文件头）。 */
+function facePortSentinel() {
+  const anchors = [
+    ['版本头 dsh-face/v1', /dsh-face\/v1/],
+    ['system 长度前缀 |S|', /\|S\|/],
+    ['工具数前缀 |T|', /\|T\|/],
+    ['8 位 hex 截断 .slice(0, 8)', /\.slice\(0,\s*8\)/],
+    ['工具名字典序 .sort()', /\.sort\(\)/],
+    ['端口字面量 127.0.0.1', /127\\\.0\\\.0\\\.1/],
+    ['递归规范化 function canonical', /function canonical/],
+  ]
+  let src
+  try {
+    src = fs.readFileSync(FACE_AUDIT_SRC, 'utf8')
+  } catch (e) {
+    return { state: ST.NE, detail: `读不到上游源码 ${FACE_AUDIT_SRC}：${e?.message ?? e}` }
+  }
+  const miss = anchors.filter(([, re]) => !re.test(src)).map(([n]) => n)
+  if (miss.length) {
+    return {
+      state: ST.FAIL,
+      detail: `上游 ${path.basename(FACE_AUDIT_SRC)} 里找不到锚点：${miss.join('、')} ⇒ 本地移植可能已漂移，需人工比对（不静默）`,
+    }
+  }
+  return {
+    state: ST.OK,
+    detail: `上游 ${path.basename(FACE_AUDIT_SRC)} 的 ${anchors.length} 个算法锚点字面量都在（⚠ 只查锚点，不证明逐字等价）`,
+  }
+}
+
+// ───────────────────────── memory-stub 调用（真调，不是假设） ─────────────────────────
+
+/** 调一次 stub，解析 stdout 的单行 JSON。失败 ⇒ {ok:false}，调用方按 NEEDS-EVIDENCE 处理。 */
+function stubRun(args) {
+  try {
+    const out = execFileSync(process.execPath, [STUB, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const line = String(out).split('\n').find((l) => l.trim())
+    if (!line) return { ok: false, error: 'stub stdout 为空' }
+    return { ok: true, value: JSON.parse(line) }
+  } catch (e) {
+    const err = String(e?.stderr ?? '').trim() || String(e?.message ?? e)
+    return { ok: false, error: err }
+  }
+}
+
+/** 读某臂在某检查点的条目数。**真调 stub count**（count 是只读的）。 */
+function readCount(dbPath, k) {
+  const r = stubRun(['count', '--db', dbPath])
+  return {
+    k,
+    count: r.ok ? r.value.count : null,
+    err: r.ok ? null : r.error,
+    dbExists: fs.existsSync(dbPath),
+  }
+}
+
+// ───────────────────────── 注入数据（假读数） ─────────────────────────
+
+/** 骨架期的任务序列：**同一族**的 5 题（见 evals/pilot/tasks.jsonl §2.4）。 */
+function taskList() {
+  return [
+    { k: 1, id: 'cli-0001-injected-message-identity', title: '注入会话的消息必须带 id 与 source', shape: 'sequence' },
+    { k: 2, id: 'cli-0002-seal-before-unlock', title: '交接封口：先强杀未确认停写的旧代再放锁', shape: 'sequence' },
+    { k: 3, id: 'cli-0003-prepareswitch-real-phase', title: 'defer 判断要直读 agent 真实阶段', shape: 'sequence' },
+    { k: 4, id: 'cli-0005-symbol-rename-design-canvas', title: '按语义重命名，行为逐字不变', shape: 'sequence' },
+    { k: 5, id: 'cli-0004-verify-drain-json-output', title: '给验收脚本加 --json，旧行为一字不变', shape: 'sequence' },
+  ]
+}
+
+/**
+ * 内置假读数。★ 它是**注入的假数据**，只用来证明「判据机器可用」，无任何外部含义。
+ * 特意埋了三处，让四态都出现：
+ *   · 臂 A k=3 oracle='fail'        ⇒ FAIL（读数命中不了期望值）
+ *   · 臂 A k=4 缺 wallClock          ⇒ NEEDS-EVIDENCE
+ *   · 臂 B k=3 缺 tokens             ⇒ NEEDS-EVIDENCE
+ *   · k=1 两臂逐字相同               ⇒ Δ 无定义（N/A），且阳性对照应 OK
+ */
+function selftestData() {
+  const sysA = '（假）两臂 system 完全相同，除端口外逐字一致。web gui = http://127.0.0.1:3083/mcp'
+  const sysB = '（假）两臂 system 完全相同，除端口外逐字一致。web gui = http://127.0.0.1:3999/mcp'
+  const tools = () => [
+    { name: 'bash', description: 'run a shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'] } },
+    { name: 'read', description: 'read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
+    { name: 'memory_recall', description: '检索记忆', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
+    { name: 'memory_remember', description: '写入记忆', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+  ]
+  const A1 = { toolCalls: 42, tokens: 51000, wallClock: 380, rework: 1, oracle: 'pass', regression: 'pass' }
+  return {
+    label: SELFTEST_BANNER,
+    source: '脚本内置常量 selftestData()',
+    tasks: taskList(),
+    arms: {
+      A: {
+        role: '控制臂（空库）',
+        faceInput: { system: sysA, tools: tools() },
+        // 每一 k 在读数【之前】要往库里追加的条目（控制臂：一条都不加）
+        addBeforeK: [[], [], [], [], []],
+      },
+      B: {
+        role: '处理臂（累积）',
+        faceInput: { system: sysB, tools: tools() },
+        // ★ k=1 起点也是空的 —— 这正是「k=1 两臂应无差别」的原因
+        addBeforeK: [
+          [],
+          ['假读数：cli-0001 的坑 = 注入会话的消息必须带 id 与 source，否则整份会话历史读不出来'],
+          ['假读数：cli-0002 的坑 = 交接必须先把未确认停写的旧代强杀，再放门锁'],
+          ['假读数：cli-0003 的坑 = defer 判断必须直读 agent 真实阶段，不能跨插件事件'],
+          ['假读数：cli-0005 的坑 = 语义重命名要跨导出/导入/调用跟改，局部同名变量与字符串常量不许动'],
+        ],
+      },
+    },
+    readings: {
+      A: {
+        1: A1,
+        2: { toolCalls: 55, tokens: 63000, wallClock: 470, rework: 2, oracle: 'pass', regression: 'pass' },
+        3: { toolCalls: 48, tokens: 58000, wallClock: 430, rework: 1, oracle: 'fail', regression: 'pass' },
+        4: { toolCalls: 27, tokens: 31000, rework: 0, oracle: 'pass', regression: 'pass' }, // 故意缺 wallClock
+        5: { toolCalls: 33, tokens: 39000, wallClock: 290, rework: 1, oracle: 'pass', regression: 'pass' },
+      },
+      B: {
+        1: { ...A1 }, // ★ 与臂 A 的 k=1 逐字相同 ⇒ 阳性对照
+        2: { toolCalls: 41, tokens: 47000, wallClock: 350, rework: 1, oracle: 'pass', regression: 'pass' },
+        3: { toolCalls: 35, wallClock: 300, rework: 0, oracle: 'pass', regression: 'pass' }, // 故意缺 tokens
+        4: { toolCalls: 19, tokens: 22000, wallClock: 170, rework: 0, oracle: 'pass', regression: 'pass' },
+        5: { toolCalls: 24, tokens: 27000, wallClock: 200, rework: 0, oracle: 'pass', regression: 'pass' },
+      },
+    },
+  }
+}
+
+/** REAL 模式的空骨架：没有真实会话 ⇒ 没有 face 输入、没有读数、没有检查点。 */
+function realData() {
+  return {
+    label: null,
+    source: '（无）骨架期没有真实会话读数',
+    tasks: taskList(),
+    arms: {
+      A: { role: '控制臂（空库）', faceInput: null, checkpointsK: [], addBeforeK: [] },
+      B: { role: '处理臂（累积）', faceInput: null, checkpointsK: [], addBeforeK: [] },
+    },
+    readings: { A: {}, B: {} },
+  }
+}
+
+/** 外部读数 JSON（将来驱动器产出的形状）。宽松校验：缺字段 ⇒ 缺读数 ⇒ NEEDS-EVIDENCE。 */
+function loadReadings(file) {
+  let raw
+  try {
+    raw = fs.readFileSync(file, 'utf8')
+  } catch (e) {
+    usage(`读不到 --readings 文件 ${file}：${e?.message ?? e}`)
+  }
+  let d
+  try {
+    d = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw)
+  } catch (e) {
+    usage(`--readings 文件不是合法 JSON：${e?.message ?? e}`)
+  }
+  if (!d || typeof d !== 'object') usage('--readings 顶层必须是对象')
+  if (!Array.isArray(d.tasks)) usage('--readings 缺 tasks 数组')
+  if (!d.arms || typeof d.arms !== 'object') usage('--readings 缺 arms 对象')
+  if (!d.readings || typeof d.readings !== 'object') usage('--readings 缺 readings 对象')
+  return {
+    label: typeof d.label === 'string' ? d.label : null,
+    source: typeof d.source === 'string' ? d.source : file,
+    tasks: d.tasks,
+    arms: d.arms,
+    readings: d.readings,
+  }
+}
+
+/** ★ 故意破坏注入数据（只用于证明判据有分辨力）。 */
+function applyBreak(data, name) {
+  const d = structuredClone(data)
+  if (name === 'control-nonempty') {
+    if (!Array.isArray(d.arms.A.addBeforeK) || !d.arms.A.addBeforeK.length) {
+      d.arms.A.addBeforeK = d.tasks.map(() => [])
+    }
+    d.arms.A.addBeforeK[0] = ['★ 注入的坏数据：控制臂不该有任何记忆，这里故意塞一条']
+  } else if (name === 'k1-differs') {
+    const k1 = d.readings.B[1] ?? d.readings.B['1']
+    if (!k1 || typeof k1.toolCalls !== 'number') {
+      usage(`--break k1-differs 需要注入数据里存在 臂B k=1 的 toolCalls（当前是 ${JSON.stringify(k1 ?? null)}）`)
+    }
+    k1.toolCalls = k1.toolCalls - 7
+  }
+  return d
+}
+
+// ───────────────────────── 读数/四态 ─────────────────────────
+
+function reading(data, arm, k, metric) {
+  const g = data.readings?.[arm]
+  if (!g) return undefined
+  const row = g[k] ?? g[String(k)]
+  if (!row || typeof row !== 'object') return undefined
+  const v = row[metric]
+  return v === undefined ? undefined : v
+}
+
+/** 数值/文本读数：有 ⇒ OK，没有 ⇒ NEEDS-EVIDENCE。 */
+function readCell(v) {
+  return v === undefined || v === null
+    ? { state: ST.NE, text: '(缺读数)' }
+    : { state: ST.OK, text: String(v) }
+}
+
+/** 期望值类读数（oracle/regression 的 expect 是 'pass'）：不符 ⇒ FAIL。 */
+function expectCell(v, expect) {
+  if (v === undefined || v === null) return { state: ST.NE, text: '(缺读数)' }
+  return { state: String(v) === expect ? ST.OK : ST.FAIL, text: String(v) }
+}
+
+/** (甲) 的 Δ = B − A：负数=处理臂读数更小。缺任一侧 ⇒ NEEDS-EVIDENCE。 */
+function deltaCell(a, b) {
+  if (a === undefined || a === null || b === undefined || b === null) {
+    return { state: ST.NE, text: '(缺读数)' }
+  }
+  const n = Number(b) - Number(a)
+  return { state: ST.OK, text: (n > 0 ? '+' : '') + String(n) }
+}
+
+function sameTextCell(a, b) {
+  if (a === undefined || a === null || b === undefined || b === null) {
+    return { state: ST.NE, text: '(缺读数)' }
+  }
+  return { state: ST.OK, text: String(a) === String(b) ? '一致' : '不一致' }
+}
+
+// ───────────────────────── 断言（纯函数：输入是读数，不含副作用） ─────────────────────────
+
+/**
+ * 对照体检（§3.3 三条断言）。**纯函数**：counts 由调用方给（真跑时来自 stub，自检电池里来自常量）。
+ * @param {{faceNormA:string|null,faceNormB:string|null,faceRawA:string|null,faceRawB:string|null,
+ *          countsA:Array<{k:number,count:number|null,dbExists:boolean}>,
+ *          countsB:Array<{k:number,count:number|null,dbExists:boolean}>}} ins
+ */
+function assessBatch(ins) {
+  const assertions = []
+
+  // ── 断言 1：两臂 face 指纹相同（用归一化后的脸）
+  if (!ins.faceNormA || !ins.faceNormB) {
+    assertions.push({
+      id: 'A1',
+      name: '两臂 face 指纹相同',
+      state: ST.NE,
+      detail: '缺两臂的 system+tools 快照 ⇒ 算不出脸（骨架期没有真实会话）',
+    })
+  } else {
+    const same = ins.faceNormA === ins.faceNormB
+    const rawSame = ins.faceRawA === ins.faceRawB
+    assertions.push({
+      id: 'A1',
+      name: '两臂 face 指纹相同',
+      state: same ? ST.OK : ST.FAIL,
+      detail: `normalized ${ins.faceNormA} vs ${ins.faceNormB} ⇒ 相同=${same ? '是' : '否'}；raw ${ins.faceRawA} vs ${ins.faceRawB}（raw 相同=${rawSame ? '是' : '否'}；归一化抹掉 Web GUI 端口差）`,
+    })
+  }
+
+  // ── 断言 2：控制臂（臂 A）记忆真的空（真调 stub 读 count）
+  if (!ins.countsA.length) {
+    assertions.push({ id: 'A2', name: '控制臂（臂 A）记忆 count == 0', state: ST.NE, detail: '没有任何检查点读数' })
+  } else {
+    const bad = ins.countsA.filter((c) => c.count === null)
+    const missingDb = ins.countsA.filter((c) => c.count !== null && !c.dbExists)
+    const nonZero = ins.countsA.filter((c) => c.count !== null && c.count !== 0)
+    const seq = ins.countsA.map((c) => (c.count === null ? '?' : c.count)).join(',')
+    let state = ST.OK
+    let why = `stub count 序列(k=1..)= ${seq}`
+    if (bad.length) {
+      state = ST.NE
+      why = `stub count 读失败(${bad.length} 个检查点)：${bad[0].err}；序列= ${seq}`
+    } else if (missingDb.length) {
+      state = ST.NE
+      why = `db 文件不存在（该臂从未初始化/未跑）⇒ 0 只是「文件缺失」的默认值，不算空库证据；序列= ${seq}`
+    } else if (nonZero.length) {
+      state = ST.FAIL
+      why = `存在非 0 检查点 k=${nonZero.map((c) => `${c.k}:${c.count}`).join(' ')}；序列= ${seq}`
+    }
+    assertions.push({ id: 'A2', name: '控制臂（臂 A）记忆 count == 0', state, detail: why })
+  }
+
+  // ── 断言 3：处理臂（臂 B）记忆 count 随 k 严格递增，且末项 > 0
+  if (ins.countsB.length < 2) {
+    assertions.push({
+      id: 'A3',
+      name: '处理臂（臂 B）记忆 count 随 k 严格递增',
+      state: ST.NE,
+      detail: `只有 ${ins.countsB.length} 个检查点 ⇒ 「随 k 增长」无法判定`,
+    })
+  } else {
+    const bad = ins.countsB.filter((c) => c.count === null)
+    const seq = ins.countsB.map((c) => (c.count === null ? '?' : c.count)).join('→')
+    let state = ST.OK
+    let why = `stub count 序列(k 递增)= ${seq}`
+    if (bad.length) {
+      state = ST.NE
+      why = `stub count 读失败(${bad.length} 个检查点)：${bad[0].err}；序列= ${seq}`
+    } else {
+      const nums = ins.countsB.map((c) => c.count)
+      const inc = nums.every((n, i) => i === 0 || n > nums[i - 1])
+      const last = nums[nums.length - 1]
+      if (!inc) {
+        state = ST.FAIL
+        why = `不严格递增；序列= ${seq}`
+      } else if (!(last > 0)) {
+        state = ST.FAIL
+        why = `末项不是正的（末项=${last}）⇒「非空」不成立；序列= ${seq}`
+      } else {
+        why = `序列= ${seq}（严格递增=是，末项=${last}>0=是）`
+      }
+    }
+    assertions.push({ id: 'A3', name: '处理臂（臂 B）记忆 count 随 k 严格递增', state, detail: why })
+  }
+
+  const verdict = assertions.some((a) => a.state === ST.FAIL)
+    ? 'BATCH-INVALID'
+    : assertions.some((a) => a.state === ST.NE)
+      ? 'NEEDS-EVIDENCE'
+      : 'VALID'
+  return { assertions, verdict }
+}
+
+/** 阳性对照（§2.4）：k=1 两臂应无差别。纯函数。 */
+function assessPositiveControl(data) {
+  const k = 1
+  const metrics = [...METRICS_SEQ, ...METRICS_ONE]
+  const diffs = []
+  const missing = []
+  for (const m of metrics) {
+    const a = reading(data, 'A', k, m)
+    const b = reading(data, 'B', k, m)
+    if (a === undefined || b === undefined) {
+      missing.push(m)
+      continue
+    }
+    if (String(a) !== String(b)) diffs.push(`${m}: A=${a} B=${b}`)
+  }
+  if (diffs.length) {
+    return { state: 'CONTROL-FAILED', diffs, missing, detail: `k=1 就有差别的指标：${diffs.join('；')}` }
+  }
+  if (missing.length) {
+    return {
+      state: ST.NE,
+      diffs,
+      missing,
+      detail: `k=1 上缺读数 ⇒ 无法声称「k=1 无差别」（缺：${missing.join('、')}；A 侧或 B 侧任一缺即算缺）`,
+    }
+  }
+  return { state: ST.OK, diffs, missing, detail: `k=1 上 ${metrics.length} 个指标两臂逐字相同 ⇒ 阳性对照成立（A/B 干净：起点一致）` }
+}
+
+// ───────────────────────── 自检电池（纯函数级：证明判据有分辨力） ─────────────────────────
+
+function battery() {
+  const out = []
+  const data = selftestData()
+  const tasks = data.tasks
+  const faces = (d) => {
+    const fa = d.arms.A.faceInput
+    const fb = d.arms.B.faceInput
+    const rA = fa ? faceOf(fa.system, fa.tools, { normalize: false }) : null
+    const rB = fb ? faceOf(fb.system, fb.tools, { normalize: false }) : null
+    const nA = fa ? faceOf(fa.system, fa.tools, { normalize: true }) : null
+    const nB = fb ? faceOf(fb.system, fb.tools, { normalize: true }) : null
+    return { faceRawA: rA?.face ?? null, faceRawB: rB?.face ?? null, faceNormA: nA?.face ?? null, faceNormB: nB?.face ?? null }
+  }
+
+  // ★ 正常数据（合成 count：A 全 0，B 0→1→2→3→4）
+  const goodB = tasks.map((t) => ({ k: t.k, count: t.k - 1, dbExists: true }))
+  const good = assessBatch({
+    ...faces(data),
+    countsA: tasks.map((t) => ({ k: t.k, count: 0, dbExists: true })),
+    countsB: goodB,
+  })
+  out.push({
+    id: 'S3',
+    name: '正常数据下三断言应全 OK ⇒ VALID',
+    state: good.verdict === 'VALID' ? ST.OK : ST.FAIL,
+    detail: `verdict=${good.verdict}；断言状态 ${good.assertions.map((a) => `${a.id}:${a.state}`).join(' ')}`,
+  })
+
+  // ★ 坏数据 1：控制臂 count>0 ⇒ 必须 BATCH-INVALID
+  const b1 = assessBatch({
+    ...faces(data),
+    countsA: tasks.map((t) => ({ k: t.k, count: 1, dbExists: true })),
+    countsB: goodB,
+  })
+  out.push({
+    id: 'S4',
+    name: '坏数据（控制臂 count>0）应变红 ⇒ BATCH-INVALID',
+    state: b1.verdict === 'BATCH-INVALID' ? ST.OK : ST.FAIL,
+    detail: `verdict=${b1.verdict}（期望 BATCH-INVALID）；A2 state=${b1.assertions.find((a) => a.id === 'A2')?.state}`,
+  })
+
+  // ★ 坏数据 2：两臂脸不同（多一个工具）⇒ 必须 BATCH-INVALID
+  const drift = structuredClone(data)
+  drift.arms.B.faceInput.tools.push({ name: 'extra_tool', description: '多出来的工具', inputSchema: { type: 'object' } })
+  const b2 = assessBatch({
+    ...faces(drift),
+    countsA: tasks.map((t) => ({ k: t.k, count: 0, dbExists: true })),
+    countsB: goodB,
+  })
+  out.push({
+    id: 'S5',
+    name: '坏数据（两臂脸不同）应变红 ⇒ BATCH-INVALID',
+    state: b2.verdict === 'BATCH-INVALID' ? ST.OK : ST.FAIL,
+    detail: `verdict=${b2.verdict}（期望 BATCH-INVALID）；A1 state=${b2.assertions.find((a) => a.id === 'A1')?.state}`,
+  })
+
+  // ★ 坏数据 3：k=1 就有差别 ⇒ 必须 CONTROL-FAILED
+  const p = assessPositiveControl(applyBreak(data, 'k1-differs'))
+  out.push({
+    id: 'S6',
+    name: '坏数据（k=1 就有差别）应变红 ⇒ CONTROL-FAILED',
+    state: p.state === 'CONTROL-FAILED' ? ST.OK : ST.FAIL,
+    detail: `${p.detail}`,
+  })
+
+  // face 移植自身有分辨力：同输入同脸；改一个工具 ⇒ 脸变；只差端口 ⇒ raw 变 / normalized 不变
+  const fa = data.arms.A.faceInput
+  const f1 = faceOf(fa.system, fa.tools, { normalize: true }).face
+  const f2 = faceOf(fa.system, structuredClone(fa.tools), { normalize: true }).face
+  const f3 = faceOf(fa.system, [...structuredClone(fa.tools), { name: 'extra_tool' }], { normalize: true }).face
+  const rawA = faceOf(data.arms.A.faceInput.system, fa.tools, { normalize: false }).face
+  const rawB = faceOf(data.arms.B.faceInput.system, data.arms.B.faceInput.tools, { normalize: false }).face
+  const okFace = f1 === f2 && f1 !== f3 && rawA !== rawB
+  out.push({
+    id: 'S7',
+    name: 'face 移植有分辨力（确定性 / 加工具就变 / 仅端口差不影响归一化脸）',
+    state: okFace ? ST.OK : ST.FAIL,
+    detail: `确定性=${f1 === f2 ? '是' : '否'}；加一个工具后变化=${f1 !== f3 ? '是' : '否'}；raw(仅端口差)=${rawA}/${rawB} 不同=${rawA !== rawB ? '是' : '否'}；normalized 相同=${f1 === faceOf(data.arms.B.faceInput.system, data.arms.B.faceInput.tools, { normalize: true }).face ? '是' : '否'}`,
+  })
+
+  return { checks: out, ok: out.every((c) => c.state === ST.OK) }
+}
+
+// ───────────────────────── 采集两臂状态 ─────────────────────────
+
+/**
+ * 臂状态：selftest 会**建库**（reset + remember，都是真调 stub）；real 只**只读** count。
+ */
+function collectArm(data, arm, dbPath, mode) {
+  const role = data.arms?.[arm]?.role ?? arm
+  const fi = data.arms?.[arm]?.faceInput ?? null
+  const fRaw = fi ? faceOf(fi.system, fi.tools, { normalize: false }) : null
+  const fNorm = fi ? faceOf(fi.system, fi.tools, { normalize: true }) : null
+  let counts = []
+  let seeded = false
+  let seedErr = null
+
+  if (mode === 'selftest') {
+    const r = stubRun(['reset', '--db', dbPath])
+    if (!r.ok) seedErr = `reset 失败：${r.error}`
+    seeded = r.ok
+    const add = Array.isArray(data.arms?.[arm]?.addBeforeK) ? data.arms[arm].addBeforeK : []
+    for (const t of data.tasks) {
+      const adds = Array.isArray(add[t.k - 1]) ? add[t.k - 1] : []
+      for (const txt of adds) {
+        const w = stubRun(['remember', '--db', dbPath, '--text', String(txt), '--kind', 'note'])
+        if (!w.ok && !seedErr) seedErr = `remember 失败：${w.error}`
+      }
+      counts.push(readCount(dbPath, t.k))
+    }
+  } else {
+    const ks = Array.isArray(data.arms?.[arm]?.checkpointsK) ? data.arms[arm].checkpointsK : []
+    counts = ks.map((k) => readCount(dbPath, Number(k)))
+  }
+
+  return {
+    arm,
+    role,
+    db: dbPath,
+    seeded,
+    seedErr,
+    faceInput: fi,
+    faceRaw: fRaw?.face ?? null,
+    faceNorm: fNorm?.face ?? null,
+    namesHash: fNorm?.namesHash ?? null,
+    toolCount: fRaw ? fRaw.count : null,
+    sysLen: fRaw ? fRaw.sysLen : null,
+    counts,
+  }
+}
+
+// ───────────────────────── 渲染 ─────────────────────────
+
+const pad = (s, n) => String(s ?? '').padEnd(n)
+
+function planLines() {
+  const L = []
+  L.push(`${REPORT_NAME} —— 计划（--plan：**什么都不做**）`)
+  L.push('')
+  L.push(DISCLAIMER)
+  L.push('')
+  L.push('本次运行不做的事（已由代码保证）：')
+  L.push('  · 不建库、不 reset/remember 任何记忆库')
+  L.push('  · 不写报告、不建 out/ 下任何目录')
+  L.push('  · 不调用 scripts/memory-stub.mjs')
+  L.push('  · 不驱动、不启动任何 DSH 会话')
+  L.push('')
+  L.push('当真正跑一轮时，这台机器会做：')
+  L.push('  [1] 两臂结构：臂 A = 控制（空库）/ 臂 B = 处理（累积），每臂一个独立 db 文件')
+  L.push(`      默认 A = ${path.relative(ROOT, DEFAULT_ARM_DB.A).replace(/\\/g, '/')}`)
+  L.push(`      默认 B = ${path.relative(ROOT, DEFAULT_ARM_DB.B).replace(/\\/g, '/')}`)
+  L.push(`      （--selftest 时默认落到 ${path.relative(ROOT, SELFTEST_ARM_DB.A).replace(/\\/g, '/')} 之下，避免误写真实臂的库）`)
+  L.push('  [2] 真调 stub 读 count（对照体检的证据，不靠「我们以为空」）')
+  L.push('  [3] 算两臂 face 指纹（dsh-face/v1 本地移植；断言用端口归一化后的脸）')
+  L.push('  [4] 对照体检三断言（任一 FAIL ⇒ BATCH-INVALID + 非零退出）：')
+  L.push('        A1 两臂 face 指纹相同')
+  L.push('        A2 控制臂（臂 A）记忆 count == 0')
+  L.push('        A3 处理臂（臂 B）记忆 count 随 k 严格递增（末项 > 0）')
+  L.push('  [5] 阳性对照（§2.4）：k=1 两臂应无差别；有差别 ⇒ CONTROL-FAILED + 非零退出')
+  L.push('  [6] 逐题读数表，两种形态都要报：')
+  L.push('        (甲) 序列/学习曲线型：k≥2 相对 k=1 的差（Δ = B − A），指标 ' + METRICS_SEQ.join('/'))
+  L.push('        (乙) 单次型：' + METRICS_ONE.join('/') + '（预期「无差别」本身是有用信息）')
+  L.push('  [7] 每格读数四态：OK / NEEDS-EVIDENCE / FAIL / N/A；★ 缺读数一律 NEEDS-EVIDENCE')
+  L.push('  [8] 写 ' + path.relative(ROOT, DEFAULT_REPORT).replace(/\\/g, '/') + '，stdout 一行汇总')
+  L.push('')
+  L.push(`任务序列（同一族，逐题对比第 k 题）共 ${taskList().length} 题：`)
+  for (const t of taskList()) L.push(`  k=${t.k}  ${pad(t.id, 42)} ${t.title}`)
+  L.push('')
+  L.push('当前骨架态：★ 还没有真实会话 ⇒ 真实读数一律 NEEDS-EVIDENCE。')
+  L.push('用 --selftest 可以证明这台机器本身可用（注入假读数 + 真调 stub），但它**不产结论**。')
+  return L
+}
+
+function renderReport({ mode, data, arms, batch, control, cells, batteryResult, sentinel, breakName }) {
+  const L = []
+  const now = new Date().toISOString()
+  L.push('='.repeat(100))
+  L.push(`${REPORT_NAME} · 记忆效果判据机器骨架报告`)
+  L.push(`生成时间 : ${now}`)
+  L.push(`模式     : ${mode === 'selftest' ? 'SELFTEST（注入假读数 + 真调 memory-stub）' : 'REAL（骨架态，无真实会话）'}`)
+  L.push(`数据来源 : ${data.source}`)
+  if (breakName) L.push(`★ 破坏注入 : --break ${breakName}（${BREAKS[breakName]}）—— 本轮数据是**故意做坏的**`)
+  L.push(DISCLAIMER)
+  L.push('='.repeat(100))
+  if (data.label) L.push(`[${data.label}]`)
+  L.push('')
+  L.push('四态语义（§5 纪律）：')
+  L.push('  OK              = 该格有读数（或断言满足）')
+  L.push('  NEEDS-EVIDENCE  = 缺读数/无法判定 —— ★ 绝不当成 OK，也绝不当成 FAIL')
+  L.push('  FAIL            = 有读数且与期望不符（只会在 oracle/regression 与断言上出现）')
+  L.push('  N/A             = 该格在本形态下无定义（例如 k=1 的 Δ）')
+  L.push('')
+
+  // [0] 机器自检
+  if (batteryResult) {
+    L.push('='.repeat(100))
+    L.push('[0] 机器自检（judge 自身的门 §6）—— ★ 只关于「这台机器」，不关于记忆')
+    L.push('='.repeat(100))
+    for (const c of batteryResult.checks) L.push(`  [${c.id}] ${pad(c.state, 15)} ${c.name}\n        ${c.detail}`)
+    L.push(`  [S8] ${pad(sentinel.state, 15)} face 移植的漂移哨兵\n        ${sentinel.detail}`)
+    L.push(`  ⇒ 电池 ${batteryResult.checks.filter((c) => c.state === ST.OK).length}/${batteryResult.checks.length} OK` +
+      (batteryResult.checks.some((c) => c.state === ST.FAIL) ? '  ★ 有 FAIL ⇒ 这台机器本身有问题，结论只是「机器不可用」' : ''))
+    L.push('')
+  } else {
+    L.push('='.repeat(100))
+    L.push('[0] 机器自检：REAL 模式不做（用 --selftest）')
+    L.push('='.repeat(100))
+    L.push('')
+  }
+
+  // [1] 两臂
+  L.push('='.repeat(100))
+  L.push('[1] 两臂结构（§3.2：同器具、同一张脸，只让【记忆库内容】不同）')
+  L.push('='.repeat(100))
+  for (const a of [arms.A, arms.B]) {
+    const rel = path.relative(ROOT, a.db).replace(/\\/g, '/')
+    L.push(`  ── 臂 ${a.arm}（${a.role}）`)
+    L.push(`     db 文件   : ${rel}${fs.existsSync(a.db) ? '' : '  （不存在）'}`)
+    L.push(`     建库动作   : ${mode === 'selftest' ? `是（reset + remember，全部真调 stub）${a.seedErr ? `  ⚠ ${a.seedErr}` : ''}` : '否（只读；真实臂的记忆由真实运行写入）'}`)
+    if (a.faceInput) {
+      L.push(`     face raw  : ${a.faceRaw}   （逐字同构 face-audit，可与日志比对）`)
+      L.push(`     face norm : ${a.faceNorm}   （★ 断言用；先做端口归一化）`)
+      L.push(`     namesHash : ${a.namesHash}   工具数=${a.toolCount}   system 长度=${a.sysLen}`)
+    } else {
+      L.push('     face      : (缺 system+tools 快照) ⇒ NEEDS-EVIDENCE')
+    }
+    if (!a.counts.length) {
+      L.push('     stub count: (无检查点) ⇒ NEEDS-EVIDENCE')
+    } else {
+      L.push('     stub count: ' + a.counts.map((c) => `k=${c.k}:${c.count === null ? `读失败(${c.err})` : c.count}`).join('  '))
+    }
+  }
+  L.push('')
+
+  // [2] 对照体检
+  L.push('='.repeat(100))
+  L.push('[2] 对照体检（§3.3 三条断言，任一 FAIL ⇒ 该批数据作废）')
+  L.push('='.repeat(100))
+  for (const a of batch.assertions) L.push(`  [${a.id}] ${pad(a.state, 15)} ${a.name}\n        ${a.detail}`)
+  L.push(`  ⇒ 批次裁决 = ${batch.verdict}`)
+  L.push('')
+
+  // [3] 阳性对照
+  L.push('='.repeat(100))
+  L.push('[3] 阳性对照（§2.4：k=1 应无差别 —— 它是两臂的共同起点）')
+  L.push('='.repeat(100))
+  L.push(`  [P1] ${pad(control.state, 15)} ${control.detail}`)
+  L.push('')
+
+  // [4] (甲)
+  L.push('='.repeat(100))
+  L.push('[4] 逐题读数表 · (甲) 序列/学习曲线型（k≥2 相对 k=1 的差）')
+  L.push('═'.repeat(100))
+  L.push('  Δ = B − A（负数=处理臂读数更小）。★ 只给读数，不给任何「有没有效果」的判语；n=5 不足以声称显著。')
+  L.push('')
+  L.push(`  ${pad('k', 4)}${pad('任务 id', 40)}${pad('指标', 11)}${pad('A', 9)}${pad('B', 9)}${pad('Δ', 9)}四态`)
+  L.push('  ' + '-'.repeat(96))
+  for (const row of cells.seq) {
+    L.push(`  ${pad('k=' + row.k, 4)}${pad(row.id, 40)}${pad(row.metric, 11)}${pad(row.aText, 9)}${pad(row.bText, 9)}${pad(row.dText, 9)}${row.state}`)
+  }
+  L.push('')
+
+  // [5] (乙)
+  L.push('='.repeat(100))
+  L.push('[5] 逐题读数表 · (乙) 单次型（预期「无差别」，而「无差别」本身是有用信息）')
+  L.push('═'.repeat(100))
+  L.push('  ★ 本骨架不把「不一致」判为 FAIL：那是读数，不是机器故障。')
+  L.push('')
+  L.push(`  ${pad('k', 4)}${pad('任务 id', 40)}${pad('指标', 11)}${pad('A', 9)}${pad('B', 9)}${pad('一致?', 9)}四态`)
+  L.push('  ' + '-'.repeat(96))
+  for (const row of cells.one) {
+    L.push(`  ${pad('k=' + row.k, 4)}${pad(row.id, 40)}${pad(row.metric, 11)}${pad(row.aText, 9)}${pad(row.bText, 9)}${pad(row.dText, 9)}${row.state}`)
+  }
+  L.push('')
+
+  // [6] 汇总
+  const c = cells.counts
+  L.push('='.repeat(100))
+  L.push('[6] 汇总（★ 本节不使用任何结论式措辞：逐格只有上面那四态）')
+  L.push('='.repeat(100))
+  L.push(`  批次裁决   : ${batch.verdict}`)
+  L.push(`  对照体检   : ${batch.assertions.map((a) => `${a.id}=${a.state}`).join('  ')}`)
+  L.push(`  阳性对照   : P1=${control.state}`)
+  L.push(`  格子计数   : OK=${c.OK}  NEEDS-EVIDENCE=${c[ST.NE]}  FAIL=${c[ST.FAIL]}  N/A=${c[ST.NA]}（合计 ${c.total}）`)
+  L.push(`  ★ 缺读数的格子 ${c[ST.NE]} 个：一律 NEEDS-EVIDENCE，未当成 OK。`)
+  L.push(`  两臂 face  : normalized ${arms.A.faceNorm ?? '(缺)'} / ${arms.B.faceNorm ?? '(缺)'}`)
+  L.push(`  记忆条目数 : A=[${arms.A.counts.map((x) => (x.count === null ? '?' : x.count)).join(',')}]  B=[${arms.B.counts.map((x) => (x.count === null ? '?' : x.count)).join(',')}]`)
+  L.push('')
+
+  // [7] 需要什么才能填上
+  L.push('='.repeat(100))
+  L.push('[7] 「需要什么才能填上」—— 这就是本骨架的用途：把格子先立出来')
+  L.push('='.repeat(100))
+  const needs = c[ST.NE] > 0 || batch.verdict === 'NEEDS-EVIDENCE'
+  if (needs) {
+    L.push('  当前 NEEDS-EVIDENCE 的格子，各需要什么：')
+    L.push('  · 两臂 face 指纹：需要两臂各一次真实会话的 request/header 里的 system + tools 快照')
+    L.push('    （日志侧已有取法：scripts/face-audit.mjs 的读法；骨架期没有会话 ⇒ 算不出脸）')
+    L.push('  · 记忆条目数随 k：需要对两臂真实跑完各自序列后的 db 调 memory-stub count（本机器已能读，只是没有 k 的读数）')
+    L.push(`  · (甲) 序列指标 ${METRICS_SEQ.join('/')}：需要两臂各跑【同一题目顺序】的真实会话，`)
+    L.push('    并从会话日志按题取 toolCalls / tokens / wallClock / 返工次数（返工=同一题重复尝试次数）')
+    L.push('  · (乙) oracle/regression：需要在每题上真跑 evals/pilot/tasks.jsonl 的 oracle.cmd / regression.cmd，')
+    L.push('    取退出码与 expectSeeded/expectFixed 比（判据由编排层在 _wt 之外执行，见 §4 R1）')
+    L.push('  · 驱动器尚未建：本骨架**不**驱动会话，也不产出上面这些读数')
+    L.push('  · --readings <file> 就是将来驱动器的输出接口（schema 见脚本内 loadReadings）')
+  } else {
+    L.push('  本轮没有 NEEDS-EVIDENCE 的格子（这一轮的读数来自注入的假数据）。')
+    L.push('  ★ 但「假数据下格子能填满」≠「真实读数可得」：真实读数仍需上面列的那些运行时产物。')
+  }
+  L.push('')
+  L.push('─'.repeat(100))
+  L.push('不确定 / 未验证（本报告的自我申报）：')
+  L.push('  · face 指纹是**本地移植** dsh-face/v1（不是调用 face-audit.mjs，理由见脚本文件头）；')
+  L.push('    漂移哨兵只查上游算法锚点字面量，**不证明逐字等价**。')
+  L.push('  · 本骨架不驱动真实会话、不调 memory-stub 的 recall（只用了 count/remember/reset）。')
+  L.push('  · 上面这些读数在没有真实会话之前都只是**格子的形状**，不是证据。')
+  L.push(DISCLAIMER)
+  L.push('─'.repeat(100))
+  return L.join('\n') + '\n'
+}
+
+// ───────────────────────── 主流程 ─────────────────────────
+
+const { opts, flags, rest } = parseArgs(process.argv.slice(2))
+if (rest.length) usage(`不认识的参数：${rest.join(' ')}`)
+if (flags.has('help') || flags.has('h')) {
+  process.stdout.write(USAGE)
+  process.exit(0)
+}
+
+const PLAN = flags.has('plan')
+const SELFTEST = flags.has('selftest')
+if (PLAN && SELFTEST) usage('--plan 与 --selftest 互斥')
+const BREAK = opts.break ?? null
+if (BREAK && !SELFTEST) usage('--break 只能与 --selftest 一起用（它改的是注入的假数据，不许拿它改真实数据）')
+if (BREAK && !Object.prototype.hasOwnProperty.call(BREAKS, BREAK)) {
+  usage(`--break 只认识 ${Object.keys(BREAKS).join(' / ')}，收到 ${BREAK}`)
+}
+const MODE = PLAN ? 'plan' : SELFTEST ? 'selftest' : 'real'
+
+// ── --plan：真正的空操作 ⇒ 直接返回
+if (MODE === 'plan') {
+  process.stdout.write(planLines().join('\n') + '\n')
+  process.exit(0)
+}
+
+// ── 数据
+let data
+if (opts.readings) data = loadReadings(opts.readings)
+else if (SELFTEST) data = selftestData()
+else data = realData()
+const dataNote = data.source
+if (BREAK) data = applyBreak(data, BREAK)
+
+const resolveDb = (arm) => {
+  const cliKey = arm === 'A' ? 'arm-a' : 'arm-b'
+  if (opts[cliKey]) return path.resolve(ROOT, opts[cliKey])
+  const fromData = data.arms?.[arm]?.db
+  if (fromData) return path.resolve(ROOT, fromData)
+  return SELFTEST ? SELFTEST_ARM_DB[arm] : DEFAULT_ARM_DB[arm]
+}
+const dbA = resolveDb('A')
+const dbB = resolveDb('B')
+
+// ── 采集
+const arms = { A: collectArm(data, 'A', dbA, MODE), B: collectArm(data, 'B', dbB, MODE) }
+const batch = assessBatch({
+  faceNormA: arms.A.faceNorm,
+  faceNormB: arms.B.faceNorm,
+  faceRawA: arms.A.faceRaw,
+  faceRawB: arms.B.faceRaw,
+  countsA: arms.A.counts,
+  countsB: arms.B.counts,
+})
+const control = assessPositiveControl(data)
+
+// ── 格子
+const seq = []
+const one = []
+const counts = { OK: 0, [ST.NE]: 0, [ST.FAIL]: 0, [ST.NA]: 0, total: 0 }
+const tally = (cells) => {
+  for (const c of cells) {
+    counts[c.state] = (counts[c.state] ?? 0) + 1
+    counts.total++
+  }
+}
+for (const t of data.tasks) {
+  for (const m of METRICS_SEQ) {
+    const a = reading(data, 'A', t.k, m)
+    const b = reading(data, 'B', t.k, m)
+    const ca = readCell(a)
+    const cb = readCell(b)
+    const cd = t.k === 1 ? { state: ST.NA, text: 'N/A' } : deltaCell(a, b)
+    seq.push({ k: t.k, id: t.id, metric: m, aText: ca.text, bText: cb.text, dText: cd.text, state: [ca.state, cb.state, cd.state].includes(ST.FAIL) ? ST.FAIL : [ca.state, cb.state, cd.state].includes(ST.NE) ? ST.NE : [ca.state, cb.state, cd.state].includes(ST.NA) ? ST.NA : ST.OK })
+    tally([ca, cb, cd])
+  }
+}
+for (const t of data.tasks) {
+  for (const m of METRICS_ONE) {
+    const a = reading(data, 'A', t.k, m)
+    const b = reading(data, 'B', t.k, m)
+    const ca = expectCell(a, 'pass')
+    const cb = expectCell(b, 'pass')
+    const cd = sameTextCell(a, b)
+    one.push({ k: t.k, id: t.id, metric: m, aText: ca.text, bText: cb.text, dText: cd.text, state: [ca.state, cb.state].includes(ST.FAIL) ? ST.FAIL : [ca.state, cb.state].includes(ST.NE) ? ST.NE : ST.OK })
+    tally([ca, cb, cd])
+  }
+}
+
+// ── 自检电池（只在 selftest 跑；用**纯净**的内置数据，与 --break 无关）
+const batteryResult = SELFTEST ? battery() : null
+const sentinel = facePortSentinel()
+
+// ── 组装 + 禁令自检
+data.source = dataNote
+const report = renderReport({ mode: MODE, data, arms, batch, control, cells: { seq, one, counts }, batteryResult, sentinel, breakName: BREAK })
+
+const leaked = FORBIDDEN_IN_REPORT.filter((re) => re.test(report)).map(String)
+if (leaked.length) {
+  process.stderr.write(`[${REPORT_NAME}] ★ 自检机器自身坏了：报告里出现了被禁的断言式说法 ${leaked.join(' ')} ⇒ 拒绝产出\n`)
+  process.exit(4)
+}
+// ★ 汇总段落里不许出现「通过」二字（「缺读数冒充通过」是 §6 门 4 要堵的洞）。
+//   范围 = [6] 汇总 段落本体（到 [7] 为止），不含标题行以外的其它章节。
+const summaryBlock = (report.split('[6] 汇总')[1] ?? '').split('[7] 「需要什么')[0] ?? ''
+if (summaryBlock === '') {
+  process.stderr.write(`[${REPORT_NAME}] ★ 自检机器自身坏了：报告里找不到 [6] 汇总 段落 ⇒ 拒绝产出\n`)
+  process.exit(4)
+}
+if (/通过/.test(summaryBlock)) {
+  process.stderr.write(`[${REPORT_NAME}] ★ 自检机器自身坏了：汇总区出现了「通过」二字 ⇒ 拒绝产出\n`)
+  process.exit(4)
+}
+
+const outPath = opts.out ? path.resolve(ROOT, opts.out) : DEFAULT_REPORT
+fs.mkdirSync(path.dirname(outPath), { recursive: true })
+fs.writeFileSync(outPath, report, 'utf8')
+
+// ── 退出码
+let code = 0
+if (batch.verdict === 'BATCH-INVALID') code = 1
+else if (control.state === 'CONTROL-FAILED') code = 3
+if (SELFTEST && batteryResult && !batteryResult.ok && code === 0) code = 4
+
+const relOut = path.relative(ROOT, outPath).replace(/\\/g, '/')
+process.stdout.write(
+  `${REPORT_NAME} mode=${MODE} batch=${batch.verdict} control=${control.state} ` +
+    `cells=OK:${counts.OK}/NEEDS-EVIDENCE:${counts[ST.NE]}/FAIL:${counts[ST.FAIL]}/N-A:${counts[ST.NA]} ` +
+    `assertions=${batch.assertions.map((a) => `${a.id}:${a.state}`).join(',')} ` +
+    `faceA=${arms.A.faceNorm ?? '-'} faceB=${arms.B.faceNorm ?? '-'} ` +
+    `countA=[${arms.A.counts.map((x) => (x.count === null ? '?' : x.count)).join(',')}] countB=[${arms.B.counts.map((x) => (x.count === null ? '?' : x.count)).join(',')}] ` +
+    `battery=${batteryResult ? `${batteryResult.checks.filter((c) => c.state === ST.OK).length}/${batteryResult.checks.length}` : 'n/a'} ` +
+    `exit=${code} report=${relOut}\n`,
+)
+process.exit(code)
