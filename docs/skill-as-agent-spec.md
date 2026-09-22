@@ -1791,3 +1791,55 @@ README 的 **R1**（判据不得在被测 agent 读写范围内）已写进设�
 | # | 项 | 说明 |
 |---|---|---|
 | **O48** | **`GraphWriter` channel 的确切接口**（我们的状态写入必须走它，但它的形状还没读） | O45 实现的前提 |
+
+---
+
+## 32. ✅ O48 关闭 + **O45 的实现形状定稿**（已具备动手条件）
+
+### 32.1 `GraphWriter` **不是 interface** —— 它是 `Builder` 上的两个方法
+
+- **没有 `type GraphWriter interface`**（`grep` 无命中）⇒ "GraphWriter channel" 是**概念名**；
+- 代码里的入口（`internal/memory/builder.go`）：
+  - **`func (b *Builder) SubmitGraphNode(node map[string]any)`** —— `:464`，转成 `graphNode` + `MergeRequest{Source: "compactor", …}` 提交
+  - ★★ **`func (b *Builder) InvalidateNodes(ids []string)`** —— `:491`：
+    **先 `graphCache.GetNode(id)` 读出现有节点 →（`:502`）`node.Status = "invalidated"` → `UpsertNodes` 提交**
+- 装配处：`bootstrap.go:650 builder.StartGraphWriter(ctx)`；注释 `v2_manager.go:612` 逐字："**`memory.Builder.SubmitGraphNode(node)` → `GraphWriter.Submit(req)`**"
+
+### 32.2 ★★ "写状态"的**既有范式** = 读 → 改字段 → Upsert（**O45 应当照抄它**）
+
+`InvalidateNodes` 就是一条**既有的状态写入路径**（它写的是 `"invalidated"`）。
+⇒ **⇒ O45 的门【不该】在 `skill_import.go:398` 里写死 `"pending"` 字面量**（那会同时违反两件事：
+**`ai-base/AGENTS.md` 第 4 条"不硬编码策略"** + **既有范式**），而应当：
+1. **新增一个与 `InvalidateNodes` 同形状的"状态迁移"方法**（读节点 → 改 `Status` → `UpsertNodes`）；
+2. **状态词汇表集中一处**（`pending`/`active`/… 常量定义，替代散落字面量）；
+3. **"谁能把 `pending` 变 `active`" 定义成【接口】**（钩子），由 **TS 侧 `capability-gate` 的回执**驱动 —— 这就是"策略走接口"。
+
+### 32.3 ★★ 一个新的必备动作：**"状态的所有读取点"清单**（否则会静默不一致）
+
+加一个新状态，**必须让所有读 `Status` 的地方都"考虑过它"**。**我现在已知的读取点**：
+
+| 读取点 | 逐字行为 | 新状态需要它做什么 |
+|---|---|---|
+| ★ `internal/memory/skill_tree.go:1054+` `GetActiveSkills` | `if Status == "archived" { continue }`；**L0 要求 `Status=="active"`**；★ **L3（triggers 命中）不检查 Status** | ★ **L3 也必须要求 `active`**（否则门是装饰，见 §30.1） |
+| `internal/memory/builder.go:546` | `if n.Status != "active" \|\| n.Type != "decision_flow" { … }` | 需确认它**要不要**对 `pending` 显式处理 |
+| `internal/memory/retriever_DeepRetriever.go:125/130/171/178` | 按 `"invalidated"` / `"suspicious"` **降权**（非排除） | 需决定 `pending` **是否应当被降权/排除**（"没测过的东西不该被检索到"？） |
+| `internal/context/active_skills_injection.go` | 经 `GetActiveSkills` 间接读 | 无需直接改（只要 `GetActiveSkills` 对） |
+
+⇒ ★ **⇒ 这张清单应当成为 O45 的"改动检查表"**（改一个状态 = 检查所有读取点）。
+
+### 32.4 ⇒ **O45 已具备动手条件**（四件事齐了）
+
+| 要什么 | 现在有什么 |
+|---|---|
+| **落点** | ✅ 三处 + 两前提（§30.1） |
+| **形状** | ✅ 照抄 `InvalidateNodes` 的"读-改-Upsert"范式（§32.2）+ 词汇表集中 + 接口钩子 |
+| **仓规约束** | ✅ `ai-base/AGENTS.md` 三条（走 channel / **策略走接口** / 不跨层）（§31.2） |
+| **验收门** | ✅ 5 条，含**防装饰门**（L3 路径）与**防过度封锁的阳性对照**（§30.4） |
+| **改动检查表** | ✅ §32.3 的"状态读取点清单" |
+
+### 32.5 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O49** | **`builder.go:546` 与 `retriever_DeepRetriever.go` 对 `pending` 应有的行为**（是否降权/排除） | O45 的改动检查表项 |
+| **O50** | **门的"接口钩子"落在哪个包**（`internal/external/` 新增，还是 `internal/memory` 内） | O45 的文件落点 |
