@@ -696,3 +696,60 @@ negative control passed = false
 > 与铁律 #13（否定命题必须带正交阳性对照）同族，但方向相反：**这次不是"对照选错"，是"自变量的取值选错"。**
 > ⇒ **派活/设计实验前先问：「我的自变量取在哪一档？被检主张说的是哪一档？」两者不一致就是无效实验。**
 > ⇒ 配套：**凡结论含"只有 X%"这类比例，必须同时报出【分母是什么】与【自变量取值】**（本例：0.7% 的分母是 41K，而种子只有 291）。
+
+---
+
+## 14. ★★★★ 官方文档核证：用户关于「缓存时序 / 多子代共存」的判断成立，且**我上一轮的 TTL 警告过度**
+
+**查证来源**：DeepSeek 官方文档 `https://api-docs.deepseek.com/guides/kv_cache`（Context Caching，逐字引用如下）。
+
+### 14.1 ★ 用户的两点判断成立
+
+| 用户的判断 | 官方原文 | 判定 |
+|---|---|---|
+| "**父代都已经准备动了……它调用工具的这一次，百分百是建立了缓存的**" | "**Each user request will trigger the construction of a hard disk cache.**" | ✅ **成立** —— **委托是由父代的一次请求执行的 ⇒ 那一刻缓存必然刚被构建/刷新** |
+| "**多个子代……后一个子代会影响另一个子代的缓存，但按理来说不会**" | "**When the system detects a common prefix across multiple requests, it will persist that common prefix as an independent cache prefix unit.**" | ✅ **成立** —— 同一父代、同一 fork 点的多个子代**共享同一条公共前缀** ⇒ 系统把它**持久化为一个独立单元** ⇒ **它们共享一个条目，而不是互相驱逐** |
+
+### 14.2 ★★ 我上一轮的"TTL 是最大适用边界"**过度了**
+
+官方：**"Once the cache is no longer in use, it will be automatically cleared, usually within a few hours to a few days."**
+⇒ **窗口是【数小时~数天】**，不是我暗示的"同秒级脆弱"。
+⇒ 再叠加"**每个请求都触发缓存构建**" ⇒ **"父代刚做完事就 fork"这个用法下，TTL 根本不是问题**；
+真正要付"重建一次"的钱的场合只有：**父代长期静置后**第一次动 —— **而那一波是父代自己的成本，且它本来也要付**。
+⇒ **§13.5 第 1 条（"TTL 是最大的适用边界"）作废**，改为下面的 14.3。
+
+### 14.3 ★★★ 官方给的机制**比我的表述更精确**（这是本轮真正的收获）
+
+> "**A cache hit requires that the corresponding prefix has already been 'persisted' … Each cached prefix is an independent, complete unit.
+> A subsequent request can only hit the cache if it【fully matches】a cache prefix unit.**"
+
+**单元在三个时机被持久化**（逐字）：
+1. **"Persistence at request boundaries"** —— 每个请求产生**两个单元**：**用户输入末尾** 与 **模型输出末尾**。
+2. **"Common prefix detection persistence"** —— 检测到多请求公共前缀 ⇒ 把它持久化为独立单元。
+3. **"Persistence at fixed token intervals"** —— 长输入/长输出**按固定 token 间隔**切单元，
+   **"to avoid long prefixes from being completely uncacheable due to never reaching an end position"**。
+
+⇒ ★★ **所以"能复用多少"不是简单地"1:1 等于种子长度"**，而是：
+**子代的前缀必须【完整匹配】父代留下的某个单元边界**（用户输入末尾 / 模型输出末尾 / 固定间隔）。
+⇒ **这与我们的实测精确吻合**：子代首请求 `cr=133,248`，而**父代自己在那次请求里命中的也是 `133,248`**
+（父代 `seq=495` 那一行）⇒ **子代命中的就是父代留下的同一个单元**。
+⇒ 而 fork 之所以**结构性地几乎总能命中**：**子代的种子 = 到最后一个 `turn/end` 为止**
+= **父代"模型输出末尾"** ⇒ **正好落在规则 1 的单元边界上**；再加上规则 3 的固定间隔兜底（长上下文不会被"够不到边界"卡死）。
+
+### 14.4 ⚠️ 由此得到一条**可证伪的预测**（新的实验，值得做）
+
+**预测**：若某次 fork 的**种子边界不落在任何单元边界上**（既非用户输入末尾、也非模型输出末尾、也不在固定间隔上），
+**该子代的首请求命中应当显著下降**（而不是仍等于"脸 + 种子"）。
+
+⇒ **做法**：构造"父代在一轮中途被中断/委派（没有干净 `turn/end`）"的场景 ——
+但注意 `completedTurnPrefix` 本来就只取**完整回合**，所以**默认情形下种子必然落在模型输出末尾**。
+⇒ ★ **所以这条预测更可能的形态是**：**种子的"非末尾部分"能否命中，取决于固定间隔规则** ⇒
+**值得测的是：种子长度取不同值（例如刚好卡在两个固定间隔之间）时，`cr` 是否出现台阶**。
+⇒ 这与"多轮复用"一起，构成下一批实验（**O25**）。
+
+### 14.5 其它官方约束（要记账）
+
+- "**best-effort**…**does not guarantee a 100% cache hit rate**" ⇒ 与我们的诚实边界一致，**不可把"命中"当保证**。
+- "**The hard disk cache only matches the prefix part of the user's input. The output is still generated through computation**"
+  ⇒ 缓存只影响**输入前缀**，输出仍要算 ⇒ **不能把"命中"理解成"这一步免费"**。
+- 命中读数就是 `usage.prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（= 我们一直在用的 `cacheReadTokens` / `inputTokens`）✓ 口径对得上。
