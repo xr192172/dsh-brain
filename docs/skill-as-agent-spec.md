@@ -1701,3 +1701,47 @@ README 的 **R1**（判据不得在被测 agent 读写范围内）已写进设�
 |---|---|---|
 | **O45** | ★★ **Go 侧 skill 导入缺门**：把 `memory-asset-triage.md:169` 已裁决的"**候选能力而非注入物**"落成代码（`import` ⇒ 不应直接 `active`/可注入）；并决定与 TS 侧 `capability-registry` 的 `pending/acceptance` **语义如何对齐** | **O42 的前置**（没有门，测效果没有意义） |
 | **O46** | **`ExportMCP` 的生产 `ToolProvider` 实现缺失** ⇒ "加面成本很低"只在**桥**这一层成立 | P1 的工作量估计 |
+
+---
+
+## 30. ✅ O45 落点已定：`docs/o45-import-gate-landing.md` + **对 §29.3 一处措辞的更正**
+
+### 30.1 ★★★ "门会被绕开"的**确切位置**（我核过源码，这是本轮最有用的一条）
+
+`internal/memory/skill_tree.go:1054+` 的 `GetActiveSkills` 有**两条注入路径，一条看 Status、一条不看**：
+
+| 路径 | 条件 | 检查 `Status` 吗 |
+|---|---|---|
+| **L0**（高分配稳定技能） | `Score>0.7 ∧ UseCount>10` | ✅ **要求 `Status == "active"`** |
+| ★ **L3**（触发词命中） | `Triggers` 命中 `taskHint` 关键词 | ❌ **完全不检查** |
+
+⇒ ★★ **⇒ 只把导入处改成 `pending` 是【装饰门】**：L0 那条路被封，**L3 那条路照走**。
+⇒ **⇒ 所以落点是"三处 + 两前提"，缺一即装饰**（详见设计文档）：
+**(a)** `skill_import.go:398` `Status:"active"` ⇒ `pending`（并修 `:447-448` 的"archived 复活成 active"）；
+**(b)** ★ **`skill_tree.go` 的 L3 分支也要要求 `active`**（**不改它，(a) 无效**）；
+**(c)** **判据处**（谁把 `pending`→`active`）—— 接 TS 侧 `capability-gate`，并要有**回执位**。
+
+### 30.2 ⚠️ 更正 §29.3 的一处措辞
+
+§29.3 我写"**导入即可注入 prompt**" —— **不精确**。精确说法：
+**新导入的 `Score = initialScore(source) ≤ 0.6` 且 `UseCount = 0` ⇒ L0 不成立；但若 `Triggers` 命中 `taskHint`，L3 成立 ⇒ 仍会被注入。**
+⇒ **即：导入即 `active`；是否被注入取决于（score/use 或 triggers），其中一条路径【不看 Status】。**
+
+### 30.3 ★ 顺手发现一处**必须先澄清的矛盾**（新增 O47）
+
+`memory-asset-triage.md` 称 `internal/memory/` 是**只读上游** —— 而 **O45 恰恰要改它**（`skill_import.go` / `skill_tree.go`）。
+⇒ ★ **两者不能同时成立。** 三种可能：(i) "只读"只指"不重写其内部算法"，状态设置点可改；
+(ii) 门应加在**别的层**（导入的调用方 / 注入侧）；(iii) 允许改，但要按跨仓纪律走。
+⇒ **⇒ 这决定 O45 是"改三处"还是"换个地方加门"，必须先定（O47 已记为 O45 的前置）。**
+
+### 30.4 验收门（防装饰门 + 防过度封锁）
+
+1. `Score>0.7 ∧ UseCount>10 ∧ Status="pending"` ⇒ **不在注入文本里**；
+2. ★ **`Status="pending"` 但 `Triggers` 命中** ⇒ **不在注入文本里**（最关键）；
+3. ★ **阳性对照**：同两条改成 `"active"` ⇒ **必须出现**（**否则"全封"也能过门 1/2**）；
+4. 重新导入一个 `archived` ⇒ 应变成 `pending`（**不是 `active`**）；
+5. 过门后 `Status` 变 `active` 且**有可读回执位**（至少 `proofLevel`）。
+
+| # | 新增 | 挡住 |
+|---|---|---|
+| **O47** | ★ **澄清"`internal/memory/` 只读上游"的边界**（与 O45 要改它相矛盾） | **O45 的落点形态** |
