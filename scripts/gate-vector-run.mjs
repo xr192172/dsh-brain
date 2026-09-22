@@ -228,7 +228,15 @@ function runCase(implArgv, c, idx, tmpDir, log, stateProto) {
       got.ok === want.ok ? good('ok') : bad('ok', want.ok, got.ok)
     }
     if (want.status !== undefined) {
-      got.status === want.status ? good('status') : bad('status', want.status, got.status)
+      // ★ O56 修复：`status` 也必须以**契约声明的写回文件**为准（与 :42-43 的声明一致），
+      //   不得采信实现 stdout 的自述 —— 否则"没写回"的实现会在这条上假绿。
+      afterStatus === want.status
+        ? good('status(契约声明的写回文件)')
+        : bad(
+            'status(契约声明的写回文件)',
+            want.status,
+            `写回文件里 ${stateProto.readField}=${JSON.stringify(afterStatus)}（stdout 自述 ${JSON.stringify(got.status)}）`,
+          )
     }
     if (want.statusUnchanged !== undefined) {
       const unchanged = afterStatus === originalStatus

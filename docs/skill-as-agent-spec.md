@@ -1948,3 +1948,61 @@ README 的 **R1**（判据不得在被测 agent 读写范围内）已写进设�
 | # | 项 | 说明 |
 |---|---|---|
 | **O54** | **补"故意坏"的实现变体**（不按 O51 写回 / 不按 O53 判回执）⇒ 让这两条也有对照 | 否则这两条判据**只被正向跑过** |
+
+---
+
+## 35. ✅ O54 达成（**三种坏法都被抓住**）+ 它顺手抓到我们新门里的**两处真缺陷**（O56 已修 / O55 待办）
+
+### 35.1 做法：**不新增文件**，改成"一个实现 + `--break` 开关"（三种坏法，默认向后兼容）
+
+```
+node scripts/gate-impl-broken.mjs visible|transition … [--break l3-status|o51-writeback|o53-receipt]
+```
+- `l3-status`（**默认**，向后兼容）：L3 分支不检查 `status`；
+- `o51-writeback`：`transition` **写到旁挂副本** ⇒ **契约声明的那份（runner 读回点）原封不动**；
+- `o53-receipt`：内存里删掉"回执可读"那几条判据 ⇒ 精确回到 O53 之前的洞。
+
+### 35.2 我的独立复核（三种模式各跑一次）
+
+| 模式 | 结果 | 被抓到的向量 |
+|---|---|---|
+| 不带 `--break`（默认） | `10/14 PASS / 4 FAIL` exit 1 | 4 条 L3 负向向量（`l3-pending-…` / `l3-archived-…` / `invalidated-…` / `suspicious-…`） |
+| `--break l3-status` | 同上（**证明默认即此档、向后兼容**） | 同上 |
+| ★ `--break o51-writeback` | `13/14 / 1 FAIL` exit 1 | **`transition-pending-to-active-receipt-passed`** |
+| ★ `--break o53-receipt` | `13/14 / 1 FAIL` exit 1 | **`transition-pending-to-active-receipt-missing-prooflevel`** |
+| 参考实现（修复后） | **`14/14 PASS` exit 0** | — |
+
+⇒ ★ **三种坏法全部被抓住，且都能指名道姓** ⇒ **O54 达成：O51/O53 现在也有对照了。**
+
+### 35.3 ★★ 发现 1（**已修并验证**）：runner 的 `status` 断言**自己违背了自己的声明**
+
+- runner `:42-43` 声明："runner 事后**读该文件的 status 字段**来判 `statusUnchanged`/迁移后 `status`（**不采信实现 stdout 的自述**）"；
+- ★ 而 `:231` 实际是 `got.status === want.status ? …` ⇒ **`status` 这条恰恰采信了 stdout**（`statusUnchanged` 才用了读回值）。
+⇒ **⇒ "声明与实现静默不一致" —— 发生在【我们刚写的门】里。**
+
+**我的修复**（`:231`，一行）：`status` 也以**契约声明的写回文件**为准，并把两者并列进报错。
+**验证**（逐字）：
+```
+└ status(契约声明的写回文件) 期望 "active" 实为 "写回文件里 status="pending"（stdout 自述 "active"）；
+  statusUnchanged(契约声明的写回文件) 期望 false 实为 "写回文件里 status="pending"（原 "pending"）
+```
+⇒ 两条都改读文件了；**参考实现仍 14/14** ⇒ **收紧未误伤正确实现**。**⇒ O56 关闭。**
+
+### 35.4 ★★ 发现 2（**待办**）：4 条**负向**迁移向量对"**从不写回**"无分辨力
+
+- 4 条负向迁移向量都期望 **`statusUnchanged: true`** ⇒ ★ **一个"从不写回"的实现【同样满足】**（"读不到"被当成了"没变"）；
+- 现在**只有那条正向对照**（`…receipt-passed`，期望 `statusUnchanged: false`）能抓到这类错误
+  ⇒ ★ **若删掉它，这类错误会全绿通过。**
+⇒ **⇒ 需要一条"写回痕迹"信号**（例如契约声明 `readback.revision`/`writtenAt`，或加一条"必须留下可检出痕迹"的断言）。
+⇒ ★ **这正是契约 §5.1 自己警告的"读不到 ≠ 未变"** —— 也与我们铁律 #12/#15 同族。**⇒ O55。**
+
+### 35.5 一个我自己的读数教训
+
+★ 我一度把 `1 FAIL` 误读成"1 条断言失败" ⇒ 实际 **runner 按【向量】计数，一个向量内可含多条失败断言**。
+⇒ **纪律：读汇总先确认计数单位。**（该向量内 `status` 与 `statusUnchanged` 两条断言同时失败，但只计 1。）
+
+### 35.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O55** | ★ **给"从不写回"加一条可分辨的判据**（写回痕迹 / `revision` / `writtenAt`），否则 4 条负向迁移向量对它无分辨力 | 见 35.4 |
