@@ -2332,3 +2332,63 @@ cells=OK:0 / NEEDS-EVIDENCE:86 / FAIL:0 / N-A:4
 |---|---|---|
 | **O67** | ★ **A1 需要真实会话的 `system+tools` 快照做输入**，否则"两臂指纹相同"构造性成立、不可能变红 | A1 的分辨力 |
 | **O68** | **`control=NEEDS-EVIDENCE`** 这一格的含义与它何时能变真（需确认它是"阳性对照臂"还是别的） | 判据完整性 |
+
+---
+
+## 41. ★★★ 第一次真实会话跑通（1 条任务 × 1 臂）—— 采到真读数、拿到**真实 face 快照**，但**撞出 R1 的真阻塞**
+
+### 41.1 ✅ 跑成了（我的复核）
+
+| 项 | 结果 |
+|---|---|
+| **主仓未被污染** | ✅ `git status --porcelain` 跑前/跑后**逐字一致（都空）**，HEAD 仍 `4c8010e`，无 commit/add/push |
+| **任务确实执行** | ✅ oracle：干净 HEAD 绿 → **seed 后红**（`8 passed, 1 failed`，精确点名 `packages/switchboard/src/index.ts:42`）→ **跑完后绿**（`9 passed, 0 failed`，复跑同绿、**非 flaky**）⇒ **FIXED** |
+| **真读数** | ✅ `toolCalls=19` / `outputTokens=6371` / `cacheRead=639232`（与 `session.list` 投影**逐位一致**）/ `wallClock=47337ms`（预算 15min 内）/ `unsafeActions=0` |
+| ★★ **真实 face 快照** | ✅ **我独立确认**：会话 `a6ae3e54-…`（387 事件）、`request/header` **seq=10**、**工具数 102**、**system 6475 字符**（含 `127.0.0.1:3131`）⇒ **O67 的输入不再是造的了** |
+
+⚠️ **一处我未能独立复算**：指纹数值。子代理报 `face=ca4feb11`（raw）/ `66ac33bc`（端口归一化）/ `namesHash=0339ee00`；
+我用自写实现算得 **`7abc3d25` / `d06a938b`** ⇒ **不符**。★ 但它的 `namesHash=0339ee00` 与**历史已知的 council 脸**吻合
+⇒ **多半是我的复算实现不对** ⇒ **该数值仍属"单点、未独立复算"**（不许当已验证；权威算法在 `face-audit.mjs` 里且**无导出**）。
+
+### 41.2 ❌ ★★★ R1 未达标（如实报）+ **我证实了根因**
+
+- 被测 agent 的 cwd `out/_wt/w24-A/` 是**完整检出**，里面**确有** `scripts/test-injected-message-shape.mjs`、
+  `scripts/check-all.mjs`、`scripts/eval-validate.mjs`、`evals/pilot/tasks.jsonl`；
+  ★ **轨迹里 agent 真的读了判据脚本本身（seq=212）** ⇒ **正是本项目历史上翻过的那个车**（"三条 B 会话都读了 `check.mjs`"）。
+- ★★ **根因（我核实）**：`scripts/eval-validate.mjs:35` / `test-injected-message-shape.mjs:30` / `check-all.mjs:26`
+  **全部硬编码 `const REPO = 'D:/project_develop/dsh-brain'`**，且这三者 **`process.cwd` 出现次数 = 0**
+  ⇒ **判据脚本永远看向主仓，不看你从哪个工作树调用它** ⇒ **隔离在原理上不可能生效**。
+- ⇒ ★ **进一步的后果（子代理发现）**：`eval-run.mjs` 的单臂路径 **不传 worktree**（`WORK = REPO`），
+  **连 `--pair --worktreeA` 的 seed 也照样打在主仓** ⇒ **现有 eval 装置无法在隔离工作树里跑**。
+  ⇒ 它**自建了驱动**（`out/_w24/`，gitignored）+ 自己实现 seed（字节级备份 + sha256 + "恰好 1 次"断言）。
+
+### 41.3 ★★ 两个隔离坑（子代理自报，已定位并修 —— 值得记）
+
+1. **`core.autocrlf=true`（system 级、无 `.gitattributes`）** ⇒ `git worktree add` 检出 **CRLF**
+   ⇒ `seed.find` 里的 `\n` **匹配 0 次** ⇒ 第一次打 seed 直接失败。修法：`-c core.autocrlf=false`。
+2. ★★ **修完逐文件比对 320 个跟踪文件，仍有 8 个不同** ⇒ **主工作区自己就是混合行尾，被 `autocrlf` 在 `git status` 里掩盖了**
+   ⇒ ★ **"`git status` 干净"证明不了"两棵树字节一样"**（与 §39.6 的"比较前先让对象可比"同族，但这次是**常态化的掩盖**）。
+3. `git worktree remove --force` 会留下 `node_modules` junction ⇒ 它**没用 `rm -rf`**（怕误删），改**非递归删除**并当场验证
+   `node_modules` 顶层 221→221、`@deepseek-ai` 197→197 **未受损**。
+
+### 41.4 产物与边界
+
+- `out/w24-first-real-run.md`（25970 B）+ **`out/w24-real-readings-armA.json`**（232039 B，按 `memory-effect-judge.mjs:535` 的 `loadReadings` schema 装好，
+  `arms.A.faceInput` = **真实快照**：system 6475 字符 + 102 个工具 schema 全文）。
+- ★ **没有真跑判据**（跑它会重写既有产物 `out/memory-judge-report.txt`）⇒ **schema 一致性是"按源码读的"，不是跑通的**。
+- ★ **`rework` 本轮没采到 ⇒ 故意不填**，让它记 `NEEDS-EVIDENCE` ✓（纪律执行正确）。
+- 其它未验证：regression 子门各自的硬编码口径 / oracle A 段不敏感于 seed / **face 只有单点** / preset 是 `council`（非 `code`）故不可与历史横比 / 无 pass^k。
+
+### 41.5 ⇒ 下一步的**真阻塞**已经很清楚：修 R1
+
+**判据脚本必须支持"工作树参数"**（`--repo <path>` 或环境变量），**并且判据本身要移出被测 cwd**
+⇒ 否则：**A/B 两臂的 oracle 都对主仓生效、且 agent 能读到判据** ⇒ **区分度归零、结果无意义**（这正是历史的翻车点）。
+⇒ **在 R1 修好之前，跑 10 次 A/B 是浪费**（会得到一堆不可信的读数）。
+
+### 41.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O69** | ★★ **修 R1**：给 `eval-validate.mjs` / `test-injected-message-shape.mjs` / `check-all.mjs` 等**加工作树参数**（或环境变量），并把判据移出被测 cwd | **A/B 的前置**（当前是主线的真阻塞） |
+| **O70** | **face 指纹的权威算法**应当可被独立调用（现在 `face-audit.mjs` 无导出 ⇒ 别人只能重写一份，容易出现我俩数值不一致这种局面） | 复核能力 |
+| **O71** | **`eval-run.mjs` 的单臂路径不传 worktree**（`WORK = REPO`）⇒ 现有装置无法在隔离树里跑 | 与 O69 同源 |
