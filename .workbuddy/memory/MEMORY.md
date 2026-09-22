@@ -254,6 +254,15 @@
 - ⚠️ 不要把 (b)「DSH 插件内重写」或 (c)「TS 文件式」当成候选 —— 它们会**砍坏论文系统**：
   `sleep_rem.go` 的"**论文推论文**（跨社区关联）"与"**谱系毒性召回**"依赖 `graph_*`/`retrieval*`，**而它们都在"Go 保留"那一侧**。
 
+★★ **`ai-base` 仓规（跨仓，动它之前必读）**：`D:\project_develop\ai-base\AGENTS.md`（291 行）的 **「禁止行为」7 条**（`:196-204`）——
+**与我们相关的三条**：
+① **不直接读写 `graph.json`（必须通过 `GraphWriter` channel）**；
+② ★★ **不硬编码策略（压缩策略 / 融合算法 / **评分维度**等必须走接口）** ⇒ **"门/判据"属于策略 ⇒ 必须走接口 + 集中词汇表，不许新增散落字面量**；
+③ **不跨层调用（Agent 不直接调 ContextManager 的内部 Layer、不直接调 Memory 的 VectorStore）** ⇒ 从 DSH 侧够过去**只能走"面"（MCP）**。
+（另 4 条：不绕过 ContextManager 自拼 prompt / 不跳过 PermissionGate / 不改带 ⚠️ 的弃用文档 / 不用正则做代码分析。）
+★ **`internal/memory/` 允许改**（"只读不改"是**移植期**纪律，其使命已完成；`memory-asset-triage.md:17/390` 明确要它 **Go 保留 = 继续演进**）——
+但只做**最小的状态/筛选改动**，门与面优先放 `internal/external/` 新增文件。
+
 | 主题 | 文件 | 什么时候读 |
 |---|---|---|
 | **接手指南（下一项）** | `topics/next-task-handover.md` | **新会话接手先读这个**（顶部=回执结构） |
