@@ -1,0 +1,180 @@
+{
+  "contract": "dsh-gate-contract/v1",
+  "title": "门契约：状态词汇表 / 判据回执 / 状态迁移 / 注入可见性 / 实现协议",
+  "oneLiner": "门是一个策略 ⇒ 它的词汇表、判据回执、迁移条件、可见性条件都必须集中声明、由实现通过接口读取，不许在任何实现里写死字面量。",
+  "verifyWith": "node scripts/gate-contract-check.mjs",
+  "sourceOfTruth": {
+    "docs": [
+      "docs/o45-import-gate-landing.md (§2 落点 / §3 验收门)",
+      "docs/skill-as-agent-spec.md (§30 / §31 / §32，尤其 §32.2 既有范式、§32.3 状态读取点清单)",
+      "docs/memory-effect-judge-design.md (§7 读 + 写 + 条目数)"
+    ],
+    "repoRule": {
+      "repo": "ai-base",
+      "file": "AGENTS.md",
+      "line": "196-204",
+      "ruleIndex": 4,
+      "quote": "不硬编码策略（压缩策略、融合算法、评分维度等必须走接口）",
+      "reading": "「门」属于策略 ⇒ 必须走接口 + 集中词汇表；在 skill_import.go / skill_tree.go 里写死 \"pending\" / \"active\" 字面量，等价于硬编码策略。"
+    },
+    "existingParadigm": {
+      "what": "写状态的既有范式 = 读节点 → 改字段 → Upsert",
+      "evidence": "ai-base/agent-shell/internal/memory/builder.go:491 InvalidateNodes()（先 GetNode 读出现有节点 → node.Status = \"invalidated\" → UpsertNodes 提交）",
+      "reading": "门的状态迁移方法应当照抄这个形状，而不是新开一条旁路直接写 graph.json（AGENTS.md 禁止行为第 2 条）。"
+    },
+    "tsCounterpart": "scripts/capability-registry.mjs （acceptance { kind, status, proofLevel, unenforced }）",
+    "tsGate": "scripts/capability-gate.mjs （LADDER / UNENFORCED = ['L2','L3','L4']）"
+  },
+
+  "states": {
+    "singleSourceOfTruth": true,
+    "values": ["pending", "active", "archived", "invalidated", "suspicious"],
+    "defaultOnImport": "pending",
+    "adoptedState": "active",
+    "meaning": {
+      "pending": "已导入但未过门（新导入的默认态；也是「重新导入一个 archived 条目」的结果态）",
+      "active": "已过门并已写回回执",
+      "archived": "已淘汰（沿用现值）",
+      "invalidated": "已失效（沿用现值；既有写入路径 internal/memory/builder.go:491 InvalidateNodes）",
+      "suspicious": "可疑（沿用现值；检索侧降权而不排除）"
+    },
+    "rules": [
+      {
+        "id": "one-vocabulary",
+        "rule": "状态只能取自 values；任何实现不得新增散落字面量",
+        "why": "Go 侧现状全是散落字面量（\"active\"/\"archived\"/\"invalidated\"/\"suspicious\"）⇒ 再加一个只会更散；且违反 ai-base/AGENTS.md 第 4 条（策略走接口）。"
+      },
+      {
+        "id": "import-defaults-to-pending",
+        "rule": "新导入的条目 Status = defaultOnImport（pending），不是 active",
+        "why": "现状 skill_import.go:398 逐字 Status: \"active\" ⇒ 导入即采纳。docs/memory-asset-triage.md:169 已裁决「导入后视为候选能力而非注入物」，代码与裁决相反。"
+      },
+      {
+        "id": "reimport-of-archived-goes-to-pending",
+        "rule": "重新导入一个 archived 条目 ⇒ 结果态是 pending，不是 active",
+        "why": "现状 skill_import.go:447-448 逐字 if Node.Status == \"archived\" { Node.Status = \"active\" } ⇒ 「复活」是一条绕门路径。重新导入 ≠ 重新采纳。"
+      }
+    ]
+  },
+
+  "receipt": {
+    "note": "判据回执。字段命名与 TS 侧 capability-registry 的 acceptance 对齐（跨语言：Go 侧按同一 JSON 键名读）。",
+    "schema": {
+      "required": ["kind", "status", "proofLevel", "unenforced"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["gate", "none"],
+          "note": "只有 gate 是判据；none = 没有判据（不得当作通过）"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed", "unknown"],
+          "note": "unknown = 缺读数/没跑过（不得当 passed）"
+        },
+        "proofLevel": {
+          "type": ["string", "null"],
+          "enum": ["L0", "L1", null],
+          "note": "门真正跑到哪一级；本项目当前最多到 L1"
+        },
+        "unenforced": {
+          "type": "array",
+          "items": { "type": "string" },
+          "mustInclude": ["L2", "L3", "L4"],
+          "note": "★ 未实施的判据级必须显式带出，防「假绿」"
+        }
+      }
+    },
+    "invariants": [
+      {
+        "id": "unenforced-must-list-unimplemented",
+        "rule": "未实施的判据级必须出现在 unenforced 里",
+        "why": "本项目的既有事实：门只跑到 L1（capability-gate.mjs:55 UNENFORCED = ['L2','L3','L4']）。不显式带出未实施的级，读的人会以为「全过」。"
+      },
+      {
+        "id": "missing-reading-is-unknown",
+        "rule": "缺读数 ⇒ status 必须是 \"unknown\"，不得当 \"passed\"",
+        "why": "「无证据 ≠ 通过」（docs/memory-effect-judge-design.md §5）。缺读数当 passed 就是假绿——本项目花了两天修的那类失败（保险自己失效）。"
+      },
+      {
+        "id": "receipt-is-recorded-on-adoption",
+        "rule": "过门后必须写回回执，且回执可读（至少 proofLevel）",
+        "why": "O45 验收门第 5 条：过了门却读不到「证到哪为止」，等于没有回执位。"
+      }
+    ]
+  },
+
+  "transitions": {
+    "note": "状态迁移。接口形状：transition(id, to, receipt?) → {ok, status, reason}",
+    "result": { "fields": ["ok", "status", "reason"] },
+    "rules": [
+      {
+        "id": "pending-to-active-requires-passed-receipt",
+        "from": "pending",
+        "to": "active",
+        "require": [
+          { "path": "receipt.status", "op": "==", "value": "passed" }
+        ],
+        "onFail": {
+          "ok": false,
+          "keepStatus": true,
+          "reasonTemplate": "receipt.status != \"passed\"（实为 {actual}）⇒ 拒绝 pending → active"
+        },
+        "why": "★ 这就是「门」本身。没有这条，pending 永远出不去（技能全废）或随便什么都能出去（门不存在）。O45 §2 落点 (c)。"
+      },
+      {
+        "id": "archived-reimport-returns-to-pending",
+        "from": "archived",
+        "to": "pending",
+        "require": [],
+        "why": "「复活」不得直接回 active，必须先 pending 再走一次门（O45 §3 验收门第 4 条）。"
+      },
+      {
+        "id": "invalidated-and-suspicious-unchanged",
+        "from": "*",
+        "to": ["invalidated", "suspicious"],
+        "require": [],
+        "why": "沿用现值：这两态由失效/检索路径写入，本契约不新增门。"
+      }
+    ]
+  },
+
+  "visibility": {
+    "note": "注入可见性：一个条目是否可以被注入 prompt。两条路径都必须在契约里显式声明。",
+    "invisibleStates": ["pending", "archived"],
+    "rules": [
+      {
+        "level": "L0",
+        "requiresStatus": "active",
+        "conditions": [
+          { "metric": "score", "op": ">", "value": 0.7 },
+          { "metric": "useCount", "op": ">", "value": 10 }
+        ],
+        "why": "高分配稳定技能路径。现状 internal/memory/skill_tree.go:1054+ 已经要求 Status == \"active\" ⇒ 契约与现状一致，防止有人「顺手」把这条要求删掉。"
+      },
+      {
+        "level": "L3",
+        "requiresStatus": "active",
+        "condition": { "kind": "triggers-hit-taskHint" },
+        "why": "★ 触发词命中路径。现状 L3 分支**完全不检查 Status** ⇒ 只把导入处改成 pending 是装饰门（O45 §30.1：L0 被封而 L3 照走）。这一条是本契约最不能少的一条。"
+      }
+    ]
+  },
+
+  "implementations": {
+    "note": "实现协议：runner 对任意实现说的话。实现可以是 Go 侧 external 接口、TS 脚本或测试夹具——契约不关心语言，只认这两个子命令与 stdout 形状。",
+    "protocolVersion": "dsh-gate-impl/v1",
+    "commands": {
+      "visible": {
+        "argv": ["<impl>", "visible", "--node", "<jsonfile>", "--task-hint", "<text>"],
+        "stdout": { "visible": "bool" },
+        "why": "门必须对注入面负责：只挡迁移不挡注入，等于半截门。"
+      },
+      "transition": {
+        "argv": ["<impl>", "transition", "--node", "<jsonfile>", "--to", "<status>", "[--receipt", "<jsonfile>]"],
+        "stdout": { "ok": "bool", "status": "string", "reason": "string" },
+        "why": "拒绝必须可解释：调用方拿 reason 才能知道被哪条规则挡下，而不是只有一张红脸。"
+      }
+    }
+  }
+}

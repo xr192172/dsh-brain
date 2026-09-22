@@ -1,0 +1,216 @@
+{
+  "vectors": "dsh-gate-vectors/v1",
+  "contract": "evals/gate/contract.json",
+  "note": "离线测试向量（纯数据）。L0/L3 = 注入可见性；transition = 状态迁移门。判据按 contract.json 的 visibility.rules 与 transitions.rules。",
+  "cases": [
+    {
+      "id": "l0-active-highscore-visible",
+      "kind": "l0",
+      "role": "positive-control",
+      "why": "L0 边界内：active ∧ score>0.7 ∧ useCount>10 ⇒ 必须可见；防「把状态条件写成恒 false」导致的全封。",
+      "node": {
+        "id": "n-l0-active-highscore-visible",
+        "type": "skill",
+        "status": "active",
+        "score": 0.9,
+        "useCount": 20,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "expect": { "visible": true }
+    },
+    {
+      "id": "l0-pending-highscore-hidden",
+      "kind": "l0",
+      "role": "negative-control",
+      "why": "★ 防装饰门：score/use 都达标但 status=pending ⇒ 必须不可见；否则「只改导入处」这条 L0 路根本没被真正封住。",
+      "node": {
+        "id": "n-l0-pending-highscore-hidden",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.9,
+        "useCount": 20,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "expect": { "visible": false }
+    },
+    {
+      "id": "l3-active-trigger-match-visible",
+      "kind": "l3",
+      "role": "positive-control",
+      "why": "★ L3 阳性对照：active ∧ triggers 命中 taskHint ⇒ 必须可见；没有这条，把 L3 改成恒不可见也能过所有负向向量（=过度封锁）。",
+      "node": {
+        "id": "n-l3-active-trigger-match-visible",
+        "type": "skill",
+        "status": "active",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": true }
+    },
+    {
+      "id": "l3-pending-trigger-match-hidden",
+      "kind": "l3",
+      "role": "negative-control",
+      "why": "★★ 最关键：pending ∧ triggers 命中 ⇒ 必须不可见。现状 L3 分支完全不检查 Status，这条就是「只改导入处 = 装饰门」的反例。",
+      "node": {
+        "id": "n-l3-pending-trigger-match-hidden",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": false }
+    },
+    {
+      "id": "l0-active-lowscore-hidden",
+      "kind": "l0",
+      "role": "boundary",
+      "why": "L0 阈值边界：契约是 score>0.7（严格大于），score 恰为 0.7 ⇒ 落在边界外 ⇒ 不可见；防「>= 写成 >」的 off-by-one。",
+      "node": {
+        "id": "n-l0-active-lowscore-hidden",
+        "type": "skill",
+        "status": "active",
+        "score": 0.7,
+        "useCount": 20,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "expect": { "visible": false }
+    },
+    {
+      "id": "l0-archived-hidden",
+      "kind": "l0",
+      "role": "negative-control",
+      "why": "archived 是不可见态：即使 score/use 达标也必须挡下；验证状态排除对 L0 生效。",
+      "node": {
+        "id": "n-l0-archived-hidden",
+        "type": "skill",
+        "status": "archived",
+        "score": 0.9,
+        "useCount": 20,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "expect": { "visible": false }
+    },
+    {
+      "id": "l3-archived-trigger-match-hidden",
+      "kind": "l3",
+      "role": "negative-control",
+      "why": "archived ∧ triggers 命中 ⇒ 必须不可见；与 l3-pending 一起封住 L3 路的两个不可见态。",
+      "node": {
+        "id": "n-l3-archived-trigger-match-hidden",
+        "type": "skill",
+        "status": "archived",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": false }
+    },
+    {
+      "id": "transition-pending-to-active-no-receipt",
+      "kind": "transition",
+      "role": "negative-control",
+      "why": "无回执（null）⇒ 不得迁移：receipt.status 读不到 ⇒ 拒绝，且状态保持 pending，不许被「缺读数」默认放行。",
+      "node": {
+        "id": "n-transition-pending-to-active-no-receipt",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "transition": { "to": "active", "receipt": null },
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+    },
+    {
+      "id": "transition-pending-to-active-receipt-failed",
+      "kind": "transition",
+      "role": "negative-control",
+      "why": "回执 status=failed ⇒ 判据没过 ⇒ 拒绝 pending→active，状态保持 pending。",
+      "node": {
+        "id": "n-transition-pending-to-active-receipt-failed",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "transition": {
+        "to": "active",
+        "receipt": { "kind": "gate", "status": "failed", "proofLevel": "L0", "unenforced": ["L2", "L3", "L4"] }
+      },
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+    },
+    {
+      "id": "transition-pending-to-active-receipt-unknown",
+      "kind": "transition",
+      "role": "negative-control",
+      "why": "★ 回执 status=unknown（缺读数）⇒ 必须拒绝：unknown 不得被当作 passed，这是「无证据 ≠ 通过」的机器判据。",
+      "node": {
+        "id": "n-transition-pending-to-active-receipt-unknown",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "transition": {
+        "to": "active",
+        "receipt": { "kind": "gate", "status": "unknown", "proofLevel": null, "unenforced": ["L2", "L3", "L4"] }
+      },
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+    },
+    {
+      "id": "transition-pending-to-active-receipt-passed",
+      "kind": "transition",
+      "role": "positive-control",
+      "why": "★ 门本体阳性对照：只有 receipt.status=passed（且回执完整可读）才允许 pending→active；没有这条就分不清「门」与「全封」。",
+      "node": {
+        "id": "n-transition-pending-to-active-receipt-passed",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "transition": {
+        "to": "active",
+        "receipt": { "kind": "gate", "status": "passed", "proofLevel": "L0", "unenforced": ["L2", "L3", "L4"] }
+      },
+      "expect": { "ok": true, "statusUnchanged": false, "status": "active" }
+    },
+    {
+      "id": "transition-pending-to-active-receipt-missing-prooflevel",
+      "kind": "transition",
+      "role": "negative-control",
+      "why": "我的判断：ok:false。理由——proofLevel 是 contract.json receipt.schema.required 的必填字段，且不变量 receipt-is-recorded-on-adoption 明写「回执可读（至少 proofLevel）」、O45 验收门第 5 条要求「过门后 proofLevel 可读」。passed 但缺 proofLevel ⇒ 读不到「证到哪一级」⇒ 回执不可读 = 缺读数 ⇒ 按 missing-reading-is-unknown 不得当 passed。注意：contract.transitions.rules 的字面只要求 receipt.status==\"passed\"，所以这条比字面规则更严，是在补一个「通过但回执残缺」的洞。",
+      "node": {
+        "id": "n-transition-pending-to-active-receipt-missing-prooflevel",
+        "type": "skill",
+        "status": "pending",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": []
+      },
+      "taskHint": "unrelated task hint",
+      "transition": {
+        "to": "active",
+        "receipt": { "kind": "gate", "status": "passed", "unenforced": ["L2", "L3", "L4"] }
+      },
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+    }
+  ]
+}

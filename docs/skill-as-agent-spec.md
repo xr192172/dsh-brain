@@ -1843,3 +1843,59 @@ README 的 **R1**（判据不得在被测 agent 读写范围内）已写进设�
 |---|---|---|
 | **O49** | **`builder.go:546` 与 `retriever_DeepRetriever.go` 对 `pending` 应有的行为**（是否降权/排除） | O45 的改动检查表项 |
 | **O50** | **门的"接口钩子"落在哪个包**（`internal/external/` 新增，还是 `internal/memory` 内） | O45 的文件落点 |
+
+---
+
+## 33. ★★★★ 走②落地：**可执行的门契约 + 向量 + runner**（Go 侧照契约接上，验证是现成的）
+
+> 用户选择"先在 DSH 侧把契约与验证钉成可执行的，不碰 Go"。**三路并行产出 + 我逐条复核。**
+
+### 33.1 交付（6 个新文件，全部可执行）
+
+| 文件 | 是什么 |
+|---|---|
+| `evals/gate/contract.json` | **契约的机器可读形式**（状态词汇表 / 回执 schema / 迁移规则 / 可见性规则 / 实现协议） |
+| `docs/gate-contract.md` | 契约人读版（含"每条规则的为什么"+ 与 TS 侧 `capability-registry` 的对应表 + **"门属策略 ⇒ 走接口 + 集中词汇表"**，逐字引 `ai-base/AGENTS.md` 第 4 条） |
+| **`scripts/gate-contract-check.mjs`** | **契约校验器**（19 项检查，每项带 why）+ `--selftest`（12 份内存坏契约） |
+| `evals/gate/vectors.json` | **12 条测试向量**（`positive-control=3` / `negative-control=8` / `boundary=1`） |
+| **`scripts/gate-impl-reference.mjs`** | **参考实现**（按契约；阈值/状态/`requiresStatus` 全从 `contract.json` 读 ⇒ **无硬编码策略**） |
+| ★★ **`scripts/gate-impl-broken.mjs`** | **"故意坏"的实现**：与参考实现**只差一处 —— L3 分支不检查 `status`**（= 复现 `skill_tree.go:1054+` 的现状形状） |
+| **`scripts/gate-vector-run.mjs`** | **runner**：`--impl "<cmd>"` 可指向**任意实现** ⇒ **同一套向量，两处跑** |
+
+### 33.2 我的独立复核（跑了两次，两种实现）
+
+| 跑法 | 结果 |
+|---|---|
+| `--impl reference` | **`12/12 PASS / 0 FAIL / 0 NEEDS-EVIDENCE ⇒ exit 0`** ✓<br>且它自己带免责："这只证明**这批复盖到的判据**一致，**不等于门已被 Go 侧实现**" |
+| ★ `--impl broken` | **非零退出**；★ **`l3-pending-trigger-match-hidden` FAIL**（`expect={"visible":false} got={"visible":true}`）<br>关键对照行显示 **`l3-active=…PASS / l3-pending=…FAIL`** ⇒ **"门漏了 = 装饰门"被机器指认** |
+| 契约校验器反向自证 | **删掉 L3 的 `active` 要求 ⇒ 只那一项变红（1/19）** ⇒ 精确守这条规则，而非"顺手全红" |
+| 语法 / BOM | 四个脚本 `node --check` 全过；BOM 0 |
+
+### 33.3 ⚠️ 边界（两个子代理主动标的，我照记）
+
+1. **契约自洽 ≠ 门已实现**：`skill_import.go:398` / `:447-448` / `skill_tree.go` 的 L3 分支 **一处未改**；
+2. ★ **"坏实现"比现状【更坏一点】**：现状还有**顶层 `archived` 排除** ⇒ 所以
+   `l3-archived-trigger-match-hidden` 那条 FAIL **不能当作对现状的指控**；**只有 `l3-pending-…` 那条是**（它对现状成立）。
+3. **L3 命中算法契约未定义**（实现取了大小写不敏感子串）⇒ **向量分辨不出算法差异**；
+4. `NEEDS-EVIDENCE` 路径**已实测两条子路径**（实现崩 / `exit 0` 但输出非 JSON）⇒ 都判 `NEEDS-EVIDENCE`，**绝不 PASS**，exit 2 ✓
+5. **n 条向量的 `expect` 均"按契约应当如此"**，在 Go 接上之前**未被真实实现证明**。
+
+### 33.4 ★★ runner 发现的**两处契约缺口**（要修，否则会静默失真）
+
+| # | 缺口 | 后果 | 处置 |
+|---|---|---|---|
+| **O51** | `implementations.commands` **没声明"状态写回哪里、runner 怎么读回"** | 向量的 `expect.statusUnchanged` 依赖它 ⇒ 现在用的是**私下约定**（默认 `--node` 原地回写）⇒ **Go 侧必须同款，否则该判据静默失真** | ★ **写进契约** |
+| **O52** | `visibility.invisibleStates` **只列了 `pending/archived`**，**漏了 `invalidated`/`suspicious`** | 严格按它判 ⇒ **假绿**；且**没有任何向量覆盖这两态** | ★ 补进契约 + 补向量（或改为按 `requiresStatus==="active"` 判，并**在契约里写明**） |
+
+★ 还有两处**判断分歧**待裁决（子代理如实报出，非缺陷）：
+- 向量 `…-missing-prooflevel` 比 `transitions.rules` **字面更严**（缺 `proofLevel` ⇒ `ok:false`）：子代理给的理由是"缺读数不得当 passed"；
+  ★ **我采纳这个判断**（与铁律 #7 同族），但**要把判据写进契约**，否则"更严的判断"只活在实现里。
+- `proofLevel: null` 的语义契约未表态。
+
+### 33.5 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O51** | **契约补"状态写回约定"**（否则 `statusUnchanged` 判据失真） | 见 33.4 |
+| **O52** | **契约补 `invalidated`/`suspicious` + 对应向量** | 见 33.4 |
+| **O53** | **把 `missing-prooflevel` 的"更严判断"写进契约**（否则只活在实现里） | 见 33.4 |
