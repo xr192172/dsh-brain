@@ -2988,3 +2988,64 @@ win32 后端 = **`@deepseek-ai/dsh-sandbox-windows-acl`**（**包确实存在**�
 | **O92** | ★★ **补旁路 seam**：让 `safe_rename` 等 **design-canvas-bridge 工具**与 **`mcp__design-canvas__*`** 也受沙箱约束（现在零命中） | **O88 的核心** |
 | **O93** | ★ **决定"读"的边界**：接受"只限写"（现状），还是上 WHP microVM 换"读也不可达" | 代价 vs 强度 |
 | **O94** | **确认实际生效的沙箱档位**（`read-only` / `workspace-write` / `danger-full-access` 里，跑 A/B 时到底是哪一档；`danger-full-access` 若被用到就白隔离） | 隔离的前提 |
+
+---
+
+## 52. ✅ O92 达成：**沙箱 seam 的两个旁路都补上了** ⇒ "写"这条终于齐了
+
+### 52.1 两个缺口 + 改法（**我复核了落点**）
+
+| 缺口 | 根因（§51 查证） | 改法 | 我的复核 |
+|---|---|---|---|
+| **① MCP（外部进程）** | `dsh-mcp-client` 的 stdio 要 spawn `command`，但**从没过 `confine`** ⇒ MCP server 进程不受限 | ★★ **在 `createTransport` 前把 argv 过 `ctx.sandbox.confine`**：新增 `confineStdioArgv(ctx, config)`，**`lib/index.js:70 return ctx.sandbox.confine(argv, policy).argv`**；`inject` 加 `sandbox`/`sandboxPolicy`，**无沙箱组装则该插件不装配（结构性 fail-closed）** | ✅ `:63` 函数在、**`:70` 就是那行**；注释 `:43` 提到 "silent unconfined passthrough"、`:55` "only the two confined modes"（**有档位判断**） |
+| ★ **② in-process bridge** | `design-canvas-bridge` **`:19 import fs from 'node:fs'`** + `:497` 走 `kernel.renameSymbols` ⇒ **不走 `ctx.fs`** ⇒ `dsh-fs-sandbox` 管不到 | ★ **在调内核【之前】用"随机 UUID 哨兵"做一次 `editText`**（**只跑 fence、零字节落盘**）；**判定走错误码 `FS_SANDBOX_DENIED`，不走文案** | ✅ `:22 import { randomUUID }`、`:261 code === 'FS_SANDBOX_DENIED'`、**`:290 "目标落在可写根之外时抛 FS_SANDBOX_DENIED，调用方在【调内核之前】终止"** |
+
+★ **选 (b) 而非 (a)**（不硬注入 `ctx.fs`）的理由很硬：**外仓内核顶层就 `import fs from 'node:fs'`、无注入点**，
+硬注入会造出「**跨多文件改一半**」的中间态 ⇒ ★ **宁可"先 fence 再改"，不要"改了一半才发现越界"**。
+
+### 52.2 ★★ 两个方向都验了（**"全封"同样是失败**）
+
+| 方向 | 结果 |
+|---|---|
+| ★★ **旁路被挡住** | MCP：**`Error: EPERM: operation not permitted, open '…\rename-target\math.js'`**<br>bridge：**`安全重命名 被沙箱拒绝，未落盘：cannot write "…\rename-target": file access denied under workspace-write mode`** |
+| ★★★ **阳性对照（不许全封）** | 会话**自己工作树内** `write` ⇒ **`Created file`**，`git -C <臂 wt> status --porcelain` 出 **`?? _o92-positive.txt`** ✓<br>★ 附加方向性对照：**`safe_rename` 打在会话工作区内 ⇒ 无任何沙箱拒绝标记** |
+| **shell 未回退** | 仍是 `file access denied under workspace-write mode` + `escalation available` ✓ |
+
+### 52.3 ★★★ 三件必须知晓的事（它如实报，我挑两条独立核实）
+
+1. **要重启才生效** —— 改的是 `node_modules` 与本仓包，`:3080` 进程里仍是旧代码
+   ⇒ ★ **它全程没重启**（curl 全程 200），**验证走的是另起的 `:3097`（已停）** ✓ 有分寸。
+2. ★★★ **持久副作用（我独立证实）**：`icacls D:\project_develop\design-canvas` 上出现了
+   **`S-1-4-458336120-904784428:(OI)(CI)(W,D,DC)`**（**无 `(I)`**）—— 正是 **`workspaceWriteSid` 那条 STANDING ACE**，
+   **跨会话/重启复用、永不自动撤销**；★ 而且我实测 **判据根 `dsh-brain` 上也有 2 条**、`_abA` **1 条**、`_abB` **0 条**
+   ⇒ **沙箱会往"曾被当作 workspace 用过的目录"上永久加写 ACE** ⇒ **这是一条应当知晓的副作用**（回收命令在报告里）。
+   ★ 补一句机制自洽性：**ACE 存在 ≠ 能写** —— restricted token **只带它自己 workspace 的那个 SID**，
+   ⇒ 所以"判据根上有 ACE，但写判据根仍被拒"**不矛盾**（与 `README:7` 的 "**grants a write only where BOTH … allow it**" 一致）。
+3. ★ **两处未验证**（如实）：
+   - **"MCP 子进程确实以受限 token 运行"是三通道【推断】**（源码路径 + `EPERM` + standing ACE），**不是进程级直接观测**；
+   - ★ **`fenceThroughFsSeam` 在"组装里没有沙箱化 fs"时是 `fail-open`**（`fsSvc === undefined` 直接 return）⇒ **要更严是一行改抛错**（⇒ **O95**）。
+
+### 52.4 patch 与回归
+
+- patch：`patches/@deepseek-ai+dsh-mcp-client+0.1.1-rc.2.patch`（**我核实：5256 B / 4 hunk**，mtime 07:20）；
+  它自报"**已从原始备份 `git apply` 重建并逐字节（去 CR）比对相等**"；
+- **`gate-vector-run` 仍 `16/16 PASS`**（我复跑）；`go build ./...` exit 0；
+- 主仓 `status` 只有**本次两行**（`M packages/design-canvas-bridge/src/index.ts` + `?? patches/…patch`）；
+- ★ **`exp-base/cordis.patch.yml` mtime = 2026-09-14** ⇒ **今天没被动过**（它说"一字未动"成立，**我核实**）；临时 profile 已归档并从 `~/.dsh/profiles/` 删除。
+
+### 52.5 ⇒ 里程碑："写"这条**齐了**
+
+| 写入路径 | 状态 |
+|---|---|
+| shell（`bash` / 本机 shell） | ✅ `dsh-bash-sandbox`（上游自带） |
+| **MCP 工具**（`mcp__design-canvas__*` 等） | ✅ **本轮补上**（mcp-client spawn 前 `confine`）⇒ **一处覆盖所有 MCP server 及其派生** |
+| **in-process bridge**（`safe_rename` 等） | ✅ **本轮补上**（先 fence 再改内核） |
+| **"读"** | ⚠️ **按上游设计不设限**（§51.5 的固有边界；要堵需换 capability 实现 = microVM） |
+
+### 52.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O95** | ★ **`fenceThroughFsSeam` 的 fail-open**（没有沙箱化 fs 时直接放行）⇒ 应改成抛错 | 闭合"fail-closed"链 |
+| **O96** | **STANDING ACE 的回收**（沙箱往曾用过的 workspace 目录永久加写 ACE；判据根已有 2 条） | 长期卫生 |
+| **O97** | **重启前端后要复验**（本轮验证走的是临时 `:3097`；`:3080` 生效前沙箱改动**不起作用**） | O92 的真实生效 |

@@ -1,0 +1,118 @@
+diff --git a/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js b/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js
+index 571dbb3..75b96bc 100644
+--- a/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js
+@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
+ import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
+ import { createHash } from "node:crypto";
+ import { isDeepStrictEqual } from "node:util";
++import { resolve as pathResolve } from "node:path";
+ import { z as z$1 } from "zod";
+ import { isImageAdmissionError } from "@deepseek-ai/dsh-attachment";
+ import { assertSupportedJsonSchema } from "@deepseek-ai/dsh-tools";
+@@ -31,19 +32,63 @@ function buildChildEnv(extra) {
+ 	};
+ }
+ /**
+-* Create an MCP transport from the resolved plugin config.
+-*
+-* @param config - Resolved plugin config discriminated on `transport`.
+-* @returns A connected-ready MCP Transport (stdio or Streamable HTTP).
+-*/
+-function createTransport(config) {
++ * Confine one stdio server's spawn through the sandbox seam (`ctx.sandbox`).
++ *
++ * A stdio MCP server is a REAL child process, so it is a file-effect capability
++ * exactly like the shell: the MCP SDK owns the actual `spawn`, so — precisely
++ * as `@deepseek-ai/dsh-bash-sandbox` does — we hand the SDK the provider's
++ * WRAPPED argv instead of the raw command, and the server (and everything it
++ * spawns) then runs under the policy. A provider with no usable backend throws
++ * `SANDBOX_UNAVAILABLE` here, before anything is spawned: fail closed, never a
++ * silent unconfined passthrough.
++ *
++ * Policy: the mode comes from the policy owner (`ctx.sandboxPolicy.resolve()`),
++ * i.e. the deployment's effective tier. The ROOT is the server's own configured
++ * `cwd` — the directory THIS deployment declared as that server's workspace —
++ * never the harness process's own cwd: the child is long-lived and SHARED by
++ * every session, so it has no calling session whose workspace it could inherit,
++ * and handing it the harness's cwd would grant it reach over the harness's own
++ * tree (criterion roots included). A deployment that needs a broader reach for
++ * a server widens that server's `cwd`, deliberately.
++ *
++ * `danger-full-access` is the one mode the seam does not wrap (the runners know
++ * only the two confined modes); it is passed through unwrapped, exactly as the
++ * shell consumer treats it.
++ *
++ * @param ctx - plugin context that injected `sandbox` and `sandboxPolicy`.
++ * @param config - the resolved stdio config (command/args/cwd).
++ * @returns the exact argv to spawn: the provider's wrapped argv, or the raw
++ *   command argv under `danger-full-access`.
++ */
++function confineStdioArgv(ctx, config) {
++	const argv = [config.command, ...config.args];
++	const policy = {
++		...ctx.sandboxPolicy.resolve(),
++		workspaceRoot: pathResolve(config.cwd.length > 0 ? config.cwd : process.cwd())
++	};
++	if (policy.mode === "danger-full-access") return argv;
++	return ctx.sandbox.confine(argv, policy).argv;
++}
++/**
++ * Create an MCP transport from the resolved plugin config. The stdio arm
++ * confines its spawn through the sandbox seam first ({@link confineStdioArgv});
++ * the Streamable HTTP arm runs no local process and is unaffected.
++ *
++ * @param ctx - plugin context (the seam the stdio arm confines through).
++ * @param config - Resolved plugin config discriminated on `transport`.
++ * @returns A connected-ready MCP Transport (stdio or Streamable HTTP).
++ */
++function createTransport(ctx, config) {
+ 	switch (config.transport) {
+-		case "stdio": return new StdioClientTransport({
+-			command: config.command,
+-			args: config.args,
+-			env: buildChildEnv(config.env),
+-			cwd: config.cwd
+-		});
++		case "stdio": {
++			const [command, ...args] = confineStdioArgv(ctx, config);
++			return new StdioClientTransport({
++				command,
++				args,
++				env: buildChildEnv(config.env),
++				cwd: config.cwd
++			});
++		}
+ 		case "streamable-http": return new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } });
+ 	}
+ }
+@@ -633,7 +678,7 @@ function startConnection(ctx, config, policy) {
+ 			}
+ 		});
+ 		try {
+-			await generation.connect(createTransport(config));
++			await generation.connect(createTransport(ctx, config));
+ 			if (hasClosed()) {
+ 				attemptSettled = true;
+ 				generationDown(generation);
+@@ -716,8 +761,18 @@ function startConnection(ctx, config, policy) {
+ */
+ /** Cordis plugin name used by loader diagnostics. */
+ const name = "mcp-client";
+-/** Services required by this plugin. */
+-const inject = ["tools"];
++/**
++* Services required by this plugin. `sandbox` + `sandboxPolicy` are required
++* because a stdio server is a child process: the seam confines its spawn
++* (fail-closed) and the policy owner supplies the effective mode. A composition
++* that mounts no sandbox does not start this plugin — it never spawns an
++* unconfined server.
++*/
++const inject = [
++	"tools",
++	"sandbox",
++	"sandboxPolicy"
++];
+ /** Default timeout for individual MCP tool calls (ms). */
+ const DEFAULT_TOOL_CALL_TIMEOUT_MS = 6e4;
+ /** Valid `serverName`, kept below the public tool-name budget. */

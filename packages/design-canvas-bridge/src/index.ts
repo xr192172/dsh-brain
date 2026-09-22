@@ -19,12 +19,14 @@ import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import v8 from 'node:v8'
 import { pathToFileURL } from 'node:url'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 // 触发 @deepseek-ai/dsh-tools 的 Context.tools 声明合并（纯类型，无运行时副作用）
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { CallId } from '@deepseek-ai/dsh-llm'
 
 let callSeq = 0
@@ -211,6 +213,106 @@ function shortErr(e: unknown): string {
   return m.length > 200 ? `${m.slice(0, 200)}…` : m
 }
 
+// ── 沙箱 seam：本插件的「写」必须先过 seam（O92 缺口二）──────────────────────────
+//
+// 为什么需要：`symbol_edit` / `safe_rename` / `move_symbol` 把落盘交给**进程内**加载的
+// design-canvas 内核（`loadKernel` ⇒ `import()` design-canvas/dist/src/tools/*.js），
+// 而内核自己 `import fs from 'node:fs'`（`edit_code.js:16` / `rename_symbols.js:14` /
+// `symbol_move.js:15`）⇒ 它的写**不经过 `ctx.fs`**，于是绕过了本该走的 fs seam
+// （`ctx.fs` 默认就是 `@deepseek-ai/dsh-fs-sandbox`，见
+// `node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:443`）。沙箱管得住 shell、
+// 管得住 `ctx.fs`，却管不住这条进程内的写 —— 这正是 cli-0005 A 臂改判据根的那条路。
+//
+// 为什么不是「给内核注入受限 fs」：内核是**外仓产物**，三个入口只接业务参数、
+// 顶层就绑定了 `node:fs`，没有任何 fs 注入点 ⇒ 在不改 design-canvas 的前提下注入不了。
+// 所以走**调用前过 seam**：把本次要落的每个目标先交给 fs seam 判一次，被拒就
+// **根本不调内核**（因此不存在"改了一半"的中间态）。
+//
+// 判定怎么做到「过 seam 且零副作用」：`SandboxedFileSystem.editText` 的实现是
+//   `super.editText(await this.checkedTarget(target, policy), edit, …)`
+// ⇒ **fence（`checkedTarget`）先于"读-改-写"临界区**；而 `applyLiteralEdit` 命中 0 处时
+// **先抛 `FS_EDIT_NOT_FOUND`、后写**（`@deepseek-ai/dsh-fs-local/lib/index.js:652,807`）。
+// 于是「拿一个本次新生成的随机哨兵当 oldString 去 edit」= 一次**只跑 fence、不落一字节、
+// 也不改 mtime** 的判定：被拒 ⇒ 抛 `FS_SANDBOX_DENIED`；放行 ⇒ 抛 `FS_EDIT_NOT_FOUND`
+// （目标还不存在时是 `FS_STALE_VERSION`）。哨兵是本次 `randomUUID()` ⇒
+// **不可能出现在调用前就已存在的任何文件里**（122 bit 随机且此刻才生成）⇒ 误中在构造上不可能。
+
+/** `ctx.fs` 的 seam 面：只取本插件用到的能力标志 + resolve/editText。 */
+interface SeamFsLike {
+  /** 只有受沙箱约束的后端才提供它（`SandboxedFileSystem.sandboxMode`）。 */
+  sandboxMode?: string
+  resolve(path: string, options?: Record<string, unknown>): Promise<{ targetKey: string; displayPath: string }>
+  editText(
+    target: { targetKey: string; displayPath: string },
+    edit: { oldString: string; newString: string },
+    expected?: unknown,
+    signal?: AbortSignal,
+    sandboxPolicy?: unknown,
+  ): Promise<unknown>
+}
+
+/** `ctx.sandboxPolicy` 的 seam 面：本次调用只要 `resolve`。 */
+interface SandboxPolicyLike {
+  resolve(request?: { session?: unknown }): Record<string, unknown>
+}
+
+/** 结构化沙箱拒绝码（`@deepseek-ai/dsh-fs` 的 `FsError.code`），不靠文案推断。 */
+function isSandboxDenied(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'FS_SANDBOX_DENIED'
+}
+
+/**
+ * 沙箱拒绝的模型可见文案：**逐字带上 seam 的判定原文**（`file access denied under
+ * <mode> mode`），并说明这是能力边界而不是参数错误。
+ * ★ 刻意**不带** escalation 提示 —— 本插件的工具没有 `sandbox_permissions` 通道，
+ * 提示"可申请更宽档位"会是假承诺（这正是与 shell / `ctx.fs` 两家渲染的差别所在）。
+ *
+ * @param tool - 本插件的工具名（中文别名，模型读得到）。
+ * @param error - seam 抛出的 `FS_SANDBOX_DENIED`。
+ * @returns 模型可见的拒绝文本。
+ */
+function sandboxRefusalText(tool: string, error: unknown): string {
+  return `${tool} 被沙箱拒绝，未落盘：${shortErr(error)}\n`
+    + '（这是文件效应的能力边界，不是参数问题：该目标在本会话工作区的可写范围之外，沙箱只允许写会话工作区与平台临时区。请在会话工作区内操作。）'
+}
+
+/**
+ * 把本次将落盘的每个目标先过 fs seam（`ctx.fs`，默认即 `@deepseek-ai/dsh-fs-sandbox`）。
+ *
+ * 判据与 `dsh-tool-fs` 同源：**只有约束后端在场时才判**（`sandboxMode` 存在），
+ * 无约束后端 ⇒ 无策略可执行 ⇒ 直接放行（否则会在无沙箱的组装里把插件全封死）。
+ * 策略按**调用会话**解析（`ctx.sandboxPolicy.resolve({ session })`）⇒ 工作区根 =
+ * 该会话的 cwd，与 shell / `ctx.fs` 两条家族落在同一个根上，三边不会漂移。
+ *
+ * @param ctx - 插件上下文（提供 `fs` 与 `sandboxPolicy`）。
+ * @param exec - 本次工具执行上下文（取调用会话与取消信号）。
+ * @param targets - 本次将被写入的路径（绝对路径；`project_dir` + 显式目标文件）。
+ * @throws 目标落在可写根之外时抛 `FS_SANDBOX_DENIED`，调用方在**调内核之前**终止。
+ */
+async function fenceThroughFsSeam(ctx: Context, exec: ToolRunContext | undefined, targets: Array<string | undefined>): Promise<void> {
+  const fsSvc = ctx.get('fs') as SeamFsLike | undefined
+  if (fsSvc === undefined || fsSvc.sandboxMode === undefined) return
+  const policySvc = ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
+  if (policySvc === undefined) {
+    throw new Error('design-canvas-bridge: 挂载的文件系统受沙箱约束，但 ctx.sandboxPolicy 缺失 —— 拒绝落盘')
+  }
+  const session = exec?.agent?.session
+  const policy = policySvc.resolve(session === undefined ? {} : { session })
+  for (const raw of targets) {
+    if (raw === undefined || raw === '') continue
+    const target = await fsSvc.resolve(raw)
+    const probe = `dsh-seam-probe-${randomUUID()}`
+    try {
+      await fsSvc.editText(target, { oldString: probe, newString: '' }, undefined, exec?.signal, policy)
+      /* 哨兵不可能命中 —— 走到这里说明 fence 放行且实现没有按预期抛错；不写任何东西，继续。 */
+    } catch (error) {
+      if (isSandboxDenied(error)) throw error
+      /* 其余（FS_EDIT_NOT_FOUND = 哨兵未命中 ⇒ 未写；FS_STALE_VERSION = 目标还不存在；
+         FS_NOT_TEXT = 二进制）⇒ fence 已放行，放行内核接管。 */
+    }
+  }
+}
+
 /** 读项目 cache.db 的索引规模（文件/符号/边/导入数）；未预热返回 null。 */
 function indexCounts(projectDir: string): { files: number; nodes: number; edges: number; imports: number } | null {
   try {
@@ -360,7 +462,7 @@ export function apply(ctx: Context, config: Config): void {
           schema: { type: 'string', description: '精简文本：影响面摘要 + 编辑结果（超 4096 字符头部截断）' },
           render: (_args, value) => [{ type: 'text' as const, text: value }],
         },
-        async execute(args) {
+        async execute(args, exec) {
           try {
             const projectDir =
               args.project_dir ??
@@ -370,6 +472,11 @@ export function apply(ctx: Context, config: Config): void {
               })()
             if (!projectDir) {
               return 'project_dir 未指定，且当前无已预热工作区。请先选中/新建工作区（自动预热），或显式传 project_dir。'
+            }
+            // ★ O92：要真写盘（dry_run≠true）就先过 sandbox seam —— 被拒则**根本不调内核**
+            // （因此不存在"改了一半"）。判定必须排在"未预热拦截"之前：能力边界优先于流程门槛。
+            if (args.dry_run !== true) {
+              await fenceThroughFsSeam(ctx, exec, [projectDir, args.file ? path.resolve(projectDir, args.file) : undefined])
             }
             // dry_run 由内核统一处理（所有 op 均支持，只预览不写盘）。
             const kernel = await loadKernel(config.kernelDir)
@@ -428,6 +535,7 @@ export function apply(ctx: Context, config: Config): void {
             return out.length > 4096 ? `${out.slice(0, 4096)}\n...（尾部截断）` : out
           } catch (e) {
             // 编辑失败下放 friendly error（不带 isError 崩溃），并给针对性指引。
+            if (isSandboxDenied(e)) return sandboxRefusalText('符号编辑', e)
             const msg = shortErr(e)
             let hint = ''
             if (/重复的顶层符号|重复定义/.test(msg)) {
@@ -468,7 +576,7 @@ export function apply(ctx: Context, config: Config): void {
           schema: { type: 'string', description: '精简文本：符号层重命名结果 + 文本层字面量分组（超 4096 字符头部截断）' },
           render: (_args, value) => [{ type: 'text' as const, text: value }],
         },
-        async execute(args) {
+        async execute(args, exec) {
           try {
             const projectDir =
               args.project_dir ??
@@ -481,6 +589,11 @@ export function apply(ctx: Context, config: Config): void {
             }
             if (!args.file || !args.symbol || !args.to) {
               return 'safe_rename 需要 file（定义文件）、symbol（旧名）、to（新名）。'
+            }
+            // ★ O92：要真落盘（dry_run=false）就先过 sandbox seam —— 被拒则**根本不调内核**。
+            // 判定排在"未预热拦截"之前：能力边界优先于流程门槛。
+            if (args.dry_run === false) {
+              await fenceThroughFsSeam(ctx, exec, [projectDir, path.resolve(projectDir, args.file)])
             }
             // 未预热拦截：rename 需完整 import 闭包才保证不漏改；未预热时全仓即时扫描
             // 会把整个项目解析常驻内存并卡死事件循环（已实测单进程升至 10GB）。定义文件不在
@@ -550,6 +663,7 @@ export function apply(ctx: Context, config: Config): void {
             const joined = lines.join('\n')
             return joined.length > 4096 ? `${joined.slice(0, 4096)}\n...（尾部截断）` : joined
           } catch (e) {
+            if (isSandboxDenied(e)) return sandboxRefusalText('安全重命名', e)
             return `重命名未执行：${shortErr(e)}（本次未落盘；请核对 file/symbol/to 后重试，to 须为合法标识符）`
           }
         },
@@ -576,7 +690,7 @@ export function apply(ctx: Context, config: Config): void {
           schema: { type: 'string' },
           render: (_args, value) => [{ type: 'text' as const, text: value }],
         },
-        async execute(args) {
+        async execute(args, exec) {
           try {
             const projectDir =
               args.project_dir ??
@@ -586,6 +700,15 @@ export function apply(ctx: Context, config: Config): void {
               })()
             if (!projectDir) return 'move_symbol 需要 project_dir（或先选中/预热一个工作区）。'
             if (!args.file || !args.symbol || !args.to_file) return 'move_symbol 需要 file（源）、symbol（要移动的符号）、to_file（目标）。'
+            // ★ O92：要真落盘（dry_run=false）就先过 sandbox seam —— 被拒则**根本不调内核**。
+            // 源文件与**目标文件**都要判（目标是新建时也判：路径落点同样受约束）。
+            if (args.dry_run === false) {
+              await fenceThroughFsSeam(ctx, exec, [
+                projectDir,
+                path.resolve(projectDir, args.file),
+                path.resolve(projectDir, args.to_file),
+              ])
+            }
             // 未预热拦截：闭包找 importer 需 import 索引；无索引 fallback 全扫 root 会卡顿/爆内存
             if (!isFileIndexed(projectDir, args.file)) {
               console.log(`[dsb-move] 未预热拦截 project=${projectDir} file=${args.file}`)
@@ -623,6 +746,7 @@ export function apply(ctx: Context, config: Config): void {
             const joined = lines.join('\n')
             return joined.length > 4096 ? `${joined.slice(0, 4096)}\n...（尾部截断）` : joined
           } catch (e) {
+            if (isSandboxDenied(e)) return sandboxRefusalText('符号移动', e)
             return `移动未执行：${shortErr(e)}（本次未落盘；请核对 file/symbol/to_file 后重试）`
           }
         },
