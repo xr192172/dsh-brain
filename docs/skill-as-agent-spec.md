@@ -2006,3 +2006,63 @@ node scripts/gate-impl-broken.mjs visible|transition … [--break l3-status|o51-
 | # | 项 | 说明 |
 |---|---|---|
 | **O55** | ★ **给"从不写回"加一条可分辨的判据**（写回痕迹 / `revision` / `writtenAt`），否则 4 条负向迁移向量对它无分辨力 | 见 35.4 |
+
+---
+
+## 36. ✅ O55 达成（**两层**：写回痕迹 + 配对规则）—— 并附一次**我自己做坏的复现**
+
+### 36.1 两层落地
+
+| 层 | 内容 |
+|---|---|
+| **① 写回痕迹** | `contract.json` 的 `implementations.state.writeback.evidence = {kind:"file-digest", scope:"declared-writeback-file", algorithm:"sha256", …}`；runner **在每次 transition 前后各取一次该文件摘要**（`sha256:<hex>:len=<bytes>`）⇒ 向量可断言 **`expect.fileChanged`**；契约未声明该机制 ⇒ runner **exit 3 拒绝跑**（同 O51 纪律） |
+| ★★ **② 配对规则** | `contract.json` 顶层 `vectors.pairing = {requireFor:"transition.negative-control", mode:"same-transition-target", requirePairAsserts:"fileChanged", why:…}`；**校验器**新增 `vectors-negative-control-has-same-target-positive-pair`：**每条 transition 负向向量必须有一条【同 `transition.to`】的 positive-control，且那条必须带 `fileChanged:true`** ⇒ 缺一条即 **FAIL + 非零退出** |
+
+### 36.2 我的独立复核（实测数字）
+
+| 项 | 结果 |
+|---|---|
+| 契约校验器 | **`失败：0 / 25`** exit 0（22 → 25，**原有项零删除**） |
+| 参考实现 | **`14/14 PASS` exit 0** |
+| ★ `--break o51-writeback` | **exit 1**，且失败明细含 **`fileChanged(写回痕迹 file-digest/sha256) 期望 true 实为 "摘要没变：before=sha256:7c5d…:len=153 after=sha256:7c5d…:len=153"`** ⇒ **痕迹机制真的在抓"从不写回"** |
+| `--break l3-status` / `o53-receipt` | 仍分别 **4 条向量 FAIL** / 仍抓 `…missing-prooflevel`（**未回退**） |
+
+### 36.3 ★★★ 门 4（本任务核心）我亲手复现 —— **而且第一次是我自己做坏的**
+
+**第 1 次（❌ 无效，作废）**：我的临时脚本崩了（**顶层 `vectors` 是字符串版本号 `"dsh-gate-vectors/v1"`，数组键其实是 `cases`**）
+⇒ `--vectors` 指向**不存在的文件** ⇒ 拿到 `EXIT=1`
+⇒ ★ **但那是因为"读不到向量"，不是因为"配对缺失"** ⇒ **我差点用一个错理由当验证通过。**
+
+**第 2 次（✅ 有效）**：先摸清结构再跑 ⇒
+```
+FAIL  vectors-negative-control-has-same-target-positive-pair
+  · ★★ 配对缺失（4/4）：这些 transition.negative-control 向量没有【同 transition.to】的 positive-control 对照
+    ⇒ transition-pending-to-active-no-receipt / …-receipt-failed / …-receipt-unknown / …-missing-prooflevel
+契约不合格 ⇒ 非零退出
+```
+⇒ ★ **理由正确：是"配对缺失"，不是"读不到"。** ⇒ **O55 的核心门通过。**
+
+★ **纪律（新增，且这次是我自己踩的）**：
+**`exit 1` 本身不是证据 —— 必须看【为什么】exit 1。**
+"命令返回非零"与"命令因为我要的那条判据而返回非零"，是两件不同的事
+（与铁律 #7 的假绿同族，但方向是**假红 / 错理由**）。
+
+### 36.4 子代理额外做的**前提自证**（很有价值）
+
+它验证了：**在"删掉正向对照"的同一副本上，用「从不写回」的坏实现跑 ⇒ `13/13 PASS exit 0`（静默全绿）**
+⇒ ★ **那个洞是【真的】，不只是理论** —— 而新加的配对规则正好把这条静默全绿堵上。**这是"证明危害真实存在"的正确做法。**
+
+### 36.5 ⚠️ 残留（子代理如实报的 10 条里，挑 4 条要紧的）
+
+1. **痕迹比的是原始字节** ⇒ 一个"拒绝时换格式重写文件"的实现会**假红**（已写进契约 `caveat`，**未造变体实测**）；
+2. **配对是"弱配对"** —— 只比 `transition.to`，**不比 `from` / `node.status`**；
+3. **配对规则只覆盖 `transition` 类** —— **L0/L3 的负向向量也有正向对照，但没有机器检查**；
+4. ★ **若有人同时删掉配对规则 + 所有 `fileChanged` 断言 ⇒ 仍会假绿**（校验器只对 `requireFor` 选中的那批做检查）。
+
+### 36.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O57** | **把配对检查扩到 L0/L3 类**（现在只有 transition 类被机器检查） | 见 36.5-3 |
+| **O58** | **痕迹信号对"换格式重写"会假红** ⇒ 要么换更稳的信号，要么在契约里明确接受该边界 | 见 36.5-1 |
+| **O59** | **"配对规则与 `fileChanged` 双双被删"仍会假绿** ⇒ 需要一条更底层的守卫 | 见 36.5-4 |

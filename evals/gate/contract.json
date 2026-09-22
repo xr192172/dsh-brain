@@ -175,6 +175,18 @@
     ]
   },
 
+  "vectors": {
+    "note": "★ O55：向量集【自身】的规则（不是实现的判据，而是「这批向量够不够分辨」的规则）。与 visibility/transitions 一样必须集中声明、由机器检查 —— 否则「删掉一条向量」这种改动没有任何东西会响。",
+    "pairing": {
+      "requireFor": "transition.negative-control",
+      "mode": "same-transition-target",
+      "vectorsFile": "evals/gate/vectors.json",
+      "requirePairAsserts": "fileChanged",
+      "why": "★ O55（§35.4 的核心）：4 条负向迁移向量都期望 statusUnchanged:true，而一个「从不写回」的实现同样满足（读不到 = 没变）⇒ 这批负向判据**只**靠那条正向对照 transition-pending-to-active-receipt-passed 才能分辨这类错误 ⇒ 删掉它，这类错误就【全绿通过】。⇒ 所以「每条 transition 类的 negative-control 向量都必须有一条【同 transition.to】的 positive-control 向量」必须是一条**机器检查的配对规则**，且那条正向对照必须**真的带 fileChanged 断言**（否则配对只是形式，仍旧靠不住）。缺配对 ⇒ 判不合格、非零退出（不许静默全绿）。",
+      "whichCheck": "gate-contract-check.mjs → vectors-negative-control-has-same-target-positive-pair（放在契约校验器而不是 runner：这条是 contract.json 自己声明的规则，由契约的校验器守住；且它是【向量集是否完备】的静态检查，与跑哪个实现无关 —— runner 的三种结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，不再混入第四种「向量集不完整」。）"
+    }
+  },
+
   "implementations": {
     "note": "实现协议：runner 对任意实现说的话。实现可以是 Go 侧 external 接口、TS 脚本或测试夹具——契约不关心语言，只认这两个子命令与 stdout 形状。",
     "protocolVersion": "dsh-gate-impl/v1",
@@ -199,7 +211,20 @@
         "overrideArg": "--state",
         "overrideRule": "调用方给了 --state <file> 时改写该文件（旁挂），且该文件已存在时以它的 status 为「当前状态」。默认（不给 --state）就是原地回写 —— 两种模式已在契约里【择一写死为 in-place】，实现不许自行另定。",
         "supportedModes": ["in-place"],
-        "note": "★ 「二者择一、写死」：本契约选 in-place（默认原地回写 --node 文件）。sidecar（--state 旁挂）只作为【显式 override】存在，不是默认。"
+        "note": "★ 「二者择一、写死」：本契约选 in-place（默认原地回写 --node 文件）。sidecar（--state 旁挂）只作为【显式 override】存在，不是默认。",
+        "evidence": {
+          "kind": "file-digest",
+          "scope": "declared-writeback-file",
+          "algorithm": "sha256",
+          "digestShape": "sha256:<hex64>:len=<bytes>",
+          "takenBy": "scripts/gate-vector-run.mjs",
+          "when": "每条 transition 向量：runner 先把节点写成临时文件、**在调用实现之前**取一次摘要（before）；实现退出后再取一次（after）。",
+          "compare": "before !== after ⇒ fileChanged = true（原始字节摘要不同 = 该文件**确实被写过**）；相等 ⇒ fileChanged = false（该文件**没被写过**，或写回内容与原文逐字节相同）。",
+          "field": "fileChanged",
+          "assertedBy": "evals/gate/vectors.json 里 transition 向量的 expect.fileChanged",
+          "why": "★ O55：4 条**负向**迁移向量都期望 statusUnchanged:true ⇒ 一个「**从不写回**」的实现【同样满足】——「读不到」被当成了「没变」。⇒ statusUnchanged 单独一条**不能**分辨「被拒绝且文件未动」与「根本不写回」。⇒ 必须另有一个**独立的写回痕迹**信号：摘要变了就是写了。scope 钉死为 declared-writeback-file（= readback.file）⇒ 痕迹只能来自 runner 读回的那一份，别处的写入不算数。",
+          "caveat": "★ 偏严方向（如实记）：比较的是【原始字节】的摘要 ⇒ 一个在拒绝时把同一个节点**换个格式重写**的实现会显示 fileChanged:true（而它的 status 其实没变）⇒ 对该实现是**假红**，不是假绿。本契约选择偏严：假红会在跑向量时立刻暴露并被人看见，假绿不会。"
+        }
       },
       "readback": {
         "reader": "scripts/gate-vector-run.mjs",

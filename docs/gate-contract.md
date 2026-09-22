@@ -232,6 +232,7 @@ pending | active | archived | invalidated | suspicious
 | `readback.field` | `"status"` | ★ runner 读回**哪个字段** |
 | `readback.file` | 传实现的那个 `--node` 文件 | ★ runner 读回**哪个文件** |
 | `readback.missingFileRule` | —— | 读不回来 ⇒ 按"读不到写回结果"处理 ⇒ runner 必须让它 **FAIL**（偏严方向），**不得**当作"状态未变" |
+| ★ `writeback.evidence` | `{kind:"file-digest", scope:"declared-writeback-file", algorithm:"sha256", field:"fileChanged", …}` | ★ **O55**：写回**痕迹**机制（见 §5.2）—— 光有 `statusUnchanged` 分辨不了"没写回" |
 | `goSide.why` | —— | ★ **Go 侧必须同款，否则 `statusUnchanged` 判据静默失真** |
 
 **为什么选 `in-place`**：照抄 §3.1 的既有范式「**读节点 → 改字段 → Upsert**」
@@ -246,6 +247,44 @@ pending | active | archived | invalidated | suspicious
   来决定"读哪个文件的哪个字段"；契约里**没有**这段声明 ⇒ runner **exit 3 拒绝跑**
   （不再退回 runner 自己知道的默认值）。
 - 判据：校验项 `impl-state-writeback-declared`。
+
+### 5.2 ★★ 写回**痕迹**：让「从不写回」可被分辨（O55 ↔ spec §35.4）
+
+**改前的洞（§35.4 逐字）**：4 条**负向**迁移向量都期望 `statusUnchanged: true`，
+而**一个「从不写回」的实现同样满足**（"读不到"被当成了"没变"）⇒ 这套负向判据
+**只**靠那条正向对照 `transition-pending-to-active-receipt-passed` 才能分辨这类错误
+⇒ ★ **删掉它，这类错误就会全绿通过。**
+
+**这是 §5.1 自己警告的那条失真的另一半**：§5.1 解决了"读回点必须进契约"，
+但**没**解决"**读回点没被动过**"与"**状态确实没变**"这两件事长得一样。
+
+**两层补法（两层都要，缺一不成立）**：
+
+| 层 | 做法 | 谁守 |
+|---|---|---|
+| **① 写回痕迹** | `transition` **前后**对**契约声明的写回文件**（`readback.file` = `--node` 那份）各取一次 `sha256` + 字节长度摘要 ⇒ 摘要变了 = 文件**确实被写过**（`expect.fileChanged: true`）；没变 = 没写过（`expect.fileChanged: false`）。机制本身**也写进契约**（`writeback.evidence`）：`kind=file-digest` / `scope=declared-writeback-file` / `algorithm=sha256` / `field=fileChanged` | 契约校验项 `impl-writeback-evidence-declared`；runner 每次 transition 都实测 |
+| **★★ ② 同形正向对照** | `contract.json` → `vectors.pairing`：**每条 `transition` 类的 `negative-control` 向量，必须存在一条【同 `transition.to`】的 `positive-control` 向量，且那条正向对照必须真的带 `expect.fileChanged: true`**。缺一条 ⇒ 判不合格、非零退出 | 契约校验项 `vectors-negative-control-has-same-target-positive-pair`（+ `vectors-pairing-rule-declared`） |
+
+**为什么 scope 必须钉死在 `declared-writeback-file`**：痕迹只能取自 **runner 按契约读回的那一份文件**。
+否则一个"写到别处也算留下痕迹"的实现能让痕迹为真、而 `statusUnchanged` 判的那份文件根本没动 ——
+那就等于把 §5.1 的洞换个地方重开。
+
+**为什么第二条（配对）才是核心**：第①层只是"多一个信号"，而**这个信号有没有牙，
+取决于向量集里有没有一条期望它为 `true` 的向量**。事实是：**只有那一条正向对照**期望
+`fileChanged: true` ⇒ ★ 所以"**它必须存在**"本身必须是**机器检查的规则**，而不是"大家记得别删"。
+`gate-vector-run.mjs --vectors <删掉正向对照的副本>` 实测：13/13 PASS、exit 0（**静默全绿**，
+连 `--break o51-writeback` 的"从不写回"实现也是 13/13 PASS）⇒ 而
+`gate-contract-check.mjs --vectors <同一份副本>` ⇒ ★★ **配对缺失（4/4）**、exit 1。
+
+**为什么这条检查放在契约校验器而不是 runner**：配对规则的"母体"是 `contract.json`
+自己声明的 `vectors.pairing`（契约的规则由契约的校验器守）；而且它是「**向量集够不够分辨**」的
+**静态**检查，与"跑哪个实现"无关 —— runner 的结果语义是 per-vector 的
+PASS / FAIL / NEEDS-EVIDENCE，不必再混入第四种「向量集不完整」。
+
+**如实记的偏严代价**：痕迹比的是**原始字节**摘要 ⇒ 一个在**拒绝**时把同一个节点
+**换个格式重写**的实现会显示 `fileChanged: true`（而它的 status 其实没变）⇒
+对该实现是**假红**。本契约选偏严：假红在跑向量时立刻暴露，假绿不会。
+（§未验证里也记了这条。）
 
 ---
 
@@ -313,18 +352,22 @@ pending | active | archived | invalidated | suspicious
 ## 9. 怎么用
 
 ```bash
-# 校验契约自洽（22 项检查，每项打印「防的是什么」；任一项失败 ⇒ 非零退出）
+# 校验契约自洽（25 项检查，每项打印「防的是什么」；任一项失效 ⇒ 非零退出）
 node scripts/gate-contract-check.mjs
 
-# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 15 份内存坏契约必须被指定规则挡下
+# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 19 份内存坏契约必须被指定规则挡下
 node scripts/gate-contract-check.mjs --selftest
 
 # 校验一份别的契约（例如你把 L3 的 active 要求删掉试试）
 node scripts/gate-contract-check.mjs --contract <path>
 
-# ★ 把契约喂给一份实现（14 条向量；runner 的状态读回约定也从契约读，O51）
+# ★ O55：校验另一份**向量集**（例如"把正向对照删掉"的临时副本 ⇒ 必须报「配对缺失」并非零退出）
+node scripts/gate-contract-check.mjs --vectors <vectors.json>
+
+# ★ 把契约喂给一份实现（14 条向量；runner 的状态读回约定与写回痕迹机制也都从契约读，O51 + O55）
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-reference.mjs"   # 14/14 PASS ⇒ exit 0
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs"      # 必须有一批 FAIL ⇒ exit 1
+node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --break o51-writeback"  # ★ 必须挂 fileChanged 那条
 ```
 
 **改这份契约时必须跑的三条**：`node scripts/gate-contract-check.mjs`、
@@ -345,3 +388,38 @@ node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs"     
 ★ 三处**都只新增/收紧**：原有 19 项检查一项未删（21 + 1 = 22 项），
 原有 12 条向量的 `expect` 一个都没改（只新增 2 条 ⇒ 14 条）。
 逐条原始输出见 `out/w16-contract-gaps.md`。
+
+---
+
+## 11. ★★ O55：「从不写回」必须可被分辨 —— 两层（写回痕迹 + 同形正向对照）
+
+**缺口来源**：`docs/skill-as-agent-spec.md` **§35.4**（O54 顺手抓到、标为待办）。
+
+**改前的洞**：4 条**负向**迁移向量都期望 `statusUnchanged: true` ⇒
+**一个「从不写回」的实现同样满足**（"读不到"被当成"没变"）⇒ 这套负向判据
+**只**靠那条正向对照 `transition-pending-to-active-receipt-passed` 才能分辨这类错误
+⇒ ★ **删掉它，这类错误就会全绿通过。**
+（实测：把那条正向对照删掉后，`--break o51-writeback` 的"从不写回"实现 **13/13 PASS、exit 0**。）
+
+| 层 | 修法 | 守着它的校验项 | 补的向量字段 |
+|---|---|---|---|
+| **① 写回痕迹** | `contract.json` → `implementations.state.writeback.evidence` 显式声明痕迹机制（`kind:"file-digest"` / `scope:"declared-writeback-file"` / `algorithm:"sha256"` / `field:"fileChanged"` / `compare` / `why` / `caveat`）；`gate-vector-run.mjs` 在每次 `transition` **前后**对**契约声明的写回文件**取 `sha256`+字节长度摘要，支持 `expect.fileChanged: true\|false`；契约没声明痕迹机制 / 声明了不认识的那种 ⇒ runner **exit 3 拒绝跑** | `impl-writeback-evidence-declared` | 5 条 transition 向量全补：正向对照 `fileChanged: true`，4 条被拒绝的 `fileChanged: false` |
+| **★★ ② 同形正向对照** | `contract.json` → `vectors.pairing`（`requireFor:"transition.negative-control"` / `mode:"same-transition-target"` / `vectorsFile` / `requirePairAsserts:"fileChanged"`）；**每条 `transition` 类的 `negative-control` 向量都必须存在一条【同 `transition.to`】且带 `fileChanged:true` 断言的 `positive-control` 向量**，缺一条即不合格、非零退出 | `vectors-pairing-rule-declared`、`vectors-negative-control-has-same-target-positive-pair` | —— （规则本身是新增的检查，不新增向量 ⇒ 仍是 14 条） |
+
+**为什么第②层才是 O55 的核心（也是为什么它不能只靠"记得别删"）**：
+第①层只提供"一个能被断言的信号"，而**这个信号有没有牙，取决于向量集里有没有一条期望它为
+`true` 的向量** —— 事实是**只有那一条正向对照**。⇒ "**它必须存在**"必须是**机器检查的规则**。
+
+**为什么放在契约校验器而不是 runner**：配对规则是 `contract.json`（`vectors.pairing`）自己
+声明的 ⇒ 由契约的校验器守；且它是「**向量集够不够分辨**」的**静态**检查，与跑哪个实现无关 ——
+runner 的结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，不必再混入第四种「向量集不完整」。
+★ 但**两条命令都要跑**：光跑 runner ⇒ 删掉正向对照后仍会**静默全绿**（exit 0）；
+光跑契约校验器 ⇒ 不知道契约有没有被实现尊重。
+
+**如实记的偏严代价**：痕迹比的是**原始字节**摘要 ⇒ 一个在**拒绝**时把同一个节点
+**换个格式重写**的实现会显示 `fileChanged: true`（status 其实没变）⇒ 对该实现是**假红**。
+本契约选偏严（假红会被立刻看见，假绿不会），并把这条写进 `writeback.evidence.caveat`。
+
+★ 本次**只新增/收紧**：原有 22 项检查一项未删（22 + 3 = **25** 项）；
+原有 14 条向量的 `expect`（含 4 条负向）**一个判据都没改**，只**新增** `fileChanged` 字段。
+逐条原始输出见 `out/w18-o55-writeback-trace.md`。

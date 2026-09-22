@@ -1,7 +1,7 @@
 {
   "vectors": "dsh-gate-vectors/v1",
   "contract": "evals/gate/contract.json",
-  "note": "离线测试向量（纯数据）。L0/L3 = 注入可见性；transition = 状态迁移门。判据按 contract.json 的 visibility.rules 与 transitions.rules。",
+  "note": "离线测试向量（纯数据）。L0/L3 = 注入可见性；transition = 状态迁移门。判据按 contract.json 的 visibility.rules 与 transitions.rules。★ O55：transition 向量另有 expect.fileChanged —— 含义见 contract.json → implementations.state.writeback.evidence（runner 对【契约声明的写回文件】在调用实现前后各取一次 sha256 摘要；摘要变了 = 文件确实被写过）。★ 负向迁移向量的 fileChanged:false 单独不能分辨「从不写回」，它靠 contract.json → vectors.pairing 强制配有的【同 to 正向对照】来兜（§35.4）。",
   "cases": [
     {
       "id": "l0-active-highscore-visible",
@@ -162,7 +162,7 @@
       },
       "taskHint": "unrelated task hint",
       "transition": { "to": "active", "receipt": null },
-      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending", "fileChanged": false }
     },
     {
       "id": "transition-pending-to-active-receipt-failed",
@@ -182,7 +182,7 @@
         "to": "active",
         "receipt": { "kind": "gate", "status": "failed", "proofLevel": "L0", "unenforced": ["L2", "L3", "L4"] }
       },
-      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending", "fileChanged": false }
     },
     {
       "id": "transition-pending-to-active-receipt-unknown",
@@ -202,13 +202,13 @@
         "to": "active",
         "receipt": { "kind": "gate", "status": "unknown", "proofLevel": null, "unenforced": ["L2", "L3", "L4"] }
       },
-      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending", "fileChanged": false }
     },
     {
       "id": "transition-pending-to-active-receipt-passed",
       "kind": "transition",
       "role": "positive-control",
-      "why": "★ 门本体阳性对照：只有 receipt.status=passed（且回执完整可读）才允许 pending→active；没有这条就分不清「门」与「全封」。",
+      "why": "★ 门本体阳性对照：只有 receipt.status=passed（且回执完整可读）才允许 pending→active；没有这条就分不清「门」与「全封」。★★ O55：这条同时是 4 条同 to（active）负向向量的【同形正向对照】—— 只有它期望 statusUnchanged:false 且 fileChanged:true，所以只有它能抓到「从不写回」的实现（§35.4：删掉它，这类错误会全绿通过）。⇒ contract.json → vectors.pairing 把「这条必须存在」变成机器可判的规则。",
       "node": {
         "id": "n-transition-pending-to-active-receipt-passed",
         "type": "skill",
@@ -222,7 +222,7 @@
         "to": "active",
         "receipt": { "kind": "gate", "status": "passed", "proofLevel": "L0", "unenforced": ["L2", "L3", "L4"] }
       },
-      "expect": { "ok": true, "statusUnchanged": false, "status": "active" }
+      "expect": { "ok": true, "statusUnchanged": false, "status": "active", "fileChanged": true }
     },
     {
       "id": "transition-pending-to-active-receipt-missing-prooflevel",
@@ -242,7 +242,7 @@
         "to": "active",
         "receipt": { "kind": "gate", "status": "passed", "unenforced": ["L2", "L3", "L4"] }
       },
-      "expect": { "ok": false, "statusUnchanged": true, "status": "pending" }
+      "expect": { "ok": false, "statusUnchanged": true, "status": "pending", "fileChanged": false }
     }
   ]
 }

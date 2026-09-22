@@ -44,11 +44,30 @@
  * ★ 契约里**没有**声明这套约定 ⇒ runner **exit 3 拒绝跑**（宁可答不上来，也不靠隐含约定）；
  *   契约声明了 runner 未支持的模式 ⇒ 同样 exit 3 并点名该模式。
  *
- * 依赖：无。只写 `out/`（临时目录 + 报告 txt），**不改 vectors.json / contract.json**。
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ★★ O55：**写回痕迹**（`expect.fileChanged`）—— 让「从不写回」可被分辨
+ *
+ * 问题（`docs/skill-as-agent-spec.md` §35.4）：4 条**负向**迁移向量都期望
+ * `statusUnchanged: true`，而一个「**从不写回**」的实现【同样满足】—— 「读不到」被
+ * 当成了「没变」。⇒ `statusUnchanged` 单独**不能**分辨「被拒绝且文件未动」与「根本不写回」；
+ * 而**只有那条正向对照**（`transition-pending-to-active-receipt-passed`，期望
+ * `statusUnchanged: false`）能抓到 ⇒ **删掉它，这类错误就会全绿通过。**
+ *
+ * 补法（两层，这里只是第一层）：每次 `transition` 都 measure **写回痕迹** ——
+ * 对**契约声明的写回文件**（`readback.file`，即 `--node` 那份）在调用实现**前后**
+ * 各取一次 `sha256` 摘要 ⇒ 摘要变了 = 文件**确实被写过**（`fileChanged: true`）。
+ * 痕迹机制本身也必须由契约声明（`implementations.state.writeback.evidence`），
+ * **契约没声明 ⇒ exit 3 拒绝跑**（与 O51 同一条纪律：宁可答不上来，也不靠隐含约定）。
+ * 第二层（负向向量必须配同形正向对照）由 `contract.json` → `vectors.pairing` 声明、
+ * 由 `scripts/gate-contract-check.mjs` 守（见该文件 O55 三条检查）。
+ *
+ * 依赖：无（`node:crypto` 是标准库）。只写 `out/`（临时目录 + 报告 txt），
+ * **不改 vectors.json / contract.json**。
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -62,6 +81,14 @@ const DEFAULTS = {
   tmp: path.join(ROOT, 'out', 'gate-vector-run.tmp'),
 }
 const EXPECTED_VECTORS_SHAPE = 'dsh-gate-vectors/v1'
+
+/**
+ * ★ O55：本 runner **实现**的写回痕迹机制（契约声明 kind/algorithm/scope，
+ * runner 只认这一种并要求契约值与之逐字一致 —— 不认识的声明一律 exit 3 拒绝猜）。
+ */
+const EVIDENCE_KIND = 'file-digest'
+const EVIDENCE_ALGORITHM = 'sha256'
+const EVIDENCE_SCOPE = 'declared-writeback-file'
 
 /** ★ 两条关键对照：一起看才是"门既没漏也没全封"。 */
 const KEY_PAIR = ['l3-active-trigger-match-visible', 'l3-pending-trigger-match-hidden']
@@ -116,7 +143,9 @@ function firstJsonLine(stdout) {
 /**
  * ★ O51：从**契约**读出状态写回/读回约定。读不到 ⇒ 抛错（调用方 exit 3），
  * 绝不退回"runner 自己知道一个默认值"那种隐含约定。
- * @returns {{contractFile:string, mode:string, writeArg:string, readField:string, readTarget:string}}
+ * ★ O55：一并读出**写回痕迹机制**（`writeback.evidence`）—— 同理，读不到 ⇒ exit 3。
+ * @returns {{contractFile:string, mode:string, writeArg:string, readField:string, readTarget:string,
+ *            evidence:{kind:string, algorithm:string, scope:string, field:string}}}
  */
 export function loadStateProtocol(vectorsRaw) {
   const rel = vectorsRaw?.contract
@@ -145,7 +174,56 @@ export function loadStateProtocol(vectorsRaw) {
       `契约声明的状态写回模式 "${mode}"（readback.file=${JSON.stringify(readTarget)}）本 runner 未支持（已支持：in-place）⇒ 拒绝猜`,
     )
   }
-  return { contractFile, mode, writeArg, readField, readTarget: readTarget ?? '' }
+  // ★ O55：写回痕迹机制必须由契约声明；runner 只实现契约声明的这一种 ⇒ 不认识的声明也拒绝猜。
+  const ev = st?.writeback?.evidence
+  const evKind = ev?.kind
+  const evAlgo = ev?.algorithm
+  const evScope = ev?.scope
+  const evField = ev?.field
+  if (typeof evKind !== 'string' || evKind.trim() === '') {
+    throw new Error(
+      '契约未声明 implementations.state.writeback.evidence（写回痕迹机制）⇒ runner 拒绝跑（O55：没有痕迹 ⇒「从不写回」与「被拒绝且文件未动」不可分辨 ⇒ statusUnchanged 会假绿）',
+    )
+  }
+  if (evKind !== EVIDENCE_KIND) {
+    throw new Error(
+      `契约声明的写回痕迹 kind="${evKind}" 本 runner 未支持（已支持：${EVIDENCE_KIND}）⇒ 拒绝猜`,
+    )
+  }
+  if (evAlgo !== EVIDENCE_ALGORITHM) {
+    throw new Error(
+      `契约声明的写回痕迹 algorithm="${evAlgo}" 本 runner 未支持（已支持：${EVIDENCE_ALGORITHM}）⇒ 拒绝猜`,
+    )
+  }
+  if (evScope !== EVIDENCE_SCOPE) {
+    throw new Error(
+      `契约声明的写回痕迹 scope="${evScope}" 本 runner 未支持（已支持：${EVIDENCE_SCOPE} = runner 按契约读回的那份文件）⇒ 拒绝猜`,
+    )
+  }
+  if (typeof evField !== 'string' || evField.trim() === '') {
+    throw new Error('契约未声明 implementations.state.writeback.evidence.field（痕迹断言用的字段名）⇒ runner 拒绝跑')
+  }
+  return {
+    contractFile,
+    mode,
+    writeArg,
+    readField,
+    readTarget: readTarget ?? '',
+    evidence: { kind: evKind, algorithm: evAlgo, scope: evScope, field: evField },
+  }
+}
+
+/**
+ * ★ O55：文件摘要 —— 摘要机制本身**由契约声明**（kind/algorithm），这里只是它的实现。
+ * 返回 `sha256:<hex>:len=<bytes>`；读不到 ⇒ 返回 `null`（调用方按"痕迹取不到"处理，偏严）。
+ */
+function fileDigest(file) {
+  try {
+    const buf = fs.readFileSync(file)
+    return `${EVIDENCE_ALGORITHM}:${crypto.createHash(EVIDENCE_ALGORITHM).update(buf).digest('hex')}:len=${buf.length}`
+  } catch {
+    return null
+  }
 }
 
 const oneLine = (s, max = 200) => {
@@ -166,6 +244,9 @@ function runCase(implArgv, c, idx, tmpDir, log, stateProto) {
 
   fs.writeFileSync(nodeFile, `${JSON.stringify(c.node, null, 2)}\n`, 'utf8')
   const originalStatus = typeof c.node?.status === 'string' ? c.node.status : null
+  // ★ O55：写回痕迹的【before】侧 —— 契约声明的写回文件在调用实现之前的摘要。
+  //   （必须在写 nodeFile 之后取，否则摘要里没有"初始内容"这一基准。）
+  const digestBefore = c.kind === 'transition' && stateFile ? fileDigest(stateFile) : null
 
   let args
   if (c.kind === 'transition') {
@@ -188,6 +269,8 @@ function runCase(implArgv, c, idx, tmpDir, log, stateProto) {
   const stdout = oneLine(res.stdout, 400)
   const stderr = oneLine(res.stderr, 240)
   const shown = [...args].join(' ')
+  // ★ O55：写回痕迹的【after】侧 —— 实现退出后，同一个文件的摘要。
+  const digestAfter = c.kind === 'transition' && stateFile ? fileDigest(stateFile) : null
 
   const ev = { exit, stdout, stderr, shown, reason: '' }
   if (res.error) {
@@ -246,6 +329,20 @@ function runCase(implArgv, c, idx, tmpDir, log, stateProto) {
             'statusUnchanged(契约声明的写回文件)',
             want.statusUnchanged,
             `写回文件里 ${stateProto.readField}=${JSON.stringify(afterStatus)}（原 ${JSON.stringify(originalStatus)}）`,
+          )
+    }
+    if (want.fileChanged !== undefined) {
+      // ★★ O55：写回痕迹断言。`changed` 看的是【契约声明的写回文件】的摘要有没有变 ——
+      //   这是唯一能分辨「被拒绝且文件未动」（false）与「根本不写回」（也是 false，但
+      //   一旦有向量期望 true 就会挂）的信号。所以配套的配对规则（vectors.pairing）保证
+      //   每条负向对照都有一条期望 true 的同 to 正向对照。
+      const changed = digestBefore !== digestAfter
+      changed === want.fileChanged
+        ? good(`fileChanged(写回痕迹 ${stateProto.evidence.kind}/${stateProto.evidence.algorithm})`)
+        : bad(
+            `fileChanged(写回痕迹 ${stateProto.evidence.kind}/${stateProto.evidence.algorithm})`,
+            want.fileChanged,
+            `${changed ? '摘要变了' : '摘要没变'}：before=${JSON.stringify(digestBefore)} after=${JSON.stringify(digestAfter)}（文件 = 契约声明的写回文件 ${path.relative(ROOT, stateFile).replace(/\\/g, '/')}）`,
           )
     }
     if (typeof got.reason !== 'string' || got.reason.trim() === '') {
@@ -316,6 +413,8 @@ function main(argv) {
   log(`  ★ 状态写回: 契约 ${path.relative(ROOT, stateProto.contractFile).replace(/\\/g, '/')} → implementations.state`)
   log(`              writeback.mode=${JSON.stringify(stateProto.mode)}（arg ${stateProto.writeArg}）⇒ 原地回写 --node 文件`)
   log(`              readback.field=${JSON.stringify(stateProto.readField)}（runner 读回该字段判 statusUnchanged / status）`)
+  log(`  ★ 写回痕迹: 契约 writeback.evidence → ${stateProto.evidence.kind}/${stateProto.evidence.algorithm}（scope ${stateProto.evidence.scope}）`)
+  log(`              ⇒ transition 前后各取一次该文件摘要，比 ${stateProto.evidence.field}（O55：分辨「从不写回」）`)
   log(`  out     : ${path.relative(ROOT, opts.out).replace(/\\/g, '/')}`)
   log('════════════════════════════════════════════════════════════════════════')
 

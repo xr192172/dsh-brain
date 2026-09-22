@@ -30,7 +30,9 @@
  * --selftest 干什么：在**内存里**构造若干坏契约（L3 不要求 active、unenforced 缺 L2、
  *   回执缺 proofLevel、词汇表缺 pending、词表重复、迁移丢了 passed 要求、可见性未声明 L3、
  *   实现协议 stdout 形状坏、★ 没声明状态写回约定(O51)、不可见集漏 invalidated/suspicious(O52)、
- *   迁移没要求回执必填字段可读(O53)），断言校验器**会拒绝**，并打印每份坏契约被**哪条规则**挡下。
+ *   迁移没要求回执必填字段可读(O53)、★ 没声明写回痕迹机制(O55)、★ 没声明向量配对规则(O55)、
+ *   ★★ 删掉正负对照那条正向向量(O55)、★ 正向对照在但没带 fileChanged 断言(O55)），
+ *   断言校验器**会拒绝**，并打印每份坏契约被**哪条规则**挡下。
  *   ★ 同时跑一份**阳性对照**（未改动的真契约必须全过）——否则"全红"的校验器也能通过自检，
  *     那是"过度封锁"，与"假绿"同等有害。
  *
@@ -67,14 +69,24 @@ const REQUIRED_INVISIBLE_EXTRA = ['invalidated', 'suspicious']
 const STATE_READBACK_FIELD = 'status'
 /** ★ O53：过门时回执里至少要可读的那个必填字段。 */
 const REQUIRED_RECEIPT_FIELD_FOR_ADOPTION = 'proofLevel'
+/** ★ O55：本契约选定的写回痕迹机制（kind / scope 必须逐字是这两个值：痕迹只能取自 runner 读回的那份文件）。 */
+const EVIDENCE_KIND = 'file-digest'
+const EVIDENCE_SCOPE = 'declared-writeback-file'
+/** ★ O55：向量配对规则允许的模式（目前只有"同 transition.to"这一种）。 */
+const PAIR_MODES = ['same-transition-target']
 
 // ── 校验器主体 ──────────────────────────────────────────────────────────────
 
 /**
  * 对一份契约做全部检查。
+ * @param {object} c  契约对象
+ * @param {{vectorsInput?:{data:object|null,error:string|null,source:string}|null}} [opts]
+ *   ★ O55：向量集的数据（用于「负向向量必须配同形正向对照」这条检查）。
+ *   `vectorsInput` 给了就用它（`--vectors` override / 自检的内存注入）；没给就从契约
+ *   `vectors.pairing.vectorsFile` 读。★ 读不到 ⇒ 那条检查 **FAIL**，绝不静默跳过。
  * @returns {{checks: Array<{id:string,ok:boolean,why:string,detail:string}>}}
  */
-function checkContract(c) {
+function checkContract(c, opts = {}) {
   const checks = []
   const add = (id, ok, why, detail) => checks.push({ id, ok: Boolean(ok), why, detail: detail ?? '' })
 
@@ -333,6 +345,100 @@ function checkContract(c) {
       : `写回 mode=${JSON.stringify(wbMode)}（需 in-place|sidecar）／arg=${JSON.stringify(wb?.arg)}；读回 field=${JSON.stringify(rb?.field)}（需 "${STATE_READBACK_FIELD}"）／file=${JSON.stringify(rb?.file)}`,
   )
 
+  // ★ O55：写回**痕迹**机制也必须在契约里声明（与 O51 同族：*信号*本身也不许靠私下约定）
+  const ev = wb?.evidence
+  const evKindOk = typeof ev?.kind === 'string' && ev.kind === EVIDENCE_KIND
+  const evScopeOk = typeof ev?.scope === 'string' && ev.scope === EVIDENCE_SCOPE
+  const evAlgoOk = typeof ev?.algorithm === 'string' && ev.algorithm.trim() !== ''
+  const evFieldOk = typeof ev?.field === 'string' && ev.field.trim() !== ''
+  const evCompareOk = typeof ev?.compare === 'string' && ev.compare.trim() !== ''
+  const evWhyOk = typeof ev?.why === 'string' && ev.why.trim() !== ''
+  const evidenceOk = evKindOk && evScopeOk && evAlgoOk && evFieldOk && evCompareOk && evWhyOk
+  add(
+    'impl-writeback-evidence-declared',
+    evidenceOk,
+    '★ O55（§35.4）：4 条负向迁移向量都期望 statusUnchanged:true，而一个「从不写回」的实现【同样满足】（「读不到」被当成「没变」）⇒ statusUnchanged 单独**没有分辨力**。⇒ 必须另有一个独立的「到底写没写」信号（写回痕迹：transition 前后对某个文件取摘要，摘要变了 = 确实写了），且这个信号本身也要写进契约 —— 否则它又会变成实现与 runner 的私下约定（O51 的同一个洞，只是换了一层）。scope 必须钉死在 declared-writeback-file（= runner 按契约读回的那份）⇒ 痕迹只能来自那一份文件，别处的写入不算数。',
+    evidenceOk
+      ? `痕迹：kind=${JSON.stringify(ev.kind)} scope=${JSON.stringify(ev.scope)} algorithm=${JSON.stringify(ev.algorithm)} field=${JSON.stringify(ev.field)}`
+      : `writeback.evidence = ${JSON.stringify(ev)}（需 kind="${EVIDENCE_KIND}" + scope="${EVIDENCE_SCOPE}" + 非空 algorithm / field / compare / why）`,
+  )
+
+  // ══ F. ★ O55：向量集【自身】的完备性（contract.json → vectors.pairing） ═════
+  //    ★ 为什么放在契约校验器而不是 runner：这条规则是 contract.json 自己声明的
+  //      （vectors.pairing），由契约的校验器守；且它是「向量集够不够分辨」的**静态**检查，
+  //      与跑哪个实现无关 —— runner 的结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，
+  //      不再混入第四种「向量集不完整」。见 contract.json → vectors.pairing.whichCheck。
+
+  const pairing = c?.vectors?.pairing
+  const requireFor = pairing?.requireFor
+  const pairMode = pairing?.mode
+  const pairVectorsFile = pairing?.vectorsFile
+  const pairAssert = pairing?.requirePairAsserts
+  const requireForOk = typeof requireFor === 'string' && /^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/i.test(requireFor)
+  const pairModeOk = typeof pairMode === 'string' && PAIR_MODES.includes(pairMode)
+  const pairFileOk = typeof pairVectorsFile === 'string' && pairVectorsFile.trim() !== ''
+  const pairAssertOk = typeof pairAssert === 'string' && pairAssert.trim() !== ''
+  const pairingWhyOk = typeof pairing?.why === 'string' && pairing.why.trim() !== ''
+  const pairingRuleOk = requireForOk && pairModeOk && pairFileOk && pairAssertOk && pairingWhyOk
+  add(
+    'vectors-pairing-rule-declared',
+    pairingRuleOk,
+    '★ O55：负向向量「缺同形正向对照 ⇒ 对『从不写回』假绿」这条风险，必须是一条**集中声明、机器可读**的规则（否则「删掉那条正向对照」这件事没有任何东西会响）。requireFor = 哪些向量被要求配对（"<kind>.<role>"）；mode = 怎么算"同形"；vectorsFile = 检查哪一份向量集；requirePairAsserts = 那条正向对照必须带哪个断言才算"有牙"。',
+    pairingRuleOk
+      ? `配对规则：requireFor=${JSON.stringify(requireFor)} mode=${JSON.stringify(pairMode)} vectorsFile=${JSON.stringify(pairVectorsFile)} requirePairAsserts=${JSON.stringify(pairAssert)}`
+      : `vectors.pairing = ${JSON.stringify(pairing)}（需 requireFor="kind.role" + mode∈${JSON.stringify(PAIR_MODES)} + 非空 vectorsFile / requirePairAsserts / why）`,
+  )
+
+  // 向量数据来源：--vectors override / 自检注入优先；否则按契约声明读盘。读不到 ⇒ 这条 FAIL。
+  const vres =
+    opts.vectorsInput ?? loadVectorsFile(pairVectorsFile)
+
+  const targetsOf = (x) => {
+    const t = x?.transition?.to
+    return Array.isArray(t) ? t : t === undefined || t === null ? [] : [t]
+  }
+  const [reqKind, reqRole] = String(requireFor ?? '').split('.')
+  let pairOk = false
+  let pairDetail = ''
+  if (!pairingRuleOk) {
+    pairDetail = `★ 配对规则未声明/不合法（requireFor=${JSON.stringify(requireFor)} mode=${JSON.stringify(pairMode)}）⇒ 无法验证「负向向量必须配同形正向对照」`
+  } else if (vres.error) {
+    pairDetail = `★ 配对检查的向量集不可读：${vres.error}`
+  } else if (!Array.isArray(vres.data?.cases)) {
+    pairDetail = `★ 向量集里没有 cases 数组（${vres.source ?? '(来源未知)'}）⇒ 无法验证配对`
+  } else {
+    const all = vres.data.cases
+    const required = all.filter((x) => x?.kind === reqKind && x?.role === reqRole)
+    const positives = all.filter((x) => x?.kind === reqKind && x?.role === 'positive-control')
+    const missing = []
+    const toothless = []
+    for (const n of required) {
+      const tos = targetsOf(n)
+      const pair = positives.find((p) => targetsOf(p).some((t) => tos.includes(t)))
+      if (!pair) {
+        missing.push(`${n?.id ?? '(无 id)'}（transition.to=${JSON.stringify(tos.length === 1 ? tos[0] : tos)}）`)
+      } else if (pair?.expect?.[pairAssert] !== true) {
+        toothless.push(`${n?.id ?? '(无 id)'} ↔ ${pair?.id ?? '(无 id)'}（该正向对照没有 expect.${pairAssert}: true）`)
+      }
+    }
+    if (required.length === 0) {
+      pairDetail = `★ 向量集里一条 kind=${reqKind} role=${reqRole} 的向量都没有 ⇒ 这条配对规则被架空（空判也能"通过"）`
+    } else if (missing.length) {
+      pairDetail = `★★ 配对缺失（${missing.length}/${required.length}）：这些 ${requireFor} 向量没有【同 transition.to】的 positive-control 对照 ⇒ ${missing.join('；')}`
+    } else if (toothless.length) {
+      pairDetail = `★★ 配对无牙（${toothless.length}/${required.length}）：有同 to 的正向对照，但它没带 expect.${pairAssert}: true ⇒ 该配对抓不到「从不写回」：${toothless.join('；')}`
+    } else {
+      pairOk = true
+      pairDetail = `配对完整：${required.length} 条 ${requireFor} 各自有一条同 transition.to 的 positive-control（mode=${pairMode}），且都带 expect.${pairAssert}: true；向量来源 ${vres.source ?? '(内存注入)'}`
+    }
+  }
+  add(
+    'vectors-negative-control-has-same-target-positive-pair',
+    pairOk,
+    '★★ O55 的核心（§35.4）：4 条负向迁移向量都期望 statusUnchanged:true ⇒ 一个「从不写回」的实现同样满足；这套判据**只**靠那条正向对照 transition-pending-to-active-receipt-passed 才能分辨这类错误 ⇒ 【删掉它，这类错误就全绿通过】。⇒ 每条 transition 类的 negative-control 向量都必须存在一条【同 transition.to】且**带 fileChanged 断言**的 positive-control 向量；缺一条即不合格、非零退出（不许静默全绿）。',
+    pairDetail,
+  )
+
   return { checks }
 }
 
@@ -468,11 +574,63 @@ const BAD_CASES = [
       delete r.requireFieldsComplete
     },
   },
+  {
+    name: '★ O55：契约没声明写回痕迹机制（只剩 statusUnchanged，对「从不写回」没分辨力）',
+    why: '没有痕迹信号 ⇒ 「读不到」与「没变」不可区分 ⇒ 4 条负向迁移向量的 statusUnchanged:true 会被一个从不写回的实现「满足」。',
+    expect: ['impl-writeback-evidence-declared'],
+    mutate: (c) => {
+      delete c.implementations.state.writeback.evidence
+    },
+  },
+  {
+    name: '★ O55：契约没声明向量配对规则（负向向量是否配了正向对照，没人管）',
+    why: '缺 vectors.pairing ⇒ 「删掉那条正向对照」这件事没有任何东西会响。★ 配对检查也必须跟着 FAIL（不许因为"规则没声明"就静默跳过）。',
+    expect: ['vectors-pairing-rule-declared', 'vectors-negative-control-has-same-target-positive-pair'],
+    mutate: (c) => {
+      delete c.vectors.pairing
+    },
+  },
+  {
+    name: '★★ O55：把正负对照的那条正向向量删掉（transition-pending-to-active-receipt-passed）',
+    why: '§35.4 逐字：删掉它，这类错误就会全绿通过。⇒ 配对检查必须报「配对缺失」并非零退出。',
+    expect: ['vectors-negative-control-has-same-target-positive-pair'],
+    mutate: () => {},
+    mutateVectors: (v) => {
+      v.cases = v.cases.filter((x) => x.id !== 'transition-pending-to-active-receipt-passed')
+    },
+  },
+  {
+    name: '★ O55：正向对照还在，但把它的 fileChanged 断言删掉（配对变成形式）',
+    why: '有同 to 的正向向量却没带 fileChanged:true ⇒ 配对抓不到「从不写回」= 有对照但没牙。',
+    expect: ['vectors-negative-control-has-same-target-positive-pair'],
+    mutate: () => {},
+    mutateVectors: (v) => {
+      const p = v.cases.find((x) => x.id === 'transition-pending-to-active-receipt-passed')
+      delete p.expect.fileChanged
+    },
+  },
 ]
 
 // ── 输出 ────────────────────────────────────────────────────────────────────
 
 const clone = (o) => JSON.parse(JSON.stringify(o))
+
+/**
+ * ★ O55：从契约声明的位置读向量集。读不到 ⇒ 返回 error（调用方把那条检查判 FAIL，
+ * **绝不静默跳过** —— 跳过就等于"检查不存在"，而这条检查防的正是"静默全绿"）。
+ * @returns {{data:object|null, error:string|null, source:string}}
+ */
+function loadVectorsFile(rel) {
+  if (typeof rel !== 'string' || rel.trim() === '') {
+    return { data: null, error: '契约没有声明 vectors.pairing.vectorsFile', source: '(未声明)' }
+  }
+  const file = path.isAbsolute(rel) ? rel : path.resolve(ROOT, rel)
+  try {
+    return { data: JSON.parse(fs.readFileSync(file, 'utf8')), error: null, source: file }
+  } catch (e) {
+    return { data: null, error: `${file}（${e.message}）`, source: file }
+  }
+}
 
 function printReport(checks, { verbose = true } = {}) {
   for (const x of checks) {
@@ -507,7 +665,16 @@ function runSelftest() {
   console.log('')
 
   const base = readContract(DEFAULT_CONTRACT)
-  const good = checkContract(base).checks
+  // ★ O55：配对检查要读向量集 —— 自检里也用真向量（阳性对照），坏契约里可以改向量（mutateVectors）
+  const baseVectors = loadVectorsFile(base?.vectors?.pairing?.vectorsFile)
+  if (baseVectors.error) {
+    console.log(`  ❌ 真契约声明的向量集读不到：${baseVectors.error}`)
+    console.log('\n自检结果：❌ 阳性对照未通过（先修契约或修校验器）')
+    process.exit(1)
+  }
+  console.log(`向量集：${baseVectors.source}（${Array.isArray(baseVectors.data?.cases) ? baseVectors.data.cases.length : '?'} 条）`)
+  console.log('')
+  const good = checkContract(base, { vectorsInput: baseVectors }).checks
   const goodFailed = good.filter((x) => !x.ok)
 
   console.log('【阳性对照】未改动的真契约')
@@ -528,7 +695,10 @@ function runSelftest() {
     const cs = BAD_CASES[i]
     const c = clone(base)
     cs.mutate(c)
-    const checks = checkContract(c).checks
+    // ★ O55：允许坏契约同时改【向量集】（例如"把正负对照的那条正向向量删掉"）
+    const vres = cs.mutateVectors ? { ...baseVectors, data: clone(baseVectors.data) } : baseVectors
+    if (cs.mutateVectors) cs.mutateVectors(vres.data)
+    const checks = checkContract(c, { vectorsInput: vres }).checks
     const failed = checks.filter((x) => !x.ok)
     const failedIds = failed.map((x) => x.id)
 
@@ -569,7 +739,9 @@ function runSelftest() {
 const argv = process.argv.slice(2)
 
 if (argv.includes('--help') || argv.includes('-h')) {
-  console.log(fs.readFileSync(new URL(import.meta.url)).toString('utf8').split('\n').slice(1, 34).join('\n'))
+  const src = fs.readFileSync(new URL(import.meta.url)).toString('utf8').split('\n')
+  const end = src.findIndex((l, idx) => idx > 0 && l.trim().startsWith('*/'))
+  console.log(src.slice(1, end > 0 ? end : 34).join('\n'))
   process.exit(0)
 }
 
@@ -577,24 +749,57 @@ if (argv.includes('--selftest')) {
   runSelftest()
 }
 
-const i = argv.indexOf('--contract')
-const contractFile = i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--')
-  ? path.resolve(argv[i + 1])
-  : (argv.find((a) => !a.startsWith('--')) ? path.resolve(argv.find((a) => !a.startsWith('--'))) : DEFAULT_CONTRACT)
+// ★ O55：`--vectors` 优先摘掉（否则它的取值会被下面的"位置参数"逻辑当成契约路径）。
+let vectorsArg = null
+const positional = []
+for (let k = 0; k < argv.length; k += 1) {
+  const a = argv[k]
+  if (a === '--vectors') {
+    vectorsArg = argv[++k] ?? null
+    continue
+  }
+  if (a.startsWith('--vectors=')) {
+    vectorsArg = a.slice('--vectors='.length)
+    continue
+  }
+  if (a === '--contract') {
+    positional.push(argv[++k] ?? '')
+    continue
+  }
+  if (a.startsWith('--contract=')) {
+    positional.push(a.slice('--contract='.length))
+    continue
+  }
+  positional.push(a)
+}
+
+const contractArg = positional.find((a) => a && !a.startsWith('--'))
+const contractFile = contractArg ? path.resolve(contractArg) : DEFAULT_CONTRACT
 
 const rawBytes = fs.readFileSync(contractFile)
 const contract = readContract(contractFile)
-const { checks } = checkContract(contract)
+// ★ O55：--vectors 给了就用它（例如"把正向对照删掉的临时副本"）；没给则按契约声明读。
+const vectorsInput = vectorsArg
+  ? loadVectorsFile(path.resolve(vectorsArg))
+  : loadVectorsFile(contract?.vectors?.pairing?.vectorsFile)
+const { checks } = checkContract(contract, { vectorsInput })
 const failed = checks.filter((x) => !x.ok)
+const O55_ADDED = [
+  'impl-writeback-evidence-declared',
+  'vectors-pairing-rule-declared',
+  'vectors-negative-control-has-same-target-positive-pair',
+]
+const nO55 = checks.filter((x) => O55_ADDED.includes(x.id)).length
 
 console.log('门契约校验 · dsh-gate-contract/v1')
 console.log('═'.repeat(72))
 console.log(`契约文件：${contractFile}`)
 console.log(`JSON 解析：✅ 成功（本脚本用 node 的 JSON.parse 读了一遍：${rawBytes.length} 字节，顶层键 ${Object.keys(contract).length} 个：${Object.keys(contract).join(', ')}）`)
-console.log(`目标：契约必须**自洽** —— 词汇表单一来源 / 回执不撒谎 / 迁移有门 / 两条注入路径都要求 active / 实现协议可断言`)
+console.log(`向量集：${vectorsArg ? '（--vectors 指定）' : '（按契约 vectors.pairing.vectorsFile）'}${vectorsInput.source ?? '(未声明)'}${vectorsInput.error ? ` ❌ ${vectorsInput.error}` : ''}`)
+console.log(`目标：契约必须**自洽** —— 词汇表单一来源 / 回执不撒谎 / 迁移有门 / 两条注入路径都要求 active / 实现协议可断言 / ★ 写回痕迹与向量配对都已被声明(O55)`)
 console.log(`每项都打印「防的是什么」；任一项不满足 ⇒ 非零退出。
 `)
-console.log(`共 ${checks.length} 项检查：`)
+console.log(`共 ${checks.length} 项检查：★ 其中 O55 新增 ${nO55} 项（${O55_ADDED.join(' / ')}）⇒ 原有检查一项未删。`)
 console.log('')
 printReport(checks, { verbose: true })
 console.log('')
