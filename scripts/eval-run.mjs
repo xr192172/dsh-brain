@@ -48,6 +48,30 @@ const argOf = (k) => {
 const has = (k) => argv.includes(k)
 
 const sh = (cmd, args, opts = {}) => spawnSync(cmd, args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts })
+/**
+ * ── ★★ O76（2026-09-22）：**会写工作区的 git 命令一律带上这两个 `-c`** ──────────────
+ *
+ * 本机 `core.autocrlf=true` 在 **system 级**（PortableGit 的 etc/gitconfig，无 `.gitattributes`）
+ * ⇒ 一条**没带 `-c`** 的 git 命令只要重新物化一个文件，就会把它写成 **CRLF**；
+ * 而 `git status` **看不见**（它也按 autocrlf 归一化）⇒ **静默污染**。
+ *
+ * 实测复现（本文件作者，原始读数）：`git -C <wt> checkout -- <file>`
+ *   （**不带** `-c`，就是本文件下面那条）⇒ 该文件 `CR 0 → 523`，`git status --porcelain` **仍为空**。
+ * ⇒ 而这正是 O76 假绿的来源：树里那个文件变 CRLF 后，`tasks.jsonl` 的 LF 版 `find`
+ *   **匹配 0 次** ⇒ "seed 后应该红"的任务**不会红**。
+ * ★ 旁证：主仓里**恰好**有 6 个 `w/crlf` 文件，其中 4 个正是实验里 Agent 改过、又被本条
+ *   `git checkout --` 还原的文件（`evals/pilot/rename-target/{index,math,store}.js` = cli-0005 的靶子，
+ *   `scripts/verify-drain-after-swap.mjs` = cli-0004 的靶子）。
+ * ⇒ 纪律：`-c core.autocrlf=false -c core.eol=lf`（两条一起给 = 与 system 配置无关；
+ *   `core.eol` 只在 autocrlf 为真/有 `text` 属性时参与决策，而那正是"本机配置变了之后"的场景）。
+ */
+const EOL_FLAGS = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf']
+const crlfCount = (abs) => {
+  const b = fs.readFileSync(abs)
+  let n = 0
+  for (let i = 0; i < b.length - 1; i++) if (b[i] === 13 && b[i + 1] === 10) n++
+  return n
+}
 /** 跑**被测的判据**时给子进程关掉宿主的 safe-delete 钩子：它会把"删一个不存在的临时文件"升级成硬崩溃，
  *  而仓库自己那些门的自证步骤恰好会删临时文件 ⇒ 会间歇性把 regression 打成红（假红，2026-09-20 实测）。 */
 const shJudge = (cmd) => sh(cmd[0], cmd.slice(1), { env: { ...process.env, CODEBUDDY_SAFE_DELETE_ENABLED: '0' } })
@@ -886,7 +910,24 @@ async function runArm({ task, sid, arm = null, label = '', profile = null, ignor
     const newUntracked = now.untracked.map((l) => l.slice(3).trim()).filter((f) => !preUn.has(f))
     const preMod = new Set((preRunState?.modifiedTracked ?? []).map((l) => l.slice(3).trim()))
     const newModified = now.modifiedTracked.map((l) => l.slice(3).trim()).filter((f) => !preMod.has(f))
-    for (const f of newModified) sh('git', ['checkout', '--', f], { cwd: WORK })
+    for (const f of newModified) sh('git', [...EOL_FLAGS, 'checkout', '--', f], { cwd: WORK })
+    // ★★ O76：这条 `git checkout --` 就是**别处解释过的那条静默 CRLF 源头**（不带 `-c` 时 0→523）。
+    //   还原完**逐字量一次**：仍不是 LF ⇒ 先整体重新物化、复量；还不干净 ⇒ 判这次实验无效。
+    //   为什么必须硬失败：CRLF 树里 `tasks.jsonl` 的 LF 版 `find` 匹配 0 次 ⇒ 下一轮 "seed 后应该红"
+    //   不会红 ⇒ **假绿**（比假红更坏：你以为查过了）。
+    const bad = () => newModified.filter((f) => fs.existsSync(path.join(WORK, f)) && crlfCount(path.join(WORK, f)) > 0)
+    let polluted = bad()
+    if (polluted.length) {
+      sh('git', [...EOL_FLAGS, 'checkout', '--', '.'], { cwd: WORK })
+      polluted = bad()
+      report.stages.eolAfterRevert = polluted.length ? { stillCrlf: polluted } : { renormalized: true }
+      if (polluted.length) {
+        console.error(`${tag}✗ 还原后仍不是 LF：${polluted.join(', ')} ⇒ 下一轮 seed 会打不上（假绿）⇒ 这次实验无效`)
+        report.stages.error = 'crlf-after-revert'
+        return report
+      }
+      console.log(`${tag}   ⚠ 还原后出现过 CRLF ⇒ 已按 EOL_FLAGS 重新物化，复量为 LF`)
+    }
     const removed = []
     for (const f of newUntracked) {
       const abs = path.join(WORK, f)
@@ -1106,7 +1147,9 @@ function ensureWorktree(dir) {
   const out = { dir: abs, created: false, nodeModules: false, problems: [] }
   if (!fs.existsSync(path.join(abs, '.git'))) {
     fs.mkdirSync(path.dirname(abs), { recursive: true })
-    const r = sh('git', ['worktree', 'add', '--detach', abs, 'HEAD'])
+    // ★★ O76：`worktree add` 是**一次完整检出** ⇒ 不带 EOL_FLAGS 会一次写出满树 CRLF
+    //   （同 `scripts/eval-wt-new.mjs` 的 [1]；那边还多一步"收尾重新物化 + 逐字量"）。
+    const r = sh('git', [...EOL_FLAGS, 'worktree', 'add', '--detach', abs, 'HEAD'])
     if (r.status !== 0) out.problems.push('git worktree add 失败: ' + String(r.stderr ?? '').trim().slice(0, 160))
     else out.created = true
   }

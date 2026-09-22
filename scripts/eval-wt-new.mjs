@@ -29,12 +29,28 @@
  *
  * ── ★★ 行尾坑（必须处理，上次真踩过）─────────────────────────────────────
  *   本机 `core.autocrlf=true`（**system 级**：PortableGit 的 etc/gitconfig，无 `.gitattributes`）
- *   ⇒ worktree 检出会把 LF 变成 **CRLF** ⇒ `tasks.jsonl` 里 `seed.find` 写的 `\n`
- *     **匹配 0 次** ⇒ 第一次打 seed 就失败（`eval-validate` 的"锚点必须恰好 1 次"直接拦下）。
- *   实测（本文件作者复核）：`git worktree add` 后 CRLF=0 是**假象** ——
- *   紧接着跑的 `git sparse-checkout set`（没带 `-c`）会把文件**按 autocrlf 重新检出**，
- *   CRLF 又变回 523。⇒ ★ **每一条可能碰工作区的 git 命令都要带 `-c core.autocrlf=false`**，
- *   而且要在**最后**再量一次 CRLF（本脚本的 [4] 就是在量这个）。
+ *   ⇒ 检出会把 LF 变成 **CRLF** ⇒ `tasks.jsonl` 里 `seed.find` 写的 `\n`
+ *     **匹配 0 次** ⇒ "seed 后应该红"的任务**根本不会红** ⇒ **假绿**（比假红更坏）。
+ *
+ *   ★★ **O76（2026-09-22）复核：上一轮的 `-c core.autocrlf=false` 确实生效了，
+ *      但脏不在"建树"这一步。** 实测（本文件作者，原始读数）：
+ *     · `git worktree add -c core.autocrlf=false` → CR=0；随后 `sparse-checkout set -c …` → **仍是 CR=0**；
+ *       `_wt/w24-A`、`_wt/w25-R1`、临时树 `_wt/probe-a` **全树 LF**；
+ *     · 而 `_wt/w26-fix` 里**只有 `packages/switchboard/src/index.ts` 是 CRLF（CR=523）**，
+ *       同树 `package.json` / `coordinator.ts` **都是 CR=0**，主仓同文件也是 **CR=0**
+ *       ⇒ 这不是"检出把整棵树变成了 CRLF"，而是**建树之后、某一个文件被单独重新物化了一次**。
+ *     · 单独重新物化的实测复现（`git -C <wt> checkout -- <file>`，**不带** `-c`）：
+ *       `CR 0 → 523`，而且 `git -C <wt> status --porcelain` **仍然是空的**
+ *       （因为 status 也按 system 的 autocrlf 归一化）⇒ **污染是静默的**。
+ *     · 而 eval 链路里**真的存在**这样一条没带 `-c` 的命令：`eval-run.mjs` 的
+ *       能力题还原 `git checkout -- <file>`（另一处是它自己的 `git worktree add`）。
+ *   ⇒ 结论：**"每条会碰工作区的 git 命令都要带 `-c`" 还不够** ——
+ *     还要在**建树收尾时把工作区整体重新物化一遍并逐字量一次**（本脚本 [2b]/[5]/[5b] 就是干这个的：
+ *     机制是 `git -c core.autocrlf=false -c core.eol=lf checkout -- .`，
+ *     它只重写索引里那些文件、**不动** `skip-worktree` 的排除项、也不改 HEAD）。
+ *   ★ 为什么要连 `-c core.eol=lf` 一起给：`core.eol` 在 autocrlf 为真/有 `text` 属性时才参与决策，
+ *     单给 `autocrlf=false` 在本机够用；但**两条一起给**才是"与 system 配置无关"的硬保证
+ *     （将来谁在本机或 CI 上把 `core.autocrlf` 改成 `input`/`true`，这里都不会再反复）。
  *
  * ── ★★ 构建产物：干净检出没有 `lib/` ⇒ oracle 假红（O72，2026-09-22）──────────
  *   干净检出里**没有** `packages/switchboard/lib/`（gitignore 的），而 oracle
@@ -120,8 +136,16 @@ const USAGE = `${NAME} —— 起一个**不含判据**的隔离工作树（R1�
 function sh(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts })
 }
+/**
+ * ★★ O76：**所有会碰工作区的 git 命令都必须带这两个 `-c`**（见文件头"行尾坑"）。
+ * `core.autocrlf=false` 挡住"按 system 配置把 LF 写成 CRLF"；
+ * `core.eol=lf` 是它的**独立保险**（`core.eol` 只在 autocrlf 为真/有 `text` 属性时才参与决策，
+ * 但那正是"本机配置变了以后"的场景 ⇒ 两条一起给 = 与 system 配置无关）。
+ * ★ 不许把这两条去掉、也不许只给一条 —— 少了任何一条，下面 [2b] 的重新物化都可能没效果。
+ */
+const EOL_FLAGS = ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf']
 /** ★ 所有会碰工作区的 git 命令都必须走它（见文件头"行尾坑"）。 */
-const gitIn = (dir, args) => sh('git', ['-C', dir, '-c', 'core.autocrlf=false', ...args])
+const gitIn = (dir, args) => sh('git', ['-C', dir, ...EOL_FLAGS, ...args])
 
 /**
  * ── ★★ O72：把"干净检出"变成"可编译 / 已构建"（2026-09-22）───────────────────
@@ -236,11 +260,11 @@ if (problems.length) {
   process.exit(1)
 }
 
-// ── [1] 建工作树（★ 带 -c core.autocrlf=false）────────────────────────────
+// ── [1] 建工作树（★ 带 EOL_FLAGS）─────────────────────────────────────────
 say('')
-say('[1] git worktree add（-c core.autocrlf=false）')
+say(`[1] git worktree add（${EOL_FLAGS.join(' ')}）`)
 fs.mkdirSync(path.dirname(DIR), { recursive: true })
-const add = sh('git', ['-c', 'core.autocrlf=false', 'worktree', 'add', '--detach', DIR, 'HEAD'])
+const add = sh('git', [...EOL_FLAGS, 'worktree', 'add', '--detach', DIR, 'HEAD'])
 if (add.status !== 0) {
   say(`  ✗ git worktree add 失败：${String(add.stderr ?? '').trim().slice(0, 400)}`)
   process.exit(1)
@@ -258,6 +282,20 @@ if (set.status !== 0) {
   process.exit(1)
 }
 say(`  ✓ 模式：${patterns.join('  ')}`)
+
+// ── [2b] ★★ O76：把工作区**整体重新物化一遍**成 LF（只靠 `-c` 不够，见文件头）────────
+// 机制：`git -c core.autocrlf=false -c core.eol=lf checkout -- .`
+//   · 它从**索引**重写工作区里匹配 `.` 的条目 ⇒ 只影响被检出的文件；
+//   · `skip-worktree`（sparse 排除）的条目**照旧跳过** ⇒ 排除项不会被重新拉回来（[4] 会验）；
+//   · **不改 HEAD、不改索引内容** ⇒ `git status` 仍然为空（[4] 会验）。
+// 为什么必须有这一步：上面 [1]/[2] 的 `-c` 只能保证"这两条命令自己不写 CRLF"；
+//   一旦**建树之后**有任何一条没带 `-c` 的 git 命令（或将来有人手敲）重新物化了单个文件，
+//   污染就是静默的（status 看不出来，因为 status 也按 autocrlf 归一化）。
+//   ⇒ 收尾时无条件重写一遍 + 逐字量一次，才是"这棵树是 LF"的**可复现**保证。
+say('')
+say('[2b] O76：重新物化工作区为 LF（checkout -- . 带 EOL_FLAGS）')
+const renorm = gitIn(DIR, ['checkout', '--', '.'])
+check(renorm.status === 0, '重新物化成功（checkout -- .）', renorm.status === 0 ? '' : String(renorm.stderr ?? '').trim().slice(0, 300))
 
 // ── [3] O72：接依赖 + **树内构建**（干净检出没有 lib/ ⇒ oracle 假红）────────────
 say('')
@@ -296,6 +334,22 @@ for (const rel of seedTargets) {
   const crlf = countCrlf(abs)
   check(crlf === 0, `CRLF 计数为 0：${rel}`, `实得 ${crlf}${crlf > 0 ? '  ★ autocrlf 又把行尾改回 CRLF 了' : ''}`)
 }
+// ── [5b] 证据 B2：**全树**都没有 `w/crlf`（不只是 seed 目标那几个文件）────────────
+// 为什么加这条：O76 的真实形态不是"整棵树 CRLF"，而是**某一个文件被单独重新物化**——
+// 只看 seed 目标的话，"将来 seed 换到另一个文件"就会漏。`git ls-files --eol` 报的是
+// **工作区实际字节**（不受 autocrlf 影响），是这条断言最直接的机器证据。
+say('')
+say('[5b] 证据 B2：全树 `git ls-files --eol` 里不许有 `w/crlf`')
+const eolRows = String(gitIn(DIR, ['ls-files', '--eol']).stdout ?? '')
+  .split('\n')
+  .filter((l) => l.trim())
+const crlfRows = eolRows.filter((l) => /\bw\/crlf\b/.test(l))
+check(eolRows.length > 0, '读到了行尾台账（否则这条断言在空集上为真 = 假绿）', `实得 ${eolRows.length} 行`)
+check(
+  crlfRows.length === 0,
+  '全树没有 w/crlf 文件',
+  crlfRows.length ? `实得 ${crlfRows.length} 个：${crlfRows.slice(0, 5).map((l) => l.trim().split(/\s+/).pop()).join(', ')}` : '0 个',
+)
 
 // ── [6] 证据 C：seed 锚点在**这棵树**里"恰好 1 次"（这才是 CRLF 坑的最终判据）──
 say('')
@@ -339,7 +393,14 @@ const trackedWt = String(gitIn(DIR, ['ls-files']).stdout ?? '').split('\n').filt
 const ok = problems.length === 0
 result.ok = ok
 result.head = wtHead
-result.checks = { problems, seedRows, judgeRows, judgeInRepo, build: { lib: built.lib, skipped: built.skipped, why: built.why } }
+result.checks = {
+  problems,
+  seedRows,
+  judgeRows,
+  judgeInRepo,
+  build: { lib: built.lib, skipped: built.skipped, why: built.why },
+  eol: { files: eolRows.length, wCrlf: crlfRows.map((l) => l.trim().split(/\s+/).pop()) },
+}
 result.nodeModules = fs.existsSync(path.join(DIR, 'node_modules'))
 result.built = fs.existsSync(built.lib)
 say('')

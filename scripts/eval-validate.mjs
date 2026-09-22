@@ -20,6 +20,8 @@
  * - 改前把原字节备份到 `out/eval-backup/<sha256 前缀>/`，`finally` 里还原并**校验 sha256**；
  *   还原失败 ⇒ 大声报错 + **保留备份**（绝不静默）。
  * - `find` 必须恰好出现 1 次（0 次 = 上游改了/题失效；多次 = 会误伤），否则拒绝执行。
+ *   ★ O76（2026-09-22）：**命中数在 LF 归一化空间里数** —— 被测树是 CRLF 时不再被误判成
+ *   "锚点 0 次"；替换时保持文件自身行尾风格、且只动命中那一段（见下方 `findSpans` 一节）。
  *
  * ## 用法
  *
@@ -125,6 +127,70 @@ function loadTasks() {
   return ONLY ? out.filter((t) => t.id === ONLY) : out
 }
 
+/**
+ * ── ★★ O76：seed 的**行尾容忍**（2026-09-22）───────────────────────────────
+ *
+ * **症状**：被测树里那个文件是 **CRLF**，而 `tasks.jsonl` 的 `find` 写的是 **LF**
+ *   ⇒ 旧实现 `text.split(find).length - 1` 得 **0** ⇒ 题被误判"失效"；
+ *   ★ 更坏的一档：任何**绕过这条校验**的路径都会拿到"seed 打不上 ⇒ oracle 不会红"
+ *   ⇒ **假绿**（任务看起来"本来就修好了"）。这不是假红，是判据变瞎。
+ *   实测（2026-09-22，`out/_wt/w26-fix`）：该文件 **CR=523**，主仓同文件 **CR=0**。
+ *
+ * **口径（不放松任何纪律）**：
+ *   · 匹配在 **LF 归一化空间**里做（两边都把 `\r\n` → `\n`）；
+ *   · **"必须恰好命中 1 次"在同一个空间里数** —— 0 次仍是"题失效"、多次仍是"会误伤"，
+ *     只是**行尾风格不再参与判定**。
+ *
+ * **落盘（保持文件自身风格）**：只改**被命中那一段**，其余字节逐字不动；
+ *   插进去的 `replace` 的行尾风格跟着**那一段在原文件里的风格**走
+ *   （原文件那段是 CRLF ⇒ 插 CRLF；是 LF ⇒ 插 LF）⇒ 不会把一个 CRLF 文件顺手
+ *   改写成"全 LF"或把 LF 文件改成"全 CRLF"（那等于伪造出一大堆无关改动）。
+ */
+const toLf = (s) => String(s).replace(/\r\n/g, '\n')
+
+/**
+ * 在**原文本**里找出（LF 归一化后）的全部命中，并映射回原文本的 `[start,end)` 区间。
+ * 为什么要映射回去：只有这样才能**只动那一段**，其余字节逐字保留。
+ * 归一化只吃 `\r\n`（裸 `\r` 原样留下 —— 不做超出本问题的猜测）。
+ */
+function findSpans(text, find) {
+  const lf = toLf(text)
+  const needle = toLf(find)
+  if (!needle) return []
+  const map = new Array(lf.length + 1)
+  let j = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\r' && text[i + 1] === '\n') continue
+    map[j++] = i
+  }
+  map[lf.length] = text.length
+  const spans = []
+  for (let at = lf.indexOf(needle); at >= 0; at = lf.indexOf(needle, at + 1)) {
+    spans.push([map[at], map[at + needle.length]])
+    if (spans.length > 64) break // 只用于诊断；命中过多时不必数清
+  }
+  return spans
+}
+
+/** 命中数（**在 LF 归一化空间里数** —— 纪律与实现用同一个空间，不许两套口径）。 */
+const countAnchors = (text, find) => findSpans(text, find).length
+
+/** 把 `replace` 的行尾风格对齐到**被命中那一段**在原文件里的风格。 */
+function alignEol(replace, spanText) {
+  return spanText.includes('\r\n')
+    ? String(replace).replace(/\r\n|\n/g, '\r\n')
+    : String(replace).replace(/\r\n/g, '\n')
+}
+
+/** 对**原文本**施加一次 seed 编辑：只替换那一段；命中数 ≠ 1 ⇒ 原样返回（调用方判错）。 */
+function applySeedEdit(text, find, replace) {
+  const spans = findSpans(text, find)
+  if (spans.length !== 1) return { text, spans }
+  const [a, b] = spans[0]
+  // ★ 这里是**字面插入**（不走 `String.replace` 的 `$&`/`$1` 展开），插入什么就是什么。
+  return { text: text.slice(0, a) + alignEol(replace, text.slice(a, b)) + text.slice(b), spans }
+}
+
 /** 结构检查：缺字段 / 锚点出现次数不对 ⇒ 直接判这题不可用。 */
 function checkShape(t) {
   const bad = []
@@ -147,8 +213,14 @@ function checkShape(t) {
       bad.push(`seed 目标不存在：${e.file}`)
       continue
     }
-    const n = fs.readFileSync(abs, 'utf8').split(e.find).length - 1
-    if (n !== 1) bad.push(`seed.find 在 ${e.file} 里出现 ${n} 次（必须恰好 1 次）：${JSON.stringify(String(e.find).slice(0, 60))}`)
+    // ★ O76：命中数在 **LF 归一化空间**里数（与 prepare 用的是同一个函数）——
+    //   CRLF 文件因此不再被误判成"锚点 0 次"，而"恰好 1 次"这条纪律原样保留。
+    const text = fs.readFileSync(abs, 'utf8')
+    const n = countAnchors(text, e.find)
+    if (n !== 1)
+      bad.push(
+        `seed.find 在 ${e.file} 里出现 ${n} 次（必须恰好 1 次；★ 已按 LF 归一化匹配 ⇒ 行尾风格不参与判定）：${JSON.stringify(String(e.find).slice(0, 60))}`,
+      )
     if (e.find === e.replace) bad.push(`seed 的 find/replace 相同（不会改任何东西）：${e.file}`)
   }
   return bad
@@ -190,7 +262,12 @@ function prepare(task) {
       const abs = path.join(REPO, e.file)
       const before = fs.readFileSync(abs)
       const text = before.toString('utf8')
-      const next = text.replace(e.find, e.replace)
+      // ★ O76：LF 归一化匹配 + **只改命中那一段**（文件其余字节逐字不动，
+      //   插入的 replace 跟着那段自身在文件里的行尾风格走）⇒ CRLF 树也能打上 seed。
+      const applied = applySeedEdit(text, e.find, e.replace)
+      if (applied.spans.length !== 1)
+        throw new Error(`seed 锚点未命中恰好 1 次（LF 归一化后 ${applied.spans.length} 次）：${e.file}`)
+      const next = applied.text
       if (next === text) throw new Error(`seed 未产生变化：${e.file}`)
       const backup = path.join(BACKUP_DIR, `${sha(before)}-${path.basename(e.file)}`)
       fs.writeFileSync(backup, before) // ★ 备份的是**改前**字节
