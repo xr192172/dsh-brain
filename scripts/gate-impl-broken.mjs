@@ -10,9 +10,10 @@
  *   `--break l3-status`     （★ 默认）L3 分支【不检查 status】—— 现状，向后兼容
  *   `--break o51-writeback`            transition 【不按契约声明的位置写回】（写到旁挂文件）
  *   `--break o53-receipt`              transition 【只认 receipt.status=="passed"，不要求回执必填字段齐】
+ *   `--break all-hidden`    （★ O57）  注入侧【全封】：`visible` **永远返回 false**（与 l3-status「全放」对称）
  *
  * 不带 `--break` ⇒ 等价于 `--break l3-status`（逐字向后兼容：argv 与契约改动都一样）。
- * 三种模式**互斥**（一次只坏一处）：这样每次跑出来的 FAIL 集合就是"这一处坏法能被几条向量抓到"，
+ * 四种模式**互斥**（一次只坏一处）：这样每次跑出来的 FAIL 集合就是"这一处坏法能被几条向量抓到"，
  * 而不是几种坏法混在一起、说不清是哪条向量在起作用。
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -50,15 +51,44 @@
  *    「回执必填字段可读（至少 proofLevel）」写进契约。本坏法就是**回到 O53 之前的那个洞**。
  *
  * ─────────────────────────────────────────────────────────────────────────────
+ * 坏法④：`all-hidden`（★ O57）—— 与 `l3-status`（"全放"）**对称**的"全封"
+ *
+ *     `visible` **永远返回 false**：任何 status 的节点都进不了注入面。
+ *
+ *     与现状的关系：这是"把门关死"的那种坏法（技能全废），与 `l3-status`（门形同虚设、
+ *     什么都放行）是同一根轴的两端。★ 它**恰好**能被 L0/L3 的**正向对照**抓到：
+ *     L0/L3 的 negative-control（本篇任务文字写作"4 条"，实测当前向量集是
+ *     **L0 的 2 条 + L3 的 4 条 = 6 条**，都期望 `visible:false`）在它下面**全部 PASS**
+ *     ⇒ 只有 `l0-active-highscore-visible` / `l3-active-trigger-match-visible` 会 FAIL
+ *     ⇒ 这正是 O57 要堵的洞（§36.5-3：删掉正向对照 ⇒ 静默全绿）。
+ *
+ *     ★ 为什么这一处用"改契约数据"表达（如实记，含一个实测到的坑）：
+ *       参考实现不硬编码任何状态字面量 ⇒ 「可见/不可见」这条路**只能**从
+ *       `visibility.rules[].requiresStatus` / `conditions` 读。要让两条路径**同时**全封，
+ *       不存在任何一个**合法词汇表取值**可用 —— 5 个状态全都被向量用到
+ *       （L0 用到 active/pending/archived；L3 用到全部 5 个：active/pending/archived/
+ *       invalidated/suspicious）⇒ 无论把 requiresStatus 设成哪个合法值，都会**放出**一批
+ *       本该被挡下的向量（那会变成另一种坏法，不是"全封"）。
+ *       ⇒ 本文件把两条规则的 `requiresStatus` 设成一个**任何合法 status 都不等于**的哨兵
+ *         `__all-hidden__` ⇒ 判定结果对所有合法节点恒为「不可见」= `visible` 永远返回 false。
+ *       实测到的坑：哨兵**不能**用空字符串 —— 参考实现写的是
+ *       `if (rule.requiresStatus && statusOf(node) !== rule.requiresStatus) return false`，
+ *       空串是 falsy ⇒ 那道状态检查会被**跳过**，L0 会退化成"只看 score/useCount"
+ *       （于是全封失败、L0 反而全放）。这是"合法值"之外的第三个陷阱，故记在此处。
+ *       ⚠️ 只改内存，**绝不改 `contract.json` 磁盘文件**（`loadContract()` 每次返回新对象）。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
  * 为什么坏法长这个形状：参考实现是**契约驱动**的 ⇒ 只动数据、不动判定代码
  *
  * 参考实现不硬编码任何阈值/状态字面量（见其 §0）⇒ 「坏法」有两种忠实复现手段，
  * 两者都**只改数据**，两个实现因此共享同一段判定代码，FAIL 时"挂的是哪一条策略"是确定的：
  *
- *   ① 改坏契约（**内存里**）：`l3-status`、`o53-receipt` 用。
+ *   ① 改坏契约（**内存里**）：`l3-status`、`o53-receipt`、★ `all-hidden` 用。
  *      删掉契约里那条判据（L3 的 `requiresStatus`；pending→active 里 `receipt.proofLevel`
  *      的 require + `requireFieldsComplete.atLeast` + `receipt.schema.required`），
  *      等价于"有人把这条要求从策略里删了 / 从没写进去"。
+ *      ★ `all-hidden` 则相反：把两条可见性规则的 `requiresStatus` 换成不可达哨兵
+ *      （见上 §坏法④）——同样是"只动数据"。
  *      ⚠️ 只改内存，**绝不改 `contract.json` 磁盘文件**（`loadContract()` 每次返回新对象）。
  *
  *   ② 改坏写回位置（**argv 里**）：`o51-writeback` 用 —— 因为写回位置**不是**一条"判据"，
@@ -71,7 +101,7 @@
  *      ⇒ stdout 与参考实现逐字一致，差异**只**出现在"runner 按契约读回的那个文件"里。
  *      `gate-vector-run.mjs` 不传 `--state` ⇒ 走的就是契约默认的 in-place 分支。
  *
- * ★ 本文件**只**坏 `--break` 选中的那一处：另外两处照原样继承契约。
+ * ★ 本文件**只**坏 `--break` 选中的那一处：另外几处照原样继承契约（含"不动 `--node`/判据代码"）。
  *
  * ★ 与现状的**刻意的不忠实**（如实记录，报告里也有）：
  *   Go 现状在 L3 之前还有一条更上层的 `if node.Status == "archived" { continue }`，
@@ -91,8 +121,13 @@ import { loadContract, main } from './gate-impl-reference.mjs'
 // ★ O54：`--break` 开关（在 argv 进参考实现之前摘掉 —— 参考实现的 parseArgv 只认契约那几个 flag）
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BREAK_MODES = ['l3-status', 'o51-writeback', 'o53-receipt']
+const BREAK_MODES = ['l3-status', 'o51-writeback', 'o53-receipt', 'all-hidden']
 const DEFAULT_BREAK = 'l3-status'
+
+/** ★ O57：「全封」用的哨兵 —— 值本身不重要，重要的是它**不等于任何合法 status**。
+ *  ⚠️ 不能是空串：参考实现的判据是 `if (rule.requiresStatus && ...)`，空串是 falsy ⇒
+ *     状态检查会被跳过（L0 会退化成"只看 score/useCount"），那就不是"全封"了。 */
+const ALL_HIDDEN_SENTINEL = '__all-hidden__'
 
 /** 用法错（与参考实现的 UsageError 同款语义：输出既有的单行 JSON + 非零退出）。 */
 class ArgError extends Error {}
@@ -111,8 +146,8 @@ function takeBreak(argv) {
       continue
     }
     const val = a === '--break' ? argv[++i] : a.slice('--break='.length)
-    if (val === undefined || val === '') throw new ArgError('参数 --break 缺少取值（应为 l3-status | o51-writeback | o53-receipt）')
-    if (mode !== null) throw new ArgError('参数 --break 只能给一次（三种坏法互斥）')
+    if (val === undefined || val === '') throw new ArgError(`参数 --break 缺少取值（应为 ${BREAK_MODES.join(' | ')}）`)
+    if (mode !== null) throw new ArgError(`参数 --break 只能给一次（四种坏法互斥）`)
     if (!BREAK_MODES.includes(val)) {
       throw new ArgError(`未知 --break 取值 "${val}"（应为 ${BREAK_MODES.join(' | ')}）`)
     }
@@ -142,6 +177,20 @@ function breakContract(contract, mode) {
     rule.require = (rule.require ?? []).filter((q) => q.path !== 'receipt.proofLevel')
     if (rule.requireFieldsComplete) rule.requireFieldsComplete.atLeast = []
     if (contract.receipt?.schema) contract.receipt.schema.required = []
+    return
+  }
+
+  if (mode === 'all-hidden') {
+    // ★★ O57 坏法④：注入侧「全封」—— visible 永远返回 false（与 l3-status「全放」对称）。
+    //    做法（只动数据）：把**每一条**可见性路径的 requiresStatus 换成一个任何合法 status
+    //    都不等于的哨兵 ⇒ L0/L3 两条路径对所有节点都判「不可见」= visible 恒 false。
+    //    ⚠️ 哨兵必须非空（空串是 falsy，会让参考实现跳过整道状态检查 ⇒ 变成"L0 只看分数"）。
+    const rules = contract.visibility?.rules ?? []
+    if (rules.length === 0) {
+      throw new ArgError('坏实现的前提不成立：契约里找不到 visibility.rules（没有注入路径可控 ⇒ 全封无从谈起）')
+    }
+    for (const r of rules) r.requiresStatus = ALL_HIDDEN_SENTINEL
+    return
   }
 }
 

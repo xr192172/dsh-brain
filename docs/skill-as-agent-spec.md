@@ -2066,3 +2066,67 @@ FAIL  vectors-negative-control-has-same-target-positive-pair
 | **O57** | **把配对检查扩到 L0/L3 类**（现在只有 transition 类被机器检查） | 见 36.5-3 |
 | **O58** | **痕迹信号对"换格式重写"会假红** ⇒ 要么换更稳的信号，要么在契约里明确接受该边界 | 见 36.5-1 |
 | **O59** | **"配对规则与 `fileChanged` 双双被删"仍会假绿** ⇒ 需要一条更底层的守卫 | 见 36.5-4 |
+
+---
+
+## 37. ✅ O57 达成：**四类向量的防假绿机器检查齐了**（配对规则扩到 L0/L3 + 对称坏法 `all-hidden`）
+
+### 37.1 交付
+
+| 文件 | 改动 |
+|---|---|
+| `evals/gate/contract.json` | `vectors.pairing` 扩成**按类**声明：`classes.rules` 三条 —— `same-transition-target`（语义不变）/ ★ `same-l0-bucket` / ★ `same-l3-trigger-hit`，每条带 `sameShape` + `why` |
+| `scripts/gate-contract-check.mjs` | **新增 3 项检查**（`vectors-pairing-classes-declared` / `…-l0-negative-controls-have-same-shape-positive` / `…-l3-…`），`--selftest` 新增 5 份坏样本 |
+| ★★ `scripts/gate-impl-broken.mjs` | **新增 `--break all-hidden`** = **"全封"**（`visible` 恒 `false`）—— 与 `l3-status`（"全放"）**对称**的坏法 |
+| `docs/gate-contract.md` | 新增 §12（三类同形定义 + why + 校验项 + 偏严代价 + 边界） |
+
+### 37.2 我的独立复核
+
+| 项 | 结果 |
+|---|---|
+| 契约校验器 | **`失败：0 / 28`** exit 0（25 → 28，报告逐字："**原有检查一项未删（O57 前 25 项 → 现 28 项）**"） |
+| 参考实现 | **`14/14 PASS`** exit 0 |
+| ★ `--break all-hidden` | **exit 1**，**恰好 2 条 FAIL，且正是两条正向**：`l0-active-highscore-visible` / `l3-active-trigger-match-visible`（`expect={"visible":true} got={"visible":false}`）<br>★ runner 自己给出判定：**"门全封 —— pending 挡住了，但 active 也出不来（技能全废）"** |
+| 旧三模式 | **无回退**：`l3-status` 仍 4 条 FAIL；`o51` 仍抓 `fileChanged`（摘要变了）；`o53` 仍抓 `…missing-prooflevel` |
+
+### 37.3 ★★★ 门 4 我亲手复现（两次），且这次**理由正确**
+
+**删 L3 正向对照** ⇒ `EXIT=1`，失败项逐字：
+```
+FAIL  vectors-pairing-l3-negative-controls-have-same-shape-positive
+  · ★★ 配对缺失/无牙（4/4）：这些 l3.negative-control 向量没有满足同形定义
+    （mode="same-l3-trigger-hit"：同 kind + 同 taskHint + 同 ["triggers"] + 只差 status 且正向 status="active" / expect.visible: true）
+    的正向对照 ⇒ l3-pending-trigger-match-hidden（没有任何同 taskHint 的 positive-control）；…
+  ok  vectors-pairing-l0-negative-controls-have-same-shape-positive     ← ★ 另一类仍 ok
+```
+**删 L0 正向对照** ⇒ 同理，红在 L0 那条。
+⇒ ★★ **三条证据说明这次是对的**：
+1. **理由是"配对缺失/无牙"**（不是"读不到"）；
+2. **"同形定义"被完整打印**（`mode` + 同 kind/同 taskHint/同 triggers/只差 status + 正向须 active）⇒ **判据是机器可判的、不是散文**；
+3. **另一类仍 `ok`** ⇒ **检查是精确的，不是"顺手全红"**。
+⇒ ★ **上一轮我自己那个"理由错误的 exit 1"教训，这次被正面处理了**（校验器打出了完整的 28 项报告 ⇒ 证明向量确实读到了）。
+
+### 37.4 子代理另外做的**附加危害自证**（很有价值）
+
+**把两条正向都删掉** ⇒ `--break all-hidden` 跑出 **`12/12 PASS exit 0`（静默全绿）**，
+而**同一份副本被新检查判 `2 FAIL exit 1`** ⇒ ★ **那个洞真实存在，且新规则正好堵上。**
+
+### 37.5 ⚠️ 残留（子代理如实标的三条）
+
+1. **`transition` 仍是弱配对**（只比 `transition.to`，**不比 `from` / `node.status`**）——本次未碰；
+2. **"负向向量被删"不受本规则保护**（配对规则只保证"负向存在时必须有正向"）；
+3. **`sameShape` 的"散文 ↔ 代码"一致性仍无机器检查**（但 `nodeFields` / `positiveStatus` / `requirePairAsserts` 这些**机器可判参数确实在起作用**）。
+
+### 37.6 里程碑
+
+⇒ ★ **至此四类向量都有防假绿的机器检查**：
+**"全放"**（`l3-status`）被负向向量抓、**"全封"**（`all-hidden`）被正向向量抓、
+**"不写回"**（`o51-writeback`）被 `fileChanged` 抓、**"不判回执"**（`o53-receipt`）被缺 `proofLevel` 抓，
+且**每一类都有"配对缺失"这条结构性守卫**防止"对照被删后静默全绿"。
+
+### 37.7 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O60** | **"负向向量被删"无保护** | 见 37.5-2 |
+| **O61** | **`transition` 弱配对**（不比 `from`/`node.status`） | 见 37.5-1 |

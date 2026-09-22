@@ -352,22 +352,25 @@ PASS / FAIL / NEEDS-EVIDENCE，不必再混入第四种「向量集不完整」�
 ## 9. 怎么用
 
 ```bash
-# 校验契约自洽（25 项检查，每项打印「防的是什么」；任一项失效 ⇒ 非零退出）
+# 校验契约自洽（28 项检查，每项打印「防的是什么」；任一项失效 ⇒ 非零退出）
 node scripts/gate-contract-check.mjs
 
-# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 19 份内存坏契约必须被指定规则挡下
+# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 24 份内存坏契约必须被指定规则挡下
 node scripts/gate-contract-check.mjs --selftest
 
 # 校验一份别的契约（例如你把 L3 的 active 要求删掉试试）
 node scripts/gate-contract-check.mjs --contract <path>
 
-# ★ O55：校验另一份**向量集**（例如"把正向对照删掉"的临时副本 ⇒ 必须报「配对缺失」并非零退出）
+# ★ O55 / ★★ O57：校验另一份**向量集**
+#   （例如"把 L3 的正向对照删掉"的临时副本 ⇒ 必须报「配对缺失」并非零退出）
 node scripts/gate-contract-check.mjs --vectors <vectors.json>
 
 # ★ 把契约喂给一份实现（14 条向量；runner 的状态读回约定与写回痕迹机制也都从契约读，O51 + O55）
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-reference.mjs"   # 14/14 PASS ⇒ exit 0
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs"      # 必须有一批 FAIL ⇒ exit 1
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --break o51-writeback"  # ★ 必须挂 fileChanged 那条
+# ★ O57：与 l3-status（"全放"）对称的"全封" —— visible 永远返回 false
+node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --break all-hidden"      # ★ 必须挂 L0/L3 两条正向可见性向量
 ```
 
 **改这份契约时必须跑的三条**：`node scripts/gate-contract-check.mjs`、
@@ -423,3 +426,109 @@ runner 的结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，不必再混
 ★ 本次**只新增/收紧**：原有 22 项检查一项未删（22 + 3 = **25** 项）；
 原有 14 条向量的 `expect`（含 4 条负向）**一个判据都没改**，只**新增** `fileChanged` 字段。
 逐条原始输出见 `out/w18-o55-writeback-trace.md`。
+
+---
+
+## 12. ★★ O57：配对规则扩到 **L0/L3 可见性类**（三类各有一个机器可判的"同形"定义）
+
+**缺口来源**：`docs/skill-as-agent-spec.md` **§36.5 第 3 条**逐字：
+
+> **配对规则只覆盖 `transition` 类** —— **L0/L3 的负向向量也有正向对照，但没有机器检查。**
+
+### 12.1 洞的形状（与 §11 已证的 transition 那侧**同构**）
+
+一个「**全封**」的实现（`visible` **永远返回 false**）⇒ **L0/L3 的 6 条负向向量全部 PASS**
+（L0 的 2 条 + L3 的 4 条 `negative-control`，它们都期望 `visible:false`）
+⇒ **只有同类的那 2 条正向对照能抓到它** ⇒ 若正向被删/被弱化 ⇒ **静默全绿**。
+
+★ **实测过，不是理论**（做法照 §36.4）：把 `l0-active-highscore-visible` 与
+`l3-active-trigger-match-visible` 两条正向对照从临时副本里删掉后，
+`gate-vector-run.mjs --impl "… --break all-hidden"` ⇒ **12/12 PASS、exit 0**；
+★ 同一份副本喂给契约校验器 ⇒ **两条按类配对检查 FAIL、exit 1**。
+（顺带如实记：runner 的「两条关键对照」那一行会打印 `★ 向量缺失，无法判定（这批向量不完整）`，
+但它**不影响退出码** ⇒ 光靠 runner 这条路径是**挡不住**的，所以配对规则必须由契约校验器守。）
+
+### 12.2 三类"同形"定义（`contract.json` → `vectors.pairing.classes.rules`）
+
+| 类 | `mode` | "同形"（机器可判） | 正向对照必须有牙的断言 |
+|---|---|---|---|
+| `transition`（**不动**，O55 原文） | `same-transition-target` | 同 `kind` ∧ 同 `transition.to`（★ **弱配对**：不比 `from` / `node.status` —— §36.5-2 如实记的残留，本次未碰） | `expect.fileChanged: true` |
+| ★ `l0` | `same-l0-bucket` | 同 `kind`(=l0) ∧ 同 `taskHint` ∧ 【`status` 之外、L0 规则读到的节点字段】逐值相等（本契约 = `score` / `useCount`，由 `visibility.rules[level=L0].conditions[*].metric` 决定）∧ 负向那条这些字段**满足 L0 全部 conditions**（`score>0.7 ∧ useCount>10`，即"同档位、都在阈值内"）∧ 两者 `node.status` **不同** ⇒ status 是**唯一自变量** | `expect.visible: true` 且正向 `node.status === requiresStatus`(=`active`) |
+| ★ `l3` | `same-l3-trigger-hit` | 同 `kind`(=l3) ∧ 同 `taskHint`（命中**输入**不变）∧ `triggers` 逐值相等（命中**载体**不变 ⇒ "命中"在两条上同真同假）∧ 两者 `node.status` **不同** ⇒ status 是唯一自变量 | 同上 |
+
+**每条规则都带 `why`（防的是什么）**，逐字写在 `contract.json` 里（校验器会检查 `why` / `sameShape` 非空）。
+`⛔ node.id 不参与比较` —— 向量 id 只是身份，不参与判定（两条向量的 `node.id` 必然不同）。
+
+**为什么 L0 必须把"档位都在阈值内"写进同形定义**（★ 本契约的选择，理由在此）：
+若负向那条的 `score` 本来就低于阈值，它的**不可见不是 `status` 造成的** ⇒ 那样的"配对"无法证明
+L0 路径真的没被全封（**status 这个自变量被稀释了**）。所以 `l0` 类显式声明
+`mustSatisfyRuleConditions: true`，校验器逐条按契约算子判该负向向量的档位。
+
+**为什么 L3 **不**设 `mustSatisfyRuleConditions`**（同样是本契约的选择，理由在此）：
+L3 的 `condition` 只声明了 `{"kind":"triggers-hit-taskHint"}` 而**没有声明命中算法**
+（`gate-impl-reference.mjs` 用的是"大小写不敏感子串包含"，那是**实现选择**）。
+⇒ 校验器**不重造一套算法**去判"命中"（那会把一个未声明的实现选择偷渡进契约）；
+改以「`triggers` + `taskHint` 逐值相等」+「正向对照已被向量断言 `visible:true`」
+= 命中条件**以正向对照为证据**被固定 —— 这已足够把 `status` 隔离成唯一自变量。
+
+### 12.3 守着它的校验项（**25 → 28 项，原有项零删除**）
+
+| 校验项 | 守什么 |
+|---|---|
+| `vectors-pairing-classes-declared` | 按类规则**自身**合法：三类齐 + `requireFor`=`kind.role` + `mode` 在该类白名单内 + `requirePairAsserts`(牙) / `sameShape` / `why` 非空 + `nodeFields` **覆盖该 level 规则真正读到的字段**（L0 需含 `conditions[*].metric`；L3 需含 `triggers`，且契约 L3 规则必须确实声明 `condition.kind = "triggers-hit-taskHint"`）+ `transition` 那一档与顶层 O55 声明的三个值**逐字一致**（防同一档规则两处各写一遍而漂移） |
+| ★ `vectors-pairing-l0-negative-controls-have-same-shape-positive` | 每一条 `l0.negative-control` 必须有一条满足 `same-l0-bucket` 的正向对照；缺一条 ⇒ FAIL + 非零退出，明细**逐条列出缺配对的向量 id**（含"有同 taskHint 的正向对照但都不同形"的具体原因） |
+| ★ `vectors-pairing-l3-negative-controls-have-same-shape-positive` | 同上，`same-l3-trigger-hit` |
+
+★ **缺配对 vs 读不到向量，两种失败必须分得清**（§36.3 的教训）：向量集读不到 ⇒ 报
+`★ 配对检查的向量集不可读：…`；配对缺失 ⇒ 报 `★★ 配对缺失/无牙（n/m）：… ⇒ <逐条 id>`。
+**两者不共用一句文案**，否则又会拿到"理由错误的 exit 1"。
+
+### 12.4 `--break all-hidden`：与 `l3-status`（"全放"）对称的"全封"
+
+`gate-impl-broken.mjs --break all-hidden` ⇒ `visible` **永远返回 false**。
+表达方式仍是"**只动数据**"（该文件 §坏法④ 逐字记了理由）：把**每一条**可见性路径的
+`requiresStatus` 换成一个任何合法 `status` 都不等于的哨兵 `__all-hidden__`。
+
+- ★ **为什么不存在"合法的全封值"**：`states.values` 的 5 个状态**全都被向量用到**
+  （L0 用到 `active`/`pending`/`archived`；L3 用到全部 5 个）⇒ 把 `requiresStatus` 设成任何
+  **合法**取值都会**放出**一批本该被挡下的向量（那就变成另一种坏法，不是"全封"）
+  ⇒ 只能用哨兵。
+- ⚠️ **实测到的第三个陷阱**：哨兵**不能**用空串 —— 参考实现的判据是
+  `if (rule.requiresStatus && statusOf(node) !== rule.requiresStatus) return false`，
+  空串是 falsy ⇒ 那道状态检查会被**跳过**，L0 反而退化成"只看 `score`/`useCount`"（**全放**）。
+- 实测（`—break all-hidden`）：**2 FAIL**，且正好是 `l0-active-highscore-visible` 与
+  `l3-active-trigger-match-visible` 两条正向可见性向量；runner 自己的判定行也打印
+  `★★ 判定：门全封 —— pending 挡住了，但 active 也出不来（技能全废）`。
+- ★ **旧模式不得回退**（实测，未回退）：`l3-status` 仍 4 条向量 FAIL（且**默认、`--break l3-status`
+  两种跑法的逐向量结果逐字节相同**，只有一行回显的 `impl` 命令不同）；
+  `o51-writeback` 仍挂 `fileChanged(写回痕迹 file-digest/sha256)`；`o53-receipt` 仍挂 `…missing-prooflevel`。
+
+### 12.5 自检里新增的坏样本（19 → **24** 份，`--selftest` 全部被指定规则挡下）
+
+| 坏样本 | 期望被挡下的规则 |
+|---|---|
+| ★★ 删掉 L0 的正向对照 `l0-active-highscore-visible` | `vectors-pairing-l0-…-same-shape-positive` |
+| ★★ 删掉 L3 的正向对照 `l3-active-trigger-match-visible` | `vectors-pairing-l3-…-same-shape-positive` |
+| ★ L0 正向对照还在，但 `expect.visible` 改成 `false`（**配对无牙**） | 同上（L0）|
+| ★ L0 负向向量的档位改到阈值外（`score 0.9 → 0.5`，**同形判据被破坏**） | 同上（L0）|
+| ★ 契约没声明按类配对（删掉 `vectors.pairing.classes`） | 三条按类检查**全部 FAIL**（★ 不许"规则没声明就静默跳过"）|
+
+### 12.6 如实记的边界与代价
+
+1. ★ **偏严方向**：`l0`/`l3` 类现在**无条件**要求每条 `negative-control` 有一条同形正向对照。
+   若将来有人加一条**不是由 `status` 造成**的 L0/L3 负向向量（例如"分/次不达标 ⇒ 不可见"），
+   这条规则会**报"配对缺失"**并要求他补一条同形正向对照（或改判据）。
+   ★ 这是**故意**的：任何 `expect.visible:false` 的 L0/L3 向量都**天然**被「全封」实现满足，
+   ⇒ 它**必须**有能分辨"门没漏 / 全封"的正向对照，否则又是静默全绿。
+2. ★ `transition` 类**仍是弱配对**（只比 `transition.to`，不比 `from` / `node.status`）——
+   §36.5-2 的残留**本次未闭合**（本任务只做"扩到 L0/L3"，没动 O55 那一档的语义）。
+3. ★ **`nodeFields` 的覆盖性是"下界"不是"上界"**：校验器只核对声明的 `nodeFields`
+   **至少覆盖**该 level 规则读到的字段；若有人把额外字段塞进 `nodeFields`，两条向量会变得
+   **更难配对**（更严，不是更松）⇒ 不会产生假绿。
+4. ★ **本次没有改 `evals/gate/vectors.json`**：14 条向量一条未增未改（`expect` 一个都没动）——
+   L0/L3 的正向对照**本来就在**，缺的只是"它们必须存在"这条**机器检查**。
+5. ★ 本轮**顺带发现**（未闭合，供后续参考）：`gate-vector-run.mjs` 的「两条关键对照」那行
+   在向量缺失时会打印 `★ 向量缺失，无法判定`，但**不改变退出码**；
+   ⇒ 「向量集完整性」这条信号**只有契约校验器有牙**（这也是它被放在那里的理由，§11 已记）。
+
+逐条原始输出见 `out/w19-o57-pairing-l0-l3.md`。

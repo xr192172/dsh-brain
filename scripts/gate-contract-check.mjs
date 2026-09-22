@@ -31,7 +31,11 @@
  *   回执缺 proofLevel、词汇表缺 pending、词表重复、迁移丢了 passed 要求、可见性未声明 L3、
  *   实现协议 stdout 形状坏、★ 没声明状态写回约定(O51)、不可见集漏 invalidated/suspicious(O52)、
  *   迁移没要求回执必填字段可读(O53)、★ 没声明写回痕迹机制(O55)、★ 没声明向量配对规则(O55)、
- *   ★★ 删掉正负对照那条正向向量(O55)、★ 正向对照在但没带 fileChanged 断言(O55)），
+ *   ★★ 删掉正负对照那条正向向量(O55)、★ 正向对照在但没带 fileChanged 断言(O55)、
+ *   ★★ O57 按类配对：删掉 L0 的正向对照、★★ 删掉 L3 的正向对照、
+ *   ★ L0 正向对照的 expect.visible 被改成 false（配对无牙）、
+ *   ★ L0 负向向量的档位被改到阈值外（"同档位/只差 status"这条同形判据被破坏）、
+ *   ★ 契约没声明按类配对 rules(O57)），
  *   断言校验器**会拒绝**，并打印每份坏契约被**哪条规则**挡下。
  *   ★ 同时跑一份**阳性对照**（未改动的真契约必须全过）——否则"全红"的校验器也能通过自检，
  *     那是"过度封锁"，与"假绿"同等有害。
@@ -72,8 +76,223 @@ const REQUIRED_RECEIPT_FIELD_FOR_ADOPTION = 'proofLevel'
 /** ★ O55：本契约选定的写回痕迹机制（kind / scope 必须逐字是这两个值：痕迹只能取自 runner 读回的那份文件）。 */
 const EVIDENCE_KIND = 'file-digest'
 const EVIDENCE_SCOPE = 'declared-writeback-file'
-/** ★ O55：向量配对规则允许的模式（目前只有"同 transition.to"这一种）。 */
+/** ★ O55：向量配对规则允许的模式（目前只有"同 transition.to"这一种）。★ O57 保持原样不动：
+ *  这是**顶层那一档**（transition）的判据 —— 不许因为新增了两类就把旧档也放行。 */
 const PAIR_MODES = ['same-transition-target']
+/** ★ O57：配对规则必须按类覆盖这三类（transition 迁移 / l0 = L0 注入 / l3 = L3 注入）。 */
+const REQUIRED_PAIR_CLASSES = ['transition', 'l0', 'l3']
+/** ★ O57：每类允许的 mode（"同形"的判据名字；判据本体在本文件里，契约只声明用哪种）。 */
+const CLASS_PAIR_MODES = {
+  transition: ['same-transition-target'],
+  l0: ['same-l0-bucket'],
+  l3: ['same-l3-trigger-hit'],
+}
+/** ★ O57：可见性类的 kind → 契约 visibility.rules 里的 level。 */
+const CLASS_LEVEL = { l0: 'L0', l3: 'L3' }
+/** ★ O57：契约 L3 规则声明的命中条件 kind（校验器据此推导"命中载体字段"，**不重造命中算法**）。 */
+const L3_CONDITION_KIND = 'triggers-hit-taskHint'
+/** ★ O57：由 L3_CONDITION_KIND 推导出的命中载体字段名。 */
+const L3_TRIGGER_FIELD = 'triggers'
+
+// ── ★ O57：按类配对检查用的小工具 ────────────────────────────────────────────
+
+/**
+ * ★ O57：按契约声明的算子比较（用于「该负向向量的档位都在阈值内」这条同形判据）。
+ * ★ 返回 null 表示契约里出现**本校验器不支持的算子** ⇒ 调用方必须判 FAIL，
+ *   绝不能把"不认识"当成"满足"（那会静默放过一条判据）。
+ */
+function cmpOp(op, actual, expected) {
+  switch (op) {
+    case '>': return actual > expected
+    case '>=': return actual >= expected
+    case '<': return actual < expected
+    case '<=': return actual <= expected
+    case '==': return actual === expected
+    case '!=': return actual !== expected
+    case 'in': return Array.isArray(expected) && expected.includes(actual)
+    default: return null
+  }
+}
+
+/** 逐值相等（数组/对象用 JSON 形式比；向量里只有标量与字符串数组，顺序即语义）。 */
+function sameJson(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * ★ O57：校验一条**按类**配对规则自身的合法性。
+ * ★ 关键的一条是「nodeFields 必须覆盖该 level 的可见性规则真正读到的字段」——
+ *   否则「同形」会在契约那侧被悄悄放宽（例如删掉 useCount，两个不同档位的向量也算同形）。
+ * @param {object} cr 契约 vectors.pairing.classes.rules 里的一条
+ * @param {{legacy:{requireFor:string,mode:string,requirePairAsserts:string}, l0Metrics:string[], l3CondKind:string}} ctx
+ * @returns {string[]} 问题清单（空 = 合法）
+ */
+function validatePairClassRule(cr, ctx) {
+  const bad = []
+  const cls = cr?.class
+  const modes = CLASS_PAIR_MODES[cls]
+  if (typeof cls !== 'string' || !REQUIRED_PAIR_CLASSES.includes(cls)) return [`class=${JSON.stringify(cls)} 不是 ${JSON.stringify(REQUIRED_PAIR_CLASSES)} 之一`]
+  if (typeof cr?.kind !== 'string' || cr.kind.trim() === '') bad.push(`缺 kind（现为 ${JSON.stringify(cr?.kind)}）`)
+  if (typeof cr?.role !== 'string' || cr.role.trim() === '') bad.push(`缺 role（现为 ${JSON.stringify(cr?.role)}）`)
+  if (cr?.requireFor !== `${cr?.kind}.${cr?.role}`) {
+    bad.push(`requireFor=${JSON.stringify(cr?.requireFor)} 必须逐字等于 "kind.role" = ${JSON.stringify(`${cr?.kind}.${cr?.role}`)}`)
+  }
+  if (!Array.isArray(modes) || !modes.includes(cr?.mode)) {
+    bad.push(`mode=${JSON.stringify(cr?.mode)} 不在 ${JSON.stringify(modes)} 里`)
+  }
+  if (typeof cr?.requirePairAsserts !== 'string' || cr.requirePairAsserts.trim() === '') {
+    bad.push(`缺 requirePairAsserts（"有牙"的断言字段名）`)
+  }
+  if (typeof cr?.sameShape !== 'string' || cr.sameShape.trim() === '') {
+    bad.push('缺 sameShape（"同形"的机器可判定义 —— 不许只在文档里写）')
+  }
+  if (typeof cr?.why !== 'string' || cr.why.trim() === '') {
+    bad.push('缺 why（防的是什么）')
+  }
+
+  if (cls === 'transition') {
+    // ★ 顶层那档（O55）与按类这档必须是同一套值 —— 否则同一档规则在两处各写一遍，必然漂移。
+    if (cr.requireFor !== ctx?.legacy?.requireFor) bad.push(`与顶层 requireFor=${JSON.stringify(ctx?.legacy?.requireFor)} 不一致（漂移）`)
+    if (cr.mode !== ctx?.legacy?.mode) bad.push(`与顶层 mode=${JSON.stringify(ctx?.legacy?.mode)} 不一致（漂移）`)
+    if (cr.requirePairAsserts !== ctx?.legacy?.requirePairAsserts) bad.push(`与顶层 requirePairAsserts=${JSON.stringify(ctx?.legacy?.requirePairAsserts)} 不一致（漂移）`)
+    return bad
+  }
+
+  // ── 可见性类（l0 / l3）──
+  if (cr?.level !== CLASS_LEVEL[cls]) bad.push(`level=${JSON.stringify(cr?.level)} 必须是 ${JSON.stringify(CLASS_LEVEL[cls])}`)
+  if (cr?.statusField !== 'status') bad.push(`statusField=${JSON.stringify(cr?.statusField)} 必须是 "status"（唯一自变量就是它）`)
+  if (typeof cr?.positiveStatus !== 'string' || cr.positiveStatus.trim() === '') {
+    bad.push('缺 positiveStatus（正向对照必须是哪个状态）')
+  }
+  const nodeFields = Array.isArray(cr?.nodeFields) ? cr.nodeFields : null
+  if (!nodeFields || nodeFields.length === 0) {
+    bad.push('缺 nodeFields（除 status 外必须逐值相等的节点字段清单）')
+  } else if (nodeFields.includes('status')) {
+    bad.push('nodeFields 里含 "status" —— status 是**唯一自变量**，必须排除在"相等字段"之外')
+  } else if (cls === 'l0') {
+    if (!Array.isArray(ctx?.l0Metrics) || ctx.l0Metrics.length === 0) {
+      bad.push('契约的 visibility.rules[level="L0"] 没有 conditions[*].metric ⇒ 无法验证"同档位"，也无法推导 nodeFields')
+    } else {
+      const missing = ctx.l0Metrics.filter((m) => !nodeFields.includes(m))
+      if (missing.length) bad.push(`nodeFields 未覆盖 L0 规则读到的字段：${JSON.stringify(missing)}（现为 ${JSON.stringify(nodeFields)}）`)
+    }
+    if (cr.mustSatisfyRuleConditions !== true) {
+      bad.push('l0 类必须声明 mustSatisfyRuleConditions: true —— 否则"同档位（score/useCount 都 > 阈值）"这条同形判据没有牙，status 这个自变量被稀释')
+    }
+  } else if (cls === 'l3') {
+    if (ctx?.l3CondKind !== L3_CONDITION_KIND) {
+      bad.push(`契约的 visibility.rules[level="L3"].condition.kind=${JSON.stringify(ctx?.l3CondKind)} 不等于 ${JSON.stringify(L3_CONDITION_KIND)} ⇒ 校验器的"命中载体字段=${L3_TRIGGER_FIELD}"推导失效（要么改契约要么改本校验器）`)
+    }
+    if (!nodeFields.includes(L3_TRIGGER_FIELD)) {
+      bad.push(`nodeFields 未覆盖命中载体字段 ${JSON.stringify(L3_TRIGGER_FIELD)}（现为 ${JSON.stringify(nodeFields)}）`)
+    }
+  }
+  return bad
+}
+
+/**
+ * ★ O57：一类（l0 / l3）的配对检查 —— 每一条 negative-control 必须存在一条**同形**正向对照。
+ * 同形判据（机器可判，逐字对应契约该类的 sameShape）：
+ *   ① 同 kind ∧ 同 role 过滤；② 同 taskHint；③ nodeFields 逐值相等（status 除外）；
+ *   ④ 负向那条的非 status 字段满足该 level 规则的全部 conditions（l0 的"同档位"）；
+ *   ⑤ 正向那条 node.status === positiveStatus(active)；⑥ 两者 status 不同（唯一自变量）；
+ *   ⑦ 正向那条 expect.<assert> === true；⑧ 负向那条 expect.<assert> === false。
+ * @returns {{ok:boolean, detail:string}}
+ */
+function checkClassPairing(cr, all, vectorsRes, ctx) {
+  const assertField = cr?.requirePairAsserts
+  const stField = cr?.statusField
+  const nodeFields = Array.isArray(cr?.nodeFields) ? cr.nodeFields : []
+  const negatives = all.filter((x) => x?.kind === cr?.kind && x?.role === cr?.role)
+  const positives = all.filter((x) => x?.kind === cr?.kind && x?.role === 'positive-control')
+  const modeLabel = `mode=${JSON.stringify(cr?.mode)}`
+
+  if (negatives.length === 0) {
+    return {
+      ok: false,
+      detail: `★ 向量集里一条 kind=${JSON.stringify(cr?.kind)} role=${JSON.stringify(cr?.role)} 的向量都没有 ⇒ 这条配对规则被架空（空判也能"通过"）`,
+    }
+  }
+
+  const source = vectorsRes?.source ?? '(内存注入)'
+  const problems = []
+  let paired = 0
+  for (const n of negatives) {
+    if (typeof n?.taskHint !== 'string') {
+      problems.push(`${n?.id}（该向量缺 taskHint ⇒ 无法判定"同 taskHint"）`)
+      continue
+    }
+    if (n?.expect?.[assertField] !== false) {
+      problems.push(`${n?.id}（该 negative-control 没有 expect.${assertField}: false ⇒ 它不是"应当不可见"的负向向量，配对无从谈起）`)
+      continue
+    }
+    // ④ l0 的"同档位"：负向那条的非 status 字段本来就在阈值内 ⇒ 不可见只能是 status 造成的
+    if (cr?.mustSatisfyRuleConditions) {
+      const rule = ctx?.visibilityRule ?? null
+      const conds = Array.isArray(rule?.conditions) ? rule.conditions : []
+      if (conds.length === 0) {
+        problems.push(`${n?.id}（契约 ${cr.level} 规则没有 conditions ⇒ "同档位"无从判定）`)
+        continue
+      }
+      const unmet = []
+      for (const c of conds) {
+        const got = cmpOp(c?.op, n?.node?.[c?.metric], c?.value)
+        if (got === null) unmet.push(`${c?.metric} ${c?.op} ${JSON.stringify(c?.value)}（校验器不支持该算子）`)
+        else if (got !== true) unmet.push(`${c?.metric}(${JSON.stringify(n?.node?.[c?.metric])}) 不满足 ${c?.op} ${JSON.stringify(c?.value)}`)
+      }
+      if (unmet.length) {
+        problems.push(`${n?.id}（该负向向量不满足 ${cr.level} 规则的 conditions：${unmet.join('；')} ⇒ 它的不可见不是 status 造成的，不是"同形"）`)
+        continue
+      }
+    }
+
+    const nStatus = stField ? n?.node?.[stField] : undefined
+    const cands = positives.filter((p) => p?.taskHint === n.taskHint)
+    const rej = []
+    let pair = null
+    for (const p of cands) {
+      const pStatus = stField ? p?.node?.[stField] : undefined
+      if (pStatus !== cr?.positiveStatus) {
+        rej.push(`${p?.id}：node.${stField}=${JSON.stringify(pStatus)} ≠ ${JSON.stringify(cr?.positiveStatus)}`)
+        continue
+      }
+      if (stField && nStatus === pStatus) {
+        rej.push(`${p?.id}：与负向向量同 status=${JSON.stringify(nStatus)}（status 不是唯一自变量）`)
+        continue
+      }
+      const diff = nodeFields.filter((f) => !sameJson(p?.node?.[f], n?.node?.[f]))
+      if (diff.length) {
+        rej.push(`${p?.id}：字段 ${diff.join(' / ')} 与负向向量不同（非同形）`)
+        continue
+      }
+      if (p?.expect?.[assertField] !== true) {
+        rej.push(`${p?.id}：缺 expect.${assertField}: true（配对无牙）`)
+        continue
+      }
+      pair = p
+      break
+    }
+    if (!pair) {
+      const tail = cands.length
+        ? `有 ${cands.length} 条同 taskHint 的 positive-control 但都不满足同形：${rej.slice(0, 3).join('；')}`
+        : '没有任何同 taskHint 的 positive-control'
+      problems.push(`${n?.id}（${tail}）`)
+    } else {
+      paired += 1
+    }
+  }
+
+  if (problems.length) {
+    return {
+      ok: false,
+      detail: `★★ 配对缺失/无牙（${negatives.length - paired}/${negatives.length}）：这些 ${cr.requireFor} 向量没有满足同形定义（${modeLabel}：同 kind + 同 taskHint + 同 ${JSON.stringify(nodeFields)} + 只差 ${stField} 且正向 status=${JSON.stringify(cr.positiveStatus)} / expect.${assertField}: true${cr.mustSatisfyRuleConditions ? ' / 负向档位在阈值内' : ''}）的正向对照 ⇒ ${problems.join('；')}`,
+    }
+  }
+  return {
+    ok: true,
+    detail: `配对完整：${negatives.length} 条 ${cr.requireFor} 各自有一条满足同形定义的正向对照（${modeLabel}；同 kind + 同 taskHint + 同 ${JSON.stringify(nodeFields)} + 只差 ${stField}，正向 status=${JSON.stringify(cr.positiveStatus)} 且带 expect.${assertField}: true）；向量来源 ${source}`,
+  }
+}
 
 // ── 校验器主体 ──────────────────────────────────────────────────────────────
 
@@ -439,6 +658,79 @@ function checkContract(c, opts = {}) {
     pairDetail,
   )
 
+  // ══ G. ★★ O57：配对规则**按类**（transition / L0 / L3） ═══════════════════
+  //    问题（spec §36.5-3 逐字）：「配对规则只覆盖 transition 类 —— L0/L3 的负向向量也有
+  //    正向对照，但没有机器检查。」
+  //    失败形状（与 §36.4 已证的 transition 那侧同构）：一个「全封」的实现
+  //    （visible 永远返回 false）⇒ 4 条 L0/L3 negative-control 全部 PASS（它们期望
+  //    visible:false）⇒ 只有同类的那条正向对照能抓到它 ⇒ 若那条正向被删/被弱化
+  //    ⇒ **静默全绿**。⇒ 所以「每条该类负向向量必须有一条同形正向对照」也必须是机器检查的规则。
+
+  const classesDecl = pairing?.classes
+  const classRules = Array.isArray(classesDecl?.rules) ? classesDecl.rules : []
+  const ruleOfLevel = (lv) => vRules.find((r) => r?.level === lv)
+  const l0Rule = ruleOfLevel('L0')
+  const l3Rule = ruleOfLevel('L3')
+  const l0Metrics = (Array.isArray(l0Rule?.conditions) ? l0Rule.conditions : [])
+    .map((x) => x?.metric)
+    .filter((m) => typeof m === 'string' && m.trim() !== '')
+  const l3CondKind = l3Rule?.condition?.kind
+
+  const classProblems = []
+  const presentClasses = []
+  for (const cls of REQUIRED_PAIR_CLASSES) {
+    const cr = classRules.find((x) => x?.class === cls)
+    if (!cr) {
+      classProblems.push(`缺 ${cls} 类的配对规则（只覆盖 transition ⇒ L0/L3 是否有同形正向对照没人管）`)
+      continue
+    }
+    presentClasses.push(cls)
+    classProblems.push(
+      ...validatePairClassRule(cr, {
+        legacy: { requireFor, mode: pairMode, requirePairAsserts: pairAssert },
+        l0Metrics,
+        l3CondKind,
+      }).map((p) => `${cls}: ${p}`),
+    )
+  }
+  const strayClasses = classRules.map((x) => x?.class).filter((x) => !REQUIRED_PAIR_CLASSES.includes(x))
+  if (strayClasses.length) classProblems.push(`出现未支持的 class：${JSON.stringify(strayClasses)}`)
+  add(
+    'vectors-pairing-classes-declared',
+    classProblems.length === 0,
+    '★ O57：配对规则必须**按类**声明且"同形"必须机器可判 —— 每类要有 requireFor(kind.role) / mode / requirePairAsserts(牙) / sameShape(同形定义) / why，且 nodeFields 必须覆盖该 level 的可见性规则真正读到的字段（否则"同形"会被悄悄放宽）。transition 那一档还必须与顶层 O55 声明的值逐字一致（同一档规则不许两处各写一遍而漂移）。',
+    classProblems.length
+      ? `vectors.pairing.classes 不合格：${classProblems.join('；')}`
+      : `按类配对规则齐：${presentClasses.join(' / ')}；nodeFields 覆盖性已核对（L0 需含 ${JSON.stringify(l0Metrics)}、L3 需含 ${JSON.stringify(L3_TRIGGER_FIELD)}）`,
+  )
+
+  for (const cls of ['l0', 'l3']) {
+    const cr = classRules.find((x) => x?.class === cls)
+    const id = `vectors-pairing-${cls}-negative-controls-have-same-shape-positive`
+    const level = CLASS_LEVEL[cls]
+    let res
+    if (!cr) {
+      res = {
+        ok: false,
+        detail: `★ 契约没声明 ${cls} 类的配对规则 ⇒ 无法验证「每条 ${cls}.negative-control 都有同形正向对照」（**不静默跳过**：跳过就等于这条检查不存在）`,
+      }
+    } else if (vres.error) {
+      res = { ok: false, detail: `★ 配对检查的向量集不可读：${vres.error}` }
+    } else if (!Array.isArray(vres.data?.cases)) {
+      res = { ok: false, detail: `★ 向量集里没有 cases 数组（${vres.source ?? '(来源未知)'}）⇒ 无法验证配对` }
+    } else {
+      res = checkClassPairing(cr, vres.data.cases, vres, { visibilityRule: ruleOfLevel(level) })
+    }
+    add(
+      id,
+      res.ok,
+      cls === 'l0'
+        ? '★★ O57（§36.5-3）：L0 的 2 条 negative-control（pending / archived，score 0.9 ∧ useCount 20 都达标）期望 visible:false ⇒ 一个「visible 恒 false」的**全封**实现【同样满足】⇒ 这套负向判据只靠那条正向对照 l0-active-highscore-visible 才能分辨「门没漏」与「全封」⇒ 删掉或弱化它 = 静默全绿。⇒ 每条 l0 类负向向量都必须存在一条**同 kind + 同 taskHint + 同 score/useCount（且都在阈值内）+ 只差 status** 且 node.status=active / expect.visible:true 的正向对照；缺一条即不合格、非零退出。'
+        : '★★ O57（§36.5-3）：L3 的 4 条 negative-control（pending / archived / invalidated / suspicious，triggers 与 taskHint 逐值相同）期望 visible:false ⇒ 全封实现同样全过 ⇒ 只靠正向对照 l3-active-trigger-match-visible 分辨 ⇒ 删掉或弱化它 = 静默全绿；而 L3 正是本契约最不能少的一条路径（§4：现状 skill_tree.go:1054+ 的 L3 分支完全不检查 Status）。⇒ 每条 l3 类负向向量都必须存在一条**同 kind + 同 taskHint + 同 triggers + 只差 status** 且 node.status=active / expect.visible:true 的正向对照；缺一条即不合格、非零退出。',
+      res.detail,
+    )
+  }
+
   return { checks }
 }
 
@@ -607,6 +899,56 @@ const BAD_CASES = [
     mutateVectors: (v) => {
       const p = v.cases.find((x) => x.id === 'transition-pending-to-active-receipt-passed')
       delete p.expect.fileChanged
+    },
+  },
+  {
+    name: '★★ O57：删掉 L0 的那条正向对照（l0-active-highscore-visible）',
+    why: '§36.5-3：L0 的负向向量（pending / archived，都期望 visible:false）在「全封」实现下全过 ⇒ 删掉正向对照就只剩静默全绿。⇒ L0 配对检查必须报「配对缺失」并非零退出。',
+    expect: ['vectors-pairing-l0-negative-controls-have-same-shape-positive'],
+    mutate: () => {},
+    mutateVectors: (v) => {
+      v.cases = v.cases.filter((x) => x.id !== 'l0-active-highscore-visible')
+    },
+  },
+  {
+    name: '★★ O57：删掉 L3 的那条正向对照（l3-active-trigger-match-visible）',
+    why: '§36.5-3：L3 有 4 条负向向量（全期望 visible:false）⇒ 删掉正向对照后「全封」实现 14/14 PASS。⇒ L3 配对检查必须报「配对缺失」并非零退出。',
+    expect: ['vectors-pairing-l3-negative-controls-have-same-shape-positive'],
+    mutate: () => {},
+    mutateVectors: (v) => {
+      v.cases = v.cases.filter((x) => x.id !== 'l3-active-trigger-match-visible')
+    },
+  },
+  {
+    name: '★ O57：L0 正向对照还在，但把它的 expect.visible 改成 false（配对无牙）',
+    why: '正向对照不再断言"应当可见" ⇒ 它抓不到「全封」= 有对照但没牙。',
+    expect: ['vectors-pairing-l0-negative-controls-have-same-shape-positive'],
+    mutate: () => {},
+    mutateVectors: (v) => {
+      const p = v.cases.find((x) => x.id === 'l0-active-highscore-visible')
+      p.expect.visible = false
+    },
+  },
+  {
+    name: '★ O57：把 L0 负向向量的档位改到阈值外（score 0.9 → 0.5）',
+    why: '负向那条的不可见不再由 status 造成 ⇒ 它既不与 L0 正向对照同形、也不满足该 level 的 conditions ⇒ 不能证明"只差 status" ⇒ 必须报非同形/缺配对（不许静默当作配对成立）。',
+    expect: ['vectors-pairing-l0-negative-controls-have-same-shape-positive'],
+    mutate: () => {},
+    mutateVectors: (v) => {
+      const n = v.cases.find((x) => x.id === 'l0-pending-highscore-hidden')
+      n.node.score = 0.5
+    },
+  },
+  {
+    name: '★ O57：契约没声明按类配对（删掉 vectors.pairing.classes）',
+    why: '按类规则不存在 ⇒ L0/L3 的配对是否有机器检查这件事本身就没人守。★ 三条按类检查必须**跟着 FAIL**（不许因为"规则没声明"就静默跳过）。',
+    expect: [
+      'vectors-pairing-classes-declared',
+      'vectors-pairing-l0-negative-controls-have-same-shape-positive',
+      'vectors-pairing-l3-negative-controls-have-same-shape-positive',
+    ],
+    mutate: (c) => {
+      delete c.vectors.pairing.classes
     },
   },
 ]
@@ -790,16 +1132,23 @@ const O55_ADDED = [
   'vectors-negative-control-has-same-target-positive-pair',
 ]
 const nO55 = checks.filter((x) => O55_ADDED.includes(x.id)).length
+// ★ O57：把配对检查从 transition 类扩到 L0/L3 可见性类（三条新检查）
+const O57_ADDED = [
+  'vectors-pairing-classes-declared',
+  'vectors-pairing-l0-negative-controls-have-same-shape-positive',
+  'vectors-pairing-l3-negative-controls-have-same-shape-positive',
+]
+const nO57 = checks.filter((x) => O57_ADDED.includes(x.id)).length
 
 console.log('门契约校验 · dsh-gate-contract/v1')
 console.log('═'.repeat(72))
 console.log(`契约文件：${contractFile}`)
 console.log(`JSON 解析：✅ 成功（本脚本用 node 的 JSON.parse 读了一遍：${rawBytes.length} 字节，顶层键 ${Object.keys(contract).length} 个：${Object.keys(contract).join(', ')}）`)
 console.log(`向量集：${vectorsArg ? '（--vectors 指定）' : '（按契约 vectors.pairing.vectorsFile）'}${vectorsInput.source ?? '(未声明)'}${vectorsInput.error ? ` ❌ ${vectorsInput.error}` : ''}`)
-console.log(`目标：契约必须**自洽** —— 词汇表单一来源 / 回执不撒谎 / 迁移有门 / 两条注入路径都要求 active / 实现协议可断言 / ★ 写回痕迹与向量配对都已被声明(O55)`)
+console.log(`目标：契约必须**自洽** —— 词汇表单一来源 / 回执不撒谎 / 迁移有门 / 两条注入路径都要求 active / 实现协议可断言 / ★ 写回痕迹与向量配对都已被声明(O55) / ★★ 配对规则按类覆盖 transition + L0 + L3(O57)`)
 console.log(`每项都打印「防的是什么」；任一项不满足 ⇒ 非零退出。
 `)
-console.log(`共 ${checks.length} 项检查：★ 其中 O55 新增 ${nO55} 项（${O55_ADDED.join(' / ')}）⇒ 原有检查一项未删。`)
+console.log(`共 ${checks.length} 项检查：★ 其中 O55 新增 ${nO55} 项（${O55_ADDED.join(' / ')}）；★ O57 新增 ${nO57} 项（${O57_ADDED.join(' / ')}）⇒ 原有检查一项未删（O57 前 25 项 → 现 ${checks.length} 项）。`)
 console.log('')
 printReport(checks, { verbose: true })
 console.log('')

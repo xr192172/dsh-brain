@@ -183,7 +183,57 @@
       "vectorsFile": "evals/gate/vectors.json",
       "requirePairAsserts": "fileChanged",
       "why": "★ O55（§35.4 的核心）：4 条负向迁移向量都期望 statusUnchanged:true，而一个「从不写回」的实现同样满足（读不到 = 没变）⇒ 这批负向判据**只**靠那条正向对照 transition-pending-to-active-receipt-passed 才能分辨这类错误 ⇒ 删掉它，这类错误就【全绿通过】。⇒ 所以「每条 transition 类的 negative-control 向量都必须有一条【同 transition.to】的 positive-control 向量」必须是一条**机器检查的配对规则**，且那条正向对照必须**真的带 fileChanged 断言**（否则配对只是形式，仍旧靠不住）。缺配对 ⇒ 判不合格、非零退出（不许静默全绿）。",
-      "whichCheck": "gate-contract-check.mjs → vectors-negative-control-has-same-target-positive-pair（放在契约校验器而不是 runner：这条是 contract.json 自己声明的规则，由契约的校验器守住；且它是【向量集是否完备】的静态检查，与跑哪个实现无关 —— runner 的三种结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，不再混入第四种「向量集不完整」。）"
+      "whichCheck": "gate-contract-check.mjs → vectors-negative-control-has-same-target-positive-pair（放在契约校验器而不是 runner：这条是 contract.json 自己声明的规则，由契约的校验器守住；且它是【向量集是否完备】的静态检查，与跑哪个实现无关 —— runner 的三种结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，不再混入第四种「向量集不完整」。）",
+
+      "classes": {
+        "note": "★ O57（§36.5-3）：把配对规则从「只有 transition 一类」扩成【按类声明】。上面顶层的 requireFor / mode / requirePairAsserts 三个字段**语义不变**（= 本节 rules[class=transition] 那一档，向后兼容：老检查 vectors-pairing-rule-declared + vectors-negative-control-has-same-target-positive-pair 照旧读它们）；本节新增的按类检查会要求两者【逐字一致】，防同一档规则在两处各写一遍而漂移。",
+        "whatIsMachineChecked": "每一类各有一条检查：该类（kind + role）的**每一条** negative-control 向量，都必须存在一条满足该类 sameShape 定义的 positive-control 正向对照；缺一条 ⇒ FAIL + 非零退出，明细逐条列出缺配对的向量 id。检查项 id：vectors-pairing-classes-declared（本节自身的合法性 + nodeFields 覆盖性）/ vectors-pairing-l0-negative-controls-have-same-shape-positive / vectors-pairing-l3-negative-controls-have-same-shape-positive（transition 那一档仍由 vectors-negative-control-has-same-target-positive-pair 守）。",
+        "commonWhy": "★ 失败形状（与 §36.4 已证的 transition 那侧同构）：一个「全封」的实现（visible 永远返回 false）⇒ 所有 L0/L3 的 negative-control 向量（它们期望 visible:false）**全部 PASS** ⇒ 这套负向判据**只**靠同类的那条正向对照（期望 visible:true）才能分辨它 ⇒ **删掉或弱化那条正向 ⇒ 静默全绿**（实测：把两条正向对照删掉后，--break all-hidden 跑出 12/12 PASS、exit 0，而同一份副本被本节的按类检查判 FAIL、exit 1 —— 见 out/w19-o57-pairing-l0-l3.md 门 4-3）。⇒ 「每条该类负向向量必须有一条同形正向对照」必须是**机器检查的规则**，不能靠「大家记得别删」。",
+        "rules": [
+          {
+            "class": "transition",
+            "kind": "transition",
+            "role": "negative-control",
+            "requireFor": "transition.negative-control",
+            "mode": "same-transition-target",
+            "requirePairAsserts": "fileChanged",
+            "sameShape": "同形 = 同 kind(=transition) ∧ 同 transition.to。★ 这是**弱配对**：不比 from / node.status（§36.5-2 如实记的残留，未闭合成更强判据）。",
+            "why": "★ O55 原文（语义不变）：4 条负向迁移向量都期望 statusUnchanged:true，而一个「从不写回」的实现同样满足（读不到 = 没变）⇒ 这批负向判据**只**靠那条正向对照 transition-pending-to-active-receipt-passed 才能分辨这类错误 ⇒ 删掉它，这类错误就【全绿通过】。且那条正向对照必须**真的带 fileChanged 断言**（否则配对只是形式）。"
+          },
+          {
+            "class": "l0",
+            "kind": "l0",
+            "level": "L0",
+            "role": "negative-control",
+            "requireFor": "l0.negative-control",
+            "mode": "same-l0-bucket",
+            "requirePairAsserts": "visible",
+            "statusField": "status",
+            "positiveStatus": "active",
+            "nodeFields": ["score", "useCount"],
+            "nodeFieldsFrom": "visibility.rules[level=\"L0\"].conditions[*].metric（校验器会核对 nodeFields 覆盖了契约里 L0 规则读到的全部字段，防漂移）",
+            "mustSatisfyRuleConditions": true,
+            "sameShape": "同形（机器可判）= 同 kind(=l0) ∧ 同 taskHint ∧ 【status 之外、L0 规则读到的节点字段】逐值相等（本契约 = score / useCount；⛔ 不比 node.id —— id 只是向量的身份，不参与判定）∧ 该 negative-control 的这些字段**满足 L0 规则的全部 conditions**（本契约 = score>0.7 ∧ useCount>10，即「同档位、都在阈值内」）∧ 正向对照 node.status === requiresStatus(active) ∧ 两者 node.status **不同**（⇒ status 是唯一自变量）∧ 正向对照 expect.visible === true ∧ 该负向向量 expect.visible === false。",
+            "why": "★ O57（§36.5-3）：L0 的 2 条 negative-control（l0-pending-highscore-hidden / l0-archived-hidden）与正向对照 l0-active-highscore-visible 的 score/useCount/taskHint **逐值相同**，只差 status ⇒ 期望 visible:false 的这两条，一个「visible 恒 false」的全封实现【同样满足】⇒ 只有那条正向对照能分辨「门没漏」与「全封」⇒ 删掉或弱化它 ⇒ 静默全绿。★ 为什么必须把「档位在阈值内」写进同形定义：若负向那条的 score 本来就低于阈值，它的不可见就不是 status 造成的 ⇒ 那样的「配对」不能证明 L0 路径真的没被全封（status 这个自变量被稀释了）。"
+          },
+          {
+            "class": "l3",
+            "kind": "l3",
+            "level": "L3",
+            "role": "negative-control",
+            "requireFor": "l3.negative-control",
+            "mode": "same-l3-trigger-hit",
+            "requirePairAsserts": "visible",
+            "statusField": "status",
+            "positiveStatus": "active",
+            "nodeFields": ["triggers"],
+            "nodeFieldsFrom": "该 level 规则声明的 condition.kind = \"triggers-hit-taskHint\" ⇒ 命中条件的载体字段 = node.triggers（校验器会核对契约 L3 规则确实声明了这个 kind 才用该字段，防漂移）",
+            "mustSatisfyRuleConditions": false,
+            "sameShape": "同形（机器可判）= 同 kind(=l3) ∧ 同 taskHint（= 触发命中的**输入**不变）∧ triggers 逐值相等（= 触发命中的**载体**不变 ⇒ 「命中」这件事在两条上同真同假）∧ 正向对照 node.status === requiresStatus(active) ∧ 两者 node.status **不同**（⇒ status 是唯一自变量）∧ 正向对照 expect.visible === true ∧ 该负向向量 expect.visible === false。",
+            "why": "★ O57（§36.5-3）：L3 的 4 条 negative-control（pending / archived / invalidated / suspicious，四条 triggers 与 taskHint 逐值相同）期望 visible:false ⇒ 全封实现同样全过 ⇒ 只靠 l3-active-trigger-match-visible 分辨 ⇒ 删掉或弱化它 ⇒ 静默全绿；而 L3 恰恰是本契约**最不能少**的一条路径（§4：现状 skill_tree.go:1054+ 的 L3 分支完全不检查 Status）。★ 为什么不设 mustSatisfyRuleConditions：L3 的 condition 只声明了 `kind:\"triggers-hit-taskHint\"` 而**没有声明命中算法** ⇒ 校验器不重造一套算法去判「命中」（那会把一个未声明的实现选择偷渡进契约）；改以「triggers + taskHint 逐值相等」+「正向对照已被向量断言 visible:true」= 命中条件**以正向对照为证据**被固定，这已足够把 status 隔离成唯一自变量。"
+          }
+        ]
+      }
     }
   },
 
