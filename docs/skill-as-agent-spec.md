@@ -1519,3 +1519,53 @@ if (this.retained?.text === snapshot) return;      // ★ 纯文本等值比较
 |---|---|---|
 | **O38** | **`mcp-client` 子进程的生命周期是否严格绑定 DSH 进程**（README 只写 reconnect） | 影响"DSH 退出后宿主是否残留" |
 | **O39** | **Go 宿主项目的当前位置与状态**（`ai-base/agent-shell` 是只读上游 ⇒ 宿主是"给上游加一个 MCP 面"还是"新建一个仓"？） | P1 的落点 |
+
+---
+
+## 26. ★★★★★ O39 关闭：**Go 宿主已经存在、MCP 面也已经写好了** —— P1 = "接上"，不是"新建"
+
+> 起因：§25 定了"记忆宿主 = 独立 Go 进程 + MCP 面 + `mcp-client` 拉起"，但**宿主放哪个仓**未定（O39）。
+
+### 26.1 ★★★ 实测：宿主、客户端、MCP 桥**三者都已存在**
+
+| 发现 | 证据（均在本机实测） |
+|---|---|
+| ★ **宿主已经是现行运行形态** | `ai-base/agent-shell/main.go` 的子命令里有 **`--hub-server`** 与 **`--client`**（另 `--hub-data-dir` / `--standalone-v2` / `--migrate-vectors` / `--brain` …）⇒ **服务端/客户端模式并存于同一 exe**；构建产物含 **`agent-shell-hub.exe`** |
+| ★ **hub 是个 TCP 服务** | `internal/hub/v2/hub_Hub.go:616`：**`ln, err := net.Listen("tcp", h.cfg.listenAddr())`**；`hubsettings/service.go:38` 有 `dataDir` / `hubAddr` / `settingsPath`（旧版 `internal/hub/hub.go.bak` ⇒ **v1 已废，v2 是现行**） |
+| ★ **配套客户端包在** | **`internal/hubclient/v2`** ⇒ client/host 切分**早已实现** |
+| ★★ **MCP 桥 Go 侧已经写好** | **`internal/external/`** 里有 **`mcp_bridge.go` + `mcp_bridge_stdio.go` (+test) + `mcp_bridge_sse.go` (+test)**；同目录还有 **`a2a/adapter.go` + `a2a/protocol.go`**（Agent-to-Agent 协议）、`skill_registry.go`、`modal_service.go`、`ocr_service.go` |
+| ★★ **hub v2 有插件位** | **`internal/hub/v2/plugins/`** —— 其中 **`memory_view/`** 就是一个插件（`internal/bootstrap/bootstrap.go:400-406`：`MemoryViewPlugin()` / `NewBuilderAdapterWithConfig(...)`）<br>⇒ **这就是文档说的"加面的成本已被 `memory_view` 插件证明很低"的含义：加一个面 = 加一个插件。** |
+| 向量能力确实在 Go 侧做过 | `main.go` 有 **`--migrate-vectors`** 子命令 |
+| ⚠️ 未找到 | `memory_view` 在 `.md/.json` 层面的设计文档 —— **只在 session journal 与 cache 里出现，没找到源码之外的说明**（源码在，见上） |
+
+### 26.2 ⇒ **O39 的答案：不新建仓，就地在 `agent-shell` 里"接上"**
+
+**Go 宿主 = `ai-base/agent-shell` 的 `hub v2`（`--hub-server` 模式）。**
+**⇒ P1 的落点 = 给 hub v2 加一个把记忆能力暴露为 MCP 的面**：
+- **复用 `internal/external/mcp_bridge_{stdio,sse}.go`**（桥已写好，含测试）
+- **按 `hub v2` 的插件位加一个插件**（`plugins/memory_view` 是先例）
+- **DSH 侧用 `mcp-client` 接上**（§25.2 已核验机制 + 现场先例 design-canvas 那一行）
+
+⇒ ★ **⇒ 所以 P1 不是"新建一个仓 / 新建一个进程模型 / 重写记忆层"，而是"接到已有基础设施上"。**
+⇒ 这也反过来**再次印证 §25.1 的分层表**：Go 保留那一块**本来就是这么设计的**（`internal/external/` 就是为"加面"准备的位置）。
+
+### 26.3 ⚠️ 一个必须说的直接后果：**P1 动的是【另一个仓】**
+
+**`agent-shell` 属于 `ai-base` 仓（`/d/project_develop/ai-base/.git` 实测存在），而 `dsh-brain` 是另一个仓。**
+⇒ **P1 起就是跨仓工作** ⇒ 需要：
+1. **两个仓各自的 git 卫生**（铁律 #16：多会话共用仓库 ⇒ 提交前先 `git status` 看清哪些不是自己的改动）；
+2. **明确"上游只读不改"的边界**（移植计划原文：`ai-base/agent-shell/internal/memory/` 是**只读上游**）
+   ⇒ ★ **所以"加面"必须【不动 `internal/memory/` 内部】**，只在 `internal/external/` 或 `hub/v2/plugins/` 加新文件 ⇒ **这条要写进纪律**（新增 **O40**）。
+
+### 26.4 顺带两条与既有未闭合的关联
+
+- **`internal/external/skill_registry.go`** —— Go 侧**已有 skill registry 的面** ⇒ 与 **O30**（`skill-tree` ↔ `capability-registry` 的关系）**直接相关**：
+  **"候选入池"在 Go 侧可能已有现成出口**，不必等 TS 侧的 `store`。**⇒ 值得单独取证（新增 O41）。**
+- **`a2a/`（Agent-to-Agent 协议）已存在** ⇒ 与我们"子代能力传承"（**O26**）可能相关（外部 Agent 注册为 sub agent 是官方设计目标，§20.1 `:23`）。
+
+### 26.5 新增未闭合
+
+| # | 项 | 挡住 |
+|---|---|---|
+| **O40** | **跨仓纪律**：P1 只允许在 `internal/external/` 或 `hub/v2/plugins/` **新增**文件，**不动 `internal/memory/` 内部**（上游只读） | P1 起步 |
+| **O41** | **Go 侧 `skill_registry.go` 能给什么** —— 它可能就是"候选入池"的现成出口（可绕开 TS 侧 `store` 的阻塞） | O30 / O34 |
