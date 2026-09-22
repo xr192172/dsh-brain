@@ -2261,3 +2261,74 @@ FAIL  vectors-pairing-l3-negative-controls-have-same-shape-positive
 |---|---|---|
 | **O65** | **`all-hidden` 哨兵加固**（覆盖 `legacyStates` 那条路，使"严格全封"仍能被抓） | 见 39.4-1 |
 | **O66** | **"契约与实现都没提过的状态"** 该 fail-closed 还是放行 ⇒ 需要向量 + 明确规则 | 见 39.4-2 |
+
+---
+
+## 40. ✅ 回主线第一步：**判据机器的三条对照断言拿到真实读数**（`--face` 指向 Go 真面）
+
+### 40.1 交付
+
+| 侧 | 改动 |
+|---|---|
+| **`ai-base`** | **新增 `cmd/memface/{main.go, main_test.go}`** —— 记忆面 CLI，**严格实现 `memory-stub.mjs` 的同一契约**（`count`/`recall`/`remember`/`reset`） |
+| **dsh-brain** | `scripts/memory-effect-judge.mjs` 加 **`--face "<cmd>"`**（默认仍是 stub，**向后兼容**） |
+
+**复用真实逻辑**（不是平行实现）：`remember → KnowledgeStore.Upsert`、`recall → Search`、`count → Count`、`reset → ListAll+Delete`。
+★ **`--db` = 数据目录**（真实记忆落 `<db>/knowledge_base.json`）—— 与 stub 的"JSON 文件"语义是**刻意差异**，已写进 `main.go` 文件头。
+
+### 40.2 ★★ 三格从 `NEEDS-EVIDENCE` 变成**真读数**（我实测）
+
+```
+memory-effect-judge mode=face  batch=VALID  faceProbe=OK  exit=0
+assertions=A1:OK,A2:OK,A3:OK
+faceA=38d9f7e0  faceB=38d9f7e0
+countA=[0,0,0,0,0]   countB=[0,1,2,3,4]
+cells=OK:0 / NEEDS-EVIDENCE:86 / FAIL:0 / N-A:4
+```
+⇒ **A2 控制臂 `count` 恒 0** ✓、**A3 处理臂 `0→1→2→3→4` 严格递增** ✓、**A1 两臂指纹相同** ✓。
+
+### 40.3 ★★ 但**任务级 90 格一个都没填**（这是诚实的 scope）
+
+`cells=OK:0 / NEEDS-EVIDENCE:86` ⇒ **(甲)(乙) 两张表在两种模式下 `diff` 为空**，全是 `NEEDS-EVIDENCE`/`N/A`
+⇒ **那需要【真实会话驱动】（每题 steps/tokens/返工）⇒ 属后续，不许填。**
+
+### 40.4 ★★ 顺手撞到一个**真陷阱**（会把 A3 判成假红）
+
+> `internal/memory/knowledge.go:212` `now := time.Now().UTC().Format(time.RFC3339)`（**秒级**）+ `:213` `if entry.ID == ""`
+> ⇒ **ID 为空时用秒级时间戳当 ID ⇒ 同一秒内连续 `remember` 会互相覆盖** ⇒ **`count` 不增长 ⇒ A3 假红**。
+
+⇒ 已显式给唯一 ID，**并由单测钉住**。★ 这条值得记：**"存储层的时间戳粒度"能污染判据**（同族：度量陷阱）。
+
+### 40.5 反例门（证明三断言真在起作用）
+
+让 `remember` **恒不生效**的坏 face ⇒ **`A3=FAIL` / `batch=BATCH-INVALID` / exit 1**；
+且**同一轮 `faceA=da5fb3b0 ≠ 38d9f7e0`** ⇒ ★ **证明 A1 的指纹不是常量**（否则 A1 就是个假绿）。
+
+### 40.6 ⚠️ ★★★ A1 的**诚实边界**（必须记，否则会被误当"验证过了"）
+
+> A1 的输入是「**面命令逐字行 + 该面实测暴露的 6 个契约点**」，**不是真实会话的 `system+tools` 快照**；
+> 两臂共用同一条 `--face` ⇒ "相同"**构造性成立** ⇒ ★ **在没有真实会话之前，A1 不可能变红**。
+
+⇒ 它有真失败模式（面不按契约形状回话 ⇒ probe 失败 ⇒ A1 记 `NEEDS-EVIDENCE`），**但"两臂指纹相同"这件事本身尚未被真正检验**。⇒ **O67**。
+
+### 40.7 我的独立复核（五项）
+
+| 项 | 结果 |
+|---|---|
+| 判据机器 `--face <go exe>` | ✅ `assertions=A1:OK,A2:OK,A3:OK` / `batch=VALID` / `exit=0` |
+| **回归：gate 向量** | ✅ **仍 `16/16 PASS`**（上一个成果没被弄坏） |
+| `--plan` 向后兼容 | ✅ 仍打印骨架态说明、**不产结论** |
+| ★ "秒级 ID 覆盖"陷阱 | ✅ 机制证实（`knowledge.go:212` 秒级 + `:213` `ID==""`） |
+| `ai-base` git | ✅ HEAD `9fd42b3` **只含 2 个新文件**（543 insertions）；★ **mirror master 仍 `ba2f263e`（未 push）**；**tracked 脏项 = 0** |
+
+### 40.8 子代理自己踩的度量陷阱（记下）
+
+`grep -c '\u'` 在本机 Git Bash 里把 `\u` 当**字母 u** ⇒ **报了假阳性 2**；权威读数用 ripgrep 得「0 命中」。
+⇒ 与 §39.6 三个陷阱**同族**（度量工具本身的语义陷阱）。
+
+### 40.9 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O67** | ★ **A1 需要真实会话的 `system+tools` 快照做输入**，否则"两臂指纹相同"构造性成立、不可能变红 | A1 的分辨力 |
+| **O68** | **`control=NEEDS-EVIDENCE`** 这一格的含义与它何时能变真（需确认它是"阳性对照臂"还是别的） | 判据完整性 |

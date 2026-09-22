@@ -19,20 +19,45 @@
  *   ★ 它**不驱动任何真实会话**（那是后续驱动器的事），也**不产任何结论**：
  *     输出只有「机器读数 + 断言结果」。
  *
- * ── 三个模式 ─────────────────────────────────────────────────────────────
- *   node scripts/memory-effect-judge.mjs --plan      只打印计划：不建库/不写报告/不调 stub/不开会话
- *   node scripts/memory-effect-judge.mjs --selftest  注入假读数 + **真调 memory-stub** 跑完整流程做机器自检
+ * ── 四个模式 ─────────────────────────────────────────────────────────────
+ *   node scripts/memory-effect-judge.mjs --plan      只打印计划：不建库/不写报告/不调面/不开会话
+ *   node scripts/memory-effect-judge.mjs --selftest  注入假读数 + **真调面** 跑完整流程做机器自检
  *   node scripts/memory-effect-judge.mjs             REAL 模式（骨架态）：无真实读数 ⇒ 逐格 NEEDS-EVIDENCE，
  *                                                    只对两臂 db 做**只读** count
+ *   node scripts/memory-effect-judge.mjs --face "<cmd>"
+ *                                                    REAL·**面驱动**：真调 --face 那条记忆面做
+ *                                                    reset/remember/count 排练 ⇒ **三条对照断言有真读数**
  *
  * 其它参数：
  *   --readings <file>   用外部读数 JSON 取代内置假数据（schema 见 loadReadings）
+ *   --face "<cmd>"      ★ 记忆面命令（默认 = node scripts/memory-stub.mjs）。
+ *                       给了它 ⇒ REAL 模式由「骨架态」变「面驱动」（见下）。
+ *                       ★ 不带 --face 时，本脚本行为与加它之前**逐字相同**。
  *   --arm-a/--arm-b <p> 两臂 db 路径（默认 out/memory-judge/arm-a.json / arm-b.json；
- *                       --selftest 时默认落到 out/memory-judge/selftest/ 下，避免误写真实臂的库）
+ *                       --selftest 时默认落到 out/memory-judge/selftest/ 下，避免误写真实臂的库；
+ *                       --face 时默认落到 out/memory-judge/face/arm-a / arm-b ——★ 面驱动的
+ *                       面是**目录型 store**，不带 .json 后缀，免得把一个目录叫成 .json 文件）
  *   --out <path>        报告路径（默认 out/memory-judge-report.txt）
  *   --break <name>      ★ 故意破坏注入数据（只许配 --selftest）：
  *                         control-nonempty  让控制臂 count>0      ⇒ 应 BATCH-INVALID（exit 1）
  *                         k1-differs        让 k=1 两臂就有差别  ⇒ 应 CONTROL-FAILED（exit 3）
+ *
+ * ── ★★ --face：它把哪一格变成真读数，以及它【不】碰哪一格 ────────────────────
+ *   记忆面的 CLI 契约（4 条子命令，形状 = 将来真 MCP 面的形状）：
+ *     <face> count    --db <p>                            → 单行 JSON {"db":..,"count":N}
+ *     <face> recall   --db <p> --query <t> [--limit N]     → 单行 JSON 数组 [{text,kind,at}]
+ *     <face> remember --db <p> --text <t> [--kind <k>]     → 单行 JSON {"db":..,"count":N}
+ *     <face> reset    --db <p>                            → 单行 JSON {"db":..,"count":0}
+ *   给了 --face 后，REAL 模式会**真调**它（不是假设它可用）：
+ *     · 两臂各一个独立 db ⇒ 真 `reset` 建库、臂 B 逐 k 真 `remember`、每个 k 真 `count`
+ *       ⇒ §3.3 的 **A2（控制臂 count==0）/ A3（处理臂 count 随 k 严格递增）拿到真读数**；
+ *     · 面自身先被**实测**一次（四条子命令各打一发在 probe 库上）⇒ **A1（两臂 face 指纹
+ *       相同）** 用「这个面实测暴露的工具面 + 面命令逐字行」算 dsh-face/v1 指纹。
+ *   ★★ 它【不】碰任务级读数：toolCalls / tokens / wallClock / rework / oracle / regression
+ *      仍然**逐格 NEEDS-EVIDENCE** —— 那些要**真实会话驱动**，本脚本不驱动会话（属后续）。
+ *   ⚠️ A1 的诚实边界（写进报告，不藏着）：两臂共用**同一条** --face ⇒ 「两臂脸相同」在当前
+ *      参数形态下是**构造性成立**的；实测的部分是「这个面到底暴露了什么」。它**不是**真实
+ *      会话 request/header 的 system+tools 快照（那条路要真实会话，未接入）。
  *
  * 退出码：0 = 无硬失败（VALID 或 NEEDS-EVIDENCE）／1 = BATCH-INVALID／2 = 用法错误／
  *         3 = CONTROL-FAILED／4 = 自检机器自身坏了（注入数据被污染、禁用词泄漏等）
@@ -75,7 +100,34 @@ const SELFTEST_ARM_DB = {
   A: path.join(ROOT, 'out', 'memory-judge', 'selftest', 'arm-a.json'),
   B: path.join(ROOT, 'out', 'memory-judge', 'selftest', 'arm-b.json'),
 }
+/** ★ 面驱动（--face）时的默认落点：**目录**（面 = 目录型 store），故意不带 .json。 */
+const FACE_ARM_DB = {
+  A: path.join(ROOT, 'out', 'memory-judge', 'face', 'arm-a'),
+  B: path.join(ROOT, 'out', 'memory-judge', 'face', 'arm-b'),
+}
+/** 面自身的 probe 库（量「面暴露了什么」用；打在这里，不碰两臂的库）。 */
+const FACE_PROBE_DB = path.join(ROOT, 'out', 'memory-judge', 'face', 'probe')
+/**
+ * ★ `--selftest` + `--face` 时的落点。
+ *   不能沿用 SELFTEST_ARM_DB：那两条路径带 `.json` 后缀（stub 眼里是文件），
+ *   而面驱动默认把 --db 当**目录**（见 FACE_ARM_DB 的注释）⇒ 会在同一个路径上
+ *   「文件 vs 目录」撞车。这里给面驱动的自检另开一个沙箱。
+ */
+const SELFTEST_FACE_ARM_DB = {
+  A: path.join(ROOT, 'out', 'memory-judge', 'selftest-face', 'arm-a'),
+  B: path.join(ROOT, 'out', 'memory-judge', 'selftest-face', 'arm-b'),
+}
 const REPORT_NAME = 'memory-effect-judge'
+
+/**
+ * ★ 记忆面命令的 argv。默认 = `node scripts/memory-stub.mjs` ——
+ *   与加 --face 之前**逐字同一条调用**（parseArgs 后若给了 --face 才被替换）。
+ */
+let FACE_ARGV = [process.execPath, STUB]
+/** 面的人类可读描述（进报告）。 */
+let FACE_DESC = 'scripts/memory-stub.mjs（默认桩）'
+/** 是否显式给了 --face（决定 REAL 走骨架态还是面驱动；也决定若干叙述用词）。 */
+let FACE_GIVEN = false
 
 const DISCLAIMER = '★ 本报告只证明判据机器可用，不构成关于记忆效果的结论'
 const SELFTEST_BANNER = 'SELFTEST — 数据为注入的假读数，无任何外部含义'
@@ -111,11 +163,14 @@ const USAGE = `${REPORT_NAME} —— 记忆效果判据机器骨架（不驱动�
   node scripts/memory-effect-judge.mjs --plan
   node scripts/memory-effect-judge.mjs --selftest
   node scripts/memory-effect-judge.mjs                       # REAL 模式（无真实读数 ⇒ 全部 NEEDS-EVIDENCE）
+  node scripts/memory-effect-judge.mjs --face "<cmd>"        # REAL·面驱动（三条对照断言有真读数）
 
 参数：
   --readings <file>   外部读数 JSON 取代内置假数据
-  --arm-a <path>      臂 A（控制，空库）的 db 文件
-  --arm-b <path>      臂 B（处理，累积）的 db 文件
+  --face <cmd>        ★ 记忆面命令（默认 node scripts/memory-stub.mjs）；
+                      给了它 ⇒ REAL 模式变「面驱动」，真调该面做 reset/remember/count
+  --arm-a <path>      臂 A（控制，空库）的 db 路径
+  --arm-b <path>      臂 B（处理，累积）的 db 路径
   --out <path>        报告路径（默认 ${path.relative(ROOT, DEFAULT_REPORT)}）
   --break <name>      故意破坏注入数据（仅配 --selftest）：${Object.keys(BREAKS).join(' | ')}
 
@@ -235,17 +290,56 @@ function facePortSentinel() {
   }
 }
 
-// ───────────────────────── memory-stub 调用（真调，不是假设） ─────────────────────────
+// ───────────────────────── 面的调用（真调，不是假设） ─────────────────────────
+//
+// ★ 默认 FACE_ARGV = [node, scripts/memory-stub.mjs] ⇒ 不带 --face 时这一层的行为
+//   与加 --face 之前**完全一致**（同一个 execFileSync 调用形态、同一套 stdout 解析）。
+// ★ 给了 --face ⇒ 换成用户给的命令；argv 用 shell-like 拆分（支持引号包裹的路径）。
 
-/** 调一次 stub，解析 stdout 的单行 JSON。失败 ⇒ {ok:false}，调用方按 NEEDS-EVIDENCE 处理。 */
-function stubRun(args) {
+/** 把 `--face "<cmd>"` 拆成 argv。支持单/双引号分组（不解释转义）；空 token 丢弃。 */
+function splitCmd(s) {
+  const out = []
+  let cur = ''
+  let quote = null
+  let started = false
+  for (const ch of String(s)) {
+    if (quote) {
+      if (ch === quote) quote = null
+      else cur += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      started = true
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (started || cur) out.push(cur)
+      cur = ''
+      started = false
+      continue
+    }
+    cur += ch
+  }
+  if (quote) throw new Error(`--face 的引号没有闭合：${s}`)
+  if (started || cur) out.push(cur)
+  return out
+}
+
+/** 面命令的逐字行（进 face 指纹的 system 部分）。 */
+function faceArgvLine() {
+  return FACE_ARGV.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')
+}
+
+/** 调一次面，解析 stdout 的单行 JSON。失败 ⇒ {ok:false}，调用方按 NEEDS-EVIDENCE 处理。 */
+function faceRun(args) {
   try {
-    const out = execFileSync(process.execPath, [STUB, ...args], {
+    const out = execFileSync(FACE_ARGV[0], [...FACE_ARGV.slice(1), ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const line = String(out).split('\n').find((l) => l.trim())
-    if (!line) return { ok: false, error: 'stub stdout 为空' }
+    if (!line) return { ok: false, error: '面 stdout 为空' }
     return { ok: true, value: JSON.parse(line) }
   } catch (e) {
     const err = String(e?.stderr ?? '').trim() || String(e?.message ?? e)
@@ -253,14 +347,59 @@ function stubRun(args) {
   }
 }
 
-/** 读某臂在某检查点的条目数。**真调 stub count**（count 是只读的）。 */
+/** 读某臂在某检查点的条目数。**真调面的 count**（count 是只读的）。 */
 function readCount(dbPath, k) {
-  const r = stubRun(['count', '--db', dbPath])
+  const r = faceRun(['count', '--db', dbPath])
   return {
     k,
     count: r.ok ? r.value.count : null,
     err: r.ok ? null : r.error,
     dbExists: fs.existsSync(dbPath),
+  }
+}
+
+/**
+ * 量「面」：四条子命令各真打一发（写操作打在 probe 库上，**不碰两臂的库**），
+ * 记下这个面**实测暴露的工具面**。返回 {ok, surface, detail}。
+ *
+ * ★ 为什么不是「两臂会话日志的 system+tools 快照」：那要**真实会话**（本脚本不驱动会话，
+ *   属后续）。这里量的是「面自身可观测到的面」—— 它是**实测**的，不是注入的常量。
+ * ★ 判据：每条子命令都要按契约形状回话；任一不回 ⇒ ok=false ⇒ A1 记 NEEDS-EVIDENCE（不当 OK）。
+ */
+function probeFace() {
+  const surface = []
+  const bad = []
+  const add = (name, contract, good) => {
+    surface.push({ name, contract, measured: good ? 'ok' : 'not-ok' })
+    if (!good) bad.push(name)
+  }
+
+  const reset = faceRun(['reset', '--db', FACE_PROBE_DB])
+  add('reset', '{db,count}', reset.ok && typeof reset.value?.count === 'number')
+
+  const c0 = faceRun(['count', '--db', FACE_PROBE_DB])
+  add('count', '{db,count}', c0.ok && typeof c0.value?.count === 'number')
+
+  const rem = faceRun(['remember', '--db', FACE_PROBE_DB, '--text', '（面探测）这一条只为量出面暴露了什么', '--kind', 'probe'])
+  add('remember', '{db,count}', rem.ok && typeof rem.value?.count === 'number')
+
+  const c1 = faceRun(['count', '--db', FACE_PROBE_DB])
+  add('count#after-remember', '{db,count}', c1.ok && typeof c1.value?.count === 'number')
+
+  const rec = faceRun(['recall', '--db', FACE_PROBE_DB, '--query', '面', '--limit', '5'])
+  add('recall', '[{text,kind,at}]', rec.ok && Array.isArray(rec.value))
+
+  const reset2 = faceRun(['reset', '--db', FACE_PROBE_DB])
+  add('reset#cleanup', '{db,count}', reset2.ok && typeof reset2.value?.count === 'number')
+
+  const ok = bad.length === 0
+  return {
+    ok,
+    state: ok ? ST.OK : ST.NE, // 面不可用 ⇒ A1 记 NEEDS-EVIDENCE（不当 OK）
+    surface,
+    detail: ok
+      ? `面「${faceArgvLine()}」实测暴露 ${surface.length} 个契约点，全部按契约形状回话`
+      : `面「${faceArgvLine()}」有 ${bad.length} 个契约点没按形状回话：${bad.join('、')}`,
   }
 }
 
@@ -347,6 +486,46 @@ function realData() {
     arms: {
       A: { role: '控制臂（空库）', faceInput: null, checkpointsK: [], addBeforeK: [] },
       B: { role: '处理臂（累积）', faceInput: null, checkpointsK: [], addBeforeK: [] },
+    },
+    readings: { A: {}, B: {} },
+  }
+}
+
+/**
+ * REAL + --face：**面驱动**。判据真调那条面做一轮「累积排练」，好让 §3.3 的三条对照断言
+ * 拿到真读数（真 `reset` 建库 / 臂 B 逐 k 真 `remember` / 每个 k 真 `count`）。
+ *
+ * ★ 它【只】产对照体检要的读数（两臂 count 序列 + 面指纹）；
+ *   ★ **任务级读数一格都不产**（toolCalls/tokens/wallClock/rework/oracle/regression）——
+ *     那些要真实会话驱动 ⇒ 继续 NEEDS-EVIDENCE（**不许填**）。
+ *
+ * ★ 排练的文本取自 taskList()（真实的任务 id/标题），不是凭空编的观测值：
+ *   它要证的只有一件事 —— **这条面的写入口真的会让条目数增长**。
+ *
+ * @param {{ok:boolean, surface:Array<{name:string,contract:string,measured:string}>, detail:string}} probe
+ */
+function faceData(probe) {
+  const tasks = taskList()
+  const note = (t) => `k=${t.k} [${t.id}] ${t.title}`
+  // 两臂的「面」= 同一个**实测**面（同一条面命令）⇒ A1 的输入不是注入的常量。
+  // ★ 面若不可用（probe.ok=false）⇒ faceInput 留 null ⇒ A1 记 NEEDS-EVIDENCE（不当 OK）。
+  const faceInput = probe.ok
+    ? { system: `dsh-memory-face/v1\nargv: ${faceArgvLine()}`, tools: probe.surface }
+    : null
+  const ks = tasks.map((t) => t.k)
+  return {
+    label: null,
+    source: `面驱动（${FACE_DESC}）：真调面做 reset/remember/count 排练 ⇒ 对照体检三条断言有真读数；任务级读数仍无（无真实会话）`,
+    tasks,
+    arms: {
+      A: { role: '控制臂（空库）', faceInput, checkpointsK: ks, addBeforeK: tasks.map(() => []) },
+      B: {
+        role: '处理臂（累积，面驱动）',
+        faceInput,
+        checkpointsK: ks,
+        // ★ k=1 起点也是空的 —— 与 selftest 同形状（0→1→2→3→4）
+        addBeforeK: tasks.map((t, i) => (i === 0 ? [] : [note(t)])),
+      },
     },
     readings: { A: {}, B: {} },
   }
@@ -440,12 +619,14 @@ function sameTextCell(a, b) {
 // ───────────────────────── 断言（纯函数：输入是读数，不含副作用） ─────────────────────────
 
 /**
- * 对照体检（§3.3 三条断言）。**纯函数**：counts 由调用方给（真跑时来自 stub，自检电池里来自常量）。
+ * 对照体检（§3.3 三条断言）。**纯函数**：counts 由调用方给（真跑时来自面，自检电池里来自常量）。
  * @param {{faceNormA:string|null,faceNormB:string|null,faceRawA:string|null,faceRawB:string|null,
  *          countsA:Array<{k:number,count:number|null,dbExists:boolean}>,
  *          countsB:Array<{k:number,count:number|null,dbExists:boolean}>}} ins
+ * @param {string} cntLabel count 读数的**来源标签**（只影响叙述；默认 'stub count' ⇒ 电池输出不变）
+ * @param {string} portNote face 不同的尾巴注释（默认逐字同以前 ⇒ 电池与骨架态输出不变）
  */
-function assessBatch(ins) {
+function assessBatch(ins, cntLabel = 'stub count', portNote = '；归一化抹掉 Web GUI 端口差') {
   const assertions = []
 
   // ── 断言 1：两臂 face 指纹相同（用归一化后的脸）
@@ -463,11 +644,11 @@ function assessBatch(ins) {
       id: 'A1',
       name: '两臂 face 指纹相同',
       state: same ? ST.OK : ST.FAIL,
-      detail: `normalized ${ins.faceNormA} vs ${ins.faceNormB} ⇒ 相同=${same ? '是' : '否'}；raw ${ins.faceRawA} vs ${ins.faceRawB}（raw 相同=${rawSame ? '是' : '否'}；归一化抹掉 Web GUI 端口差）`,
+      detail: `normalized ${ins.faceNormA} vs ${ins.faceNormB} ⇒ 相同=${same ? '是' : '否'}；raw ${ins.faceRawA} vs ${ins.faceRawB}（raw 相同=${rawSame ? '是' : '否'}${portNote}）`,
     })
   }
 
-  // ── 断言 2：控制臂（臂 A）记忆真的空（真调 stub 读 count）
+  // ── 断言 2：控制臂（臂 A）记忆真的空（真调面读 count）
   if (!ins.countsA.length) {
     assertions.push({ id: 'A2', name: '控制臂（臂 A）记忆 count == 0', state: ST.NE, detail: '没有任何检查点读数' })
   } else {
@@ -476,10 +657,10 @@ function assessBatch(ins) {
     const nonZero = ins.countsA.filter((c) => c.count !== null && c.count !== 0)
     const seq = ins.countsA.map((c) => (c.count === null ? '?' : c.count)).join(',')
     let state = ST.OK
-    let why = `stub count 序列(k=1..)= ${seq}`
+    let why = `${cntLabel} 序列(k=1..)= ${seq}`
     if (bad.length) {
       state = ST.NE
-      why = `stub count 读失败(${bad.length} 个检查点)：${bad[0].err}；序列= ${seq}`
+      why = `${cntLabel} 读失败(${bad.length} 个检查点)：${bad[0].err}；序列= ${seq}`
     } else if (missingDb.length) {
       state = ST.NE
       why = `db 文件不存在（该臂从未初始化/未跑）⇒ 0 只是「文件缺失」的默认值，不算空库证据；序列= ${seq}`
@@ -502,10 +683,10 @@ function assessBatch(ins) {
     const bad = ins.countsB.filter((c) => c.count === null)
     const seq = ins.countsB.map((c) => (c.count === null ? '?' : c.count)).join('→')
     let state = ST.OK
-    let why = `stub count 序列(k 递增)= ${seq}`
+    let why = `${cntLabel} 序列(k 递增)= ${seq}`
     if (bad.length) {
       state = ST.NE
-      why = `stub count 读失败(${bad.length} 个检查点)：${bad[0].err}；序列= ${seq}`
+      why = `${cntLabel} 读失败(${bad.length} 个检查点)：${bad[0].err}；序列= ${seq}`
     } else {
       const nums = ins.countsB.map((c) => c.count)
       const inc = nums.every((n, i) => i === 0 || n > nums[i - 1])
@@ -648,7 +829,9 @@ function battery() {
 // ───────────────────────── 采集两臂状态 ─────────────────────────
 
 /**
- * 臂状态：selftest 会**建库**（reset + remember，都是真调 stub）；real 只**只读** count。
+ * 臂状态。
+ *   selftest / face ：**建库**（reset + remember，都是真调面）
+ *   real            ：只**只读** count（骨架期属实没有真实会话；记忆由将来的真实运行写入）
  */
 function collectArm(data, arm, dbPath, mode) {
   const role = data.arms?.[arm]?.role ?? arm
@@ -659,15 +842,15 @@ function collectArm(data, arm, dbPath, mode) {
   let seeded = false
   let seedErr = null
 
-  if (mode === 'selftest') {
-    const r = stubRun(['reset', '--db', dbPath])
+  if (mode === 'selftest' || mode === 'face') {
+    const r = faceRun(['reset', '--db', dbPath])
     if (!r.ok) seedErr = `reset 失败：${r.error}`
     seeded = r.ok
     const add = Array.isArray(data.arms?.[arm]?.addBeforeK) ? data.arms[arm].addBeforeK : []
     for (const t of data.tasks) {
       const adds = Array.isArray(add[t.k - 1]) ? add[t.k - 1] : []
       for (const txt of adds) {
-        const w = stubRun(['remember', '--db', dbPath, '--text', String(txt), '--kind', 'note'])
+        const w = faceRun(['remember', '--db', dbPath, '--text', String(txt), '--kind', 'note'])
         if (!w.ok && !seedErr) seedErr = `remember 失败：${w.error}`
       }
       counts.push(readCount(dbPath, t.k))
@@ -696,6 +879,7 @@ function collectArm(data, arm, dbPath, mode) {
 // ───────────────────────── 渲染 ─────────────────────────
 
 const pad = (s, n) => String(s ?? '').padEnd(n)
+const relPath = (p) => path.relative(ROOT, p).replace(/\\/g, '/')
 
 function planLines() {
   const L = []
@@ -732,16 +916,44 @@ function planLines() {
   L.push('')
   L.push('当前骨架态：★ 还没有真实会话 ⇒ 真实读数一律 NEEDS-EVIDENCE。')
   L.push('用 --selftest 可以证明这台机器本身可用（注入假读数 + 真调 stub），但它**不产结论**。')
+  // ★ 只在真带了 --face 时才多印这几行 ⇒ 不带 --face 的 --plan 输出与加 --face 之前逐字相同。
+  if (FACE_GIVEN) {
+    L.push('')
+    L.push(`★ 本次带了 --face：${FACE_DESC}`)
+    L.push('  ⇒ REAL 模式变【面驱动】：真调该面做 reset/remember/count 排练 ⇒ 三条对照断言有真读数；')
+    L.push('    ★ 任务级读数（' + [...METRICS_SEQ, ...METRICS_ONE].join('/') + '）仍一律 NEEDS-EVIDENCE（要真实会话，本脚本不驱动）；')
+    L.push('    ★ 面自身也会被实测一次（四条子命令各一发打在 probe 库上）⇒ A1 的输入不是注入常量。')
+    L.push(`  ⇒ 面驱动默认落点（面 = 目录型 store，故意不带 .json）：`)
+    L.push(`      A = ${relPath(FACE_ARM_DB.A)}`)
+    L.push(`      B = ${relPath(FACE_ARM_DB.B)}`)
+    L.push(`      probe = ${relPath(FACE_PROBE_DB)}`)
+    L.push(`  ⇒ 不带 --face 时，本脚本行为与加它之前**逐字相同**（默认面 = node scripts/memory-stub.mjs）。`)
+  }
   return L
 }
 
-function renderReport({ mode, data, arms, batch, control, cells, batteryResult, sentinel, breakName }) {
+function renderReport({ mode, data, arms, batch, control, cells, batteryResult, sentinel, breakName, probe }) {
   const L = []
   const now = new Date().toISOString()
+  // ★ 不带 --face 时这两条标签与加 --face 之前逐字相同（向后兼容）。
+  const modeLabel =
+    mode === 'selftest'
+      ? FACE_GIVEN
+        ? `SELFTEST（注入假读数 + 真调面：${FACE_DESC}）`
+        : 'SELFTEST（注入假读数 + 真调 memory-stub）'
+      : mode === 'face'
+        ? `REAL·面驱动（真调面：${FACE_DESC}；任务级读数仍无）`
+        : 'REAL（骨架态，无真实会话）'
+  const buildLabel =
+    mode === 'selftest'
+      ? `是（reset + remember，全部真调${FACE_GIVEN ? '面' : ' stub'}）`
+      : mode === 'face'
+        ? '是（reset + remember + 逐 k count，全部真调面）'
+        : '否（只读；真实臂的记忆由真实运行写入）'
   L.push('='.repeat(100))
   L.push(`${REPORT_NAME} · 记忆效果判据机器骨架报告`)
   L.push(`生成时间 : ${now}`)
-  L.push(`模式     : ${mode === 'selftest' ? 'SELFTEST（注入假读数 + 真调 memory-stub）' : 'REAL（骨架态，无真实会话）'}`)
+  L.push(`模式     : ${modeLabel}`)
   L.push(`数据来源 : ${data.source}`)
   if (breakName) L.push(`★ 破坏注入 : --break ${breakName}（${BREAKS[breakName]}）—— 本轮数据是**故意做坏的**`)
   L.push(DISCLAIMER)
@@ -779,8 +991,13 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
   for (const a of [arms.A, arms.B]) {
     const rel = path.relative(ROOT, a.db).replace(/\\/g, '/')
     L.push(`  ── 臂 ${a.arm}（${a.role}）`)
-    L.push(`     db 文件   : ${rel}${fs.existsSync(a.db) ? '' : '  （不存在）'}`)
-    L.push(`     建库动作   : ${mode === 'selftest' ? `是（reset + remember，全部真调 stub）${a.seedErr ? `  ⚠ ${a.seedErr}` : ''}` : '否（只读；真实臂的记忆由真实运行写入）'}`)
+    // ★ 不带 --face 时这一行与加 --face 之前逐字相同（'db 文件'）；面驱动时才改称「目录」。
+    L.push(
+      mode === 'face'
+        ? `     db 目录   : ${rel}${fs.existsSync(a.db) ? '' : '  （不存在）'}  ★ 面驱动：这是【数据目录】`
+        : `     db 文件   : ${rel}${fs.existsSync(a.db) ? '' : '  （不存在）'}`,
+    )
+    L.push(`     建库动作   : ${buildLabel}${a.seedErr ? `  ⚠ ${a.seedErr}` : ''}`)
     if (a.faceInput) {
       L.push(`     face raw  : ${a.faceRaw}   （逐字同构 face-audit，可与日志比对）`)
       L.push(`     face norm : ${a.faceNorm}   （★ 断言用；先做端口归一化）`)
@@ -789,10 +1006,17 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
       L.push('     face      : (缺 system+tools 快照) ⇒ NEEDS-EVIDENCE')
     }
     if (!a.counts.length) {
-      L.push('     stub count: (无检查点) ⇒ NEEDS-EVIDENCE')
+      L.push(`     ${CNT_LABEL}: (无检查点) ⇒ NEEDS-EVIDENCE`)
     } else {
-      L.push('     stub count: ' + a.counts.map((c) => `k=${c.k}:${c.count === null ? `读失败(${c.err})` : c.count}`).join('  '))
+      L.push(`     ${CNT_LABEL}: ` + a.counts.map((c) => `k=${c.k}:${c.count === null ? `读失败(${c.err})` : c.count}`).join('  '))
     }
+  }
+  if (probe) {
+    L.push('')
+    L.push(`  面实测（A1 的输入）: ${probe.state}  ${probe.detail}`)
+    for (const s of probe.surface ?? []) L.push(`      · ${pad(s.name, 22)} 契约 ${pad(s.contract, 18)} 实测 ${s.measured}`)
+    L.push('  ★ 这条量的是「面自身实测暴露了什么」，**不是**真实会话 request/header 的 system+tools 快照；')
+    L.push('    后者要真实会话（本脚本不驱动会话）⇒ 未接入。两臂共用同一条 --face ⇒ A1 的「相同」是构造性成立的。')
   }
   L.push('')
 
@@ -858,9 +1082,15 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
   const needs = c[ST.NE] > 0 || batch.verdict === 'NEEDS-EVIDENCE'
   if (needs) {
     L.push('  当前 NEEDS-EVIDENCE 的格子，各需要什么：')
-    L.push('  · 两臂 face 指纹：需要两臂各一次真实会话的 request/header 里的 system + tools 快照')
-    L.push('    （日志侧已有取法：scripts/face-audit.mjs 的读法；骨架期没有会话 ⇒ 算不出脸）')
-    L.push('  · 记忆条目数随 k：需要对两臂真实跑完各自序列后的 db 调 memory-stub count（本机器已能读，只是没有 k 的读数）')
+    if (FACE_GIVEN) {
+      L.push(`  · 两臂 face 指纹：★ 本轮已给出（面实测，见 [1] 面实测 与 [2] A1）；`)
+      L.push('    仍缺的是**真实会话** request/header 里的 system + tools 快照 —— 那条路要真实会话，未接入')
+      L.push(`  · 记忆条目数随 k：★ 本轮已真调面读到（见 [1] ${CNT_LABEL} 与 [2] 的 A2 / A3）`)
+    } else {
+      L.push('  · 两臂 face 指纹：需要两臂各一次真实会话的 request/header 里的 system + tools 快照')
+      L.push('    （日志侧已有取法：scripts/face-audit.mjs 的读法；骨架期没有会话 ⇒ 算不出脸）')
+      L.push('  · 记忆条目数随 k：需要对两臂真实跑完各自序列后的 db 调 memory-stub count（本机器已能读，只是没有 k 的读数）')
+    }
     L.push(`  · (甲) 序列指标 ${METRICS_SEQ.join('/')}：需要两臂各跑【同一题目顺序】的真实会话，`)
     L.push('    并从会话日志按题取 toolCalls / tokens / wallClock / 返工次数（返工=同一题重复尝试次数）')
     L.push('  · (乙) oracle/regression：需要在每题上真跑 evals/pilot/tasks.jsonl 的 oracle.cmd / regression.cmd，')
@@ -876,8 +1106,19 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
   L.push('不确定 / 未验证（本报告的自我申报）：')
   L.push('  · face 指纹是**本地移植** dsh-face/v1（不是调用 face-audit.mjs，理由见脚本文件头）；')
   L.push('    漂移哨兵只查上游算法锚点字面量，**不证明逐字等价**。')
-  L.push('  · 本骨架不驱动真实会话、不调 memory-stub 的 recall（只用了 count/remember/reset）。')
-  L.push('  · 上面这些读数在没有真实会话之前都只是**格子的形状**，不是证据。')
+  if (FACE_GIVEN) {
+    L.push(`  · ★ A1 的输入是「面命令逐字行 + 该面实测暴露的契约点」，**不是**真实会话的 system+tools 快照；`)
+    L.push('    两臂共用同一条 --face ⇒ 「两臂脸相同」在当前参数形态下**构造性成立**、不是实测两臂各自的脸；')
+    L.push('    在**没有真实会话**之前，它**不可能**因为「两臂脸不同」变红（要变红需 per-arm 的面或会话快照）。')
+    L.push(`  · ★ A2 / A3 的 count 真读数来自面「${FACE_DESC}」，其值随该面背后的存储而定：`)
+    L.push('    不同实现（stub 的 JSON 文件 / Go 侧知识库目录）**值可以不同**，这不是分歧，是各自的存储。')
+    L.push('  · ★ 臂 B 的「累积排练」文本取自本脚本的 taskList()（任务 id/标题），**不是**被测 agent 真写进去的记忆；')
+    L.push('    它只用于说明「这条面的写入口会让条目数增长」这件事本身。')
+    L.push(`  · 本轮真调了面的 count / remember / reset${probe ? ' / recall（面实测那一次）' : ''}。`)
+  } else {
+    L.push('  · 本骨架不驱动真实会话、不调 memory-stub 的 recall（只用了 count/remember/reset）。')
+    L.push('  · 上面这些读数在没有真实会话之前都只是**格子的形状**，不是证据。')
+  }
   L.push(DISCLAIMER)
   L.push('─'.repeat(100))
   return L.join('\n') + '\n'
@@ -900,7 +1141,25 @@ if (BREAK && !SELFTEST) usage('--break 只能与 --selftest 一起用（它改�
 if (BREAK && !Object.prototype.hasOwnProperty.call(BREAKS, BREAK)) {
   usage(`--break 只认识 ${Object.keys(BREAKS).join(' / ')}，收到 ${BREAK}`)
 }
-const MODE = PLAN ? 'plan' : SELFTEST ? 'selftest' : 'real'
+
+// ── ★ --face：换掉「面」。不带它时 FACE_ARGV 保持默认（node scripts/memory-stub.mjs）⇒ 行为不变。
+const FACE = opts.face ?? null
+if (FACE !== null) {
+  if (!String(FACE).trim()) usage('--face 需要一个非空命令（默认 node scripts/memory-stub.mjs）')
+  try {
+    const argv = splitCmd(FACE)
+    if (!argv.length) usage('--face 解析后没有可执行文件')
+    FACE_ARGV = argv
+  } catch (e) {
+    usage(String(e?.message ?? e))
+  }
+  FACE_GIVEN = true
+  FACE_DESC = FACE
+}
+
+const MODE = PLAN ? 'plan' : SELFTEST ? 'selftest' : FACE_GIVEN ? 'face' : 'real'
+/** count 读数的来源标签（只影响叙述；不带 --face 时逐字同以前）。 */
+const CNT_LABEL = FACE_GIVEN ? '面 count' : 'stub count'
 
 // ── --plan：真正的空操作 ⇒ 直接返回
 if (MODE === 'plan') {
@@ -908,10 +1167,15 @@ if (MODE === 'plan') {
   process.exit(0)
 }
 
+// ── ★ 面实测（只在面驱动/RLEAL+--face 时做）：量出「这条面暴露了什么」⇒ A1 的输入。
+//    ⚠ 它真调面（打在 FACE_PROBE_DB 上），**不碰两臂的库**。
+const probe = MODE === 'face' ? probeFace() : null
+
 // ── 数据
 let data
 if (opts.readings) data = loadReadings(opts.readings)
 else if (SELFTEST) data = selftestData()
+else if (MODE === 'face') data = faceData(probe)
 else data = realData()
 const dataNote = data.source
 if (BREAK) data = applyBreak(data, BREAK)
@@ -921,21 +1185,28 @@ const resolveDb = (arm) => {
   if (opts[cliKey]) return path.resolve(ROOT, opts[cliKey])
   const fromData = data.arms?.[arm]?.db
   if (fromData) return path.resolve(ROOT, fromData)
-  return SELFTEST ? SELFTEST_ARM_DB[arm] : DEFAULT_ARM_DB[arm]
+  if (SELFTEST) return FACE_GIVEN ? SELFTEST_FACE_ARM_DB[arm] : SELFTEST_ARM_DB[arm]
+  if (MODE === 'face') return FACE_ARM_DB[arm] // ★ 面驱动默认落点（面 = 目录型 store）
+  return DEFAULT_ARM_DB[arm]
 }
 const dbA = resolveDb('A')
 const dbB = resolveDb('B')
 
 // ── 采集
 const arms = { A: collectArm(data, 'A', dbA, MODE), B: collectArm(data, 'B', dbB, MODE) }
-const batch = assessBatch({
-  faceNormA: arms.A.faceNorm,
-  faceNormB: arms.B.faceNorm,
-  faceRawA: arms.A.faceRaw,
-  faceRawB: arms.B.faceRaw,
-  countsA: arms.A.counts,
-  countsB: arms.B.counts,
-})
+const batch = assessBatch(
+  {
+    faceNormA: arms.A.faceNorm,
+    faceNormB: arms.B.faceNorm,
+    faceRawA: arms.A.faceRaw,
+    faceRawB: arms.B.faceRaw,
+    countsA: arms.A.counts,
+    countsB: arms.B.counts,
+  },
+  CNT_LABEL,
+  // ★ 面驱动下两臂的脸里不含端口（面命令逐字行 + 实测契约点）⇒ 不印那句端口注释。
+  MODE === 'face' ? '；本条比的是面命令逐字行 + 面实测暴露的契约点，与端口无关' : undefined,
+)
 const control = assessPositiveControl(data)
 
 // ── 格子
@@ -977,7 +1248,7 @@ const sentinel = facePortSentinel()
 
 // ── 组装 + 禁令自检
 data.source = dataNote
-const report = renderReport({ mode: MODE, data, arms, batch, control, cells: { seq, one, counts }, batteryResult, sentinel, breakName: BREAK })
+const report = renderReport({ mode: MODE, data, arms, batch, control, cells: { seq, one, counts }, batteryResult, sentinel, breakName: BREAK, probe })
 
 const leaked = FORBIDDEN_IN_REPORT.filter((re) => re.test(report)).map(String)
 if (leaked.length) {
@@ -1014,6 +1285,7 @@ process.stdout.write(
     `faceA=${arms.A.faceNorm ?? '-'} faceB=${arms.B.faceNorm ?? '-'} ` +
     `countA=[${arms.A.counts.map((x) => (x.count === null ? '?' : x.count)).join(',')}] countB=[${arms.B.counts.map((x) => (x.count === null ? '?' : x.count)).join(',')}] ` +
     `battery=${batteryResult ? `${batteryResult.checks.filter((c) => c.state === ST.OK).length}/${batteryResult.checks.length}` : 'n/a'} ` +
+    (FACE_GIVEN ? `faceCmd="${FACE_DESC}" faceProbe=${probe ? probe.state : 'skipped'} ` : '') +
     `exit=${code} report=${relOut}\n`,
 )
 process.exit(code)
