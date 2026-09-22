@@ -214,12 +214,35 @@
     · 配套：**"脸"（= `system` + `tools` 字段）是每次请求重发的说明书**；实测 council preset 的脸 ≈ **40.2K tok（99%）**，
       其中 `tools` 的 103 个工具占 **94%**（`system` 只 6%）⇒ 谈"省 token"必须先说清**省的是脸还是历史**。
 
+24. **★★★ 做完一件实质东西【必须登记】，否则下一个会话会把它当"陌生先例"、甚至重新设计一遍**（2026-09-22 实证）：
+    · 实例：`docs/capability-registry-evolution.md`（**62KB 设计文档**）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
+      是**我们自己在早前会话里、按用户要求写的**（P2 数据层 + P3 注册门），
+      但**当时没登记进 `MEMORY.md` 索引** ⇒ 今天这一轮我按"先查三处"去查，
+      **把它当成了"别人的先例"，还据此""更正"了自己的结论** —— 用户指出："这个地方就是我让你写的呀"。
+    · **⇒ 纪律一：铁律 17 的"第一处（本地）"必须包括【我们自己的 `docs/` 与 `scripts/`】，
+      而且不能只看"有没有"，要能回答"这是谁写的、什么状态"。**
+    · **⇒ 纪律二：写完实质东西（设计文档 / 脚本 / 门 / 数据层）【当场】把它加进本文件的主题索引**，
+      写明：**在哪、是什么、什么状态、与谁有关系**。**索引里没有 = 不存在。**
+    · **⇒ 纪律三：登记要写"关系"**，不只是"存在" —— 本轮就是"存在但关系未登记"（两条材料线互不认识）导致的误判。
+    · 配套：`skill-as-agent-spec.md §19–20` 记录了这次误判与更正的全过程。
+
 ## 主题索引（**按需读**）
 
 ★★ **子 Agent / 分身机制：施工一律从 `docs/skill-as-agent-spec.md` 开始**（**自足的施工规格**：
-不变量 I1–I4 / 已定裁决 D1–D8 / 施工计划 S0–S7 与每步验收门 / 未闭合 O1–O7 / 反模式清单）。
+不变量 I1–I4 / 已定裁决 **D1–D10** / 施工计划 S0–S7 与每步验收门 / 未闭合 **O1–O31** / 反模式清单）。
 **它是结论固化；`docs/skill-as-agent-feasibility.md` 是讨论过程（§1–14，含每次更正），只在要追溯"为什么这么定"时读。**
 **压缩上下文后要恢复工作，只读 spec + `out/` 下的实测输出即可继续。**
+
+★★ **能力库线（【我们自己写的】，之前漏登记 ⇒ 2026-09-22 补登）**：
+- `docs/capability-registry-evolution.md`（**设计文档 62KB**）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
+  = 能力库的 **P2 数据层 + P3 注册门**（外加：来源扫描 / 唯一读写口 / 快照还原）。
+- **核心论断（`:7` 逐字）**：「**sub agent 就是它的能力；sub agent 的能力就是它的能力。这比自己给自己改好得多。**」
+- **`:30` 逐字判定**：「`ctx.subagents` 是进程单例、注册名全局唯一、自带跨会话查询面（`listChildren`/`followup`）
+  → **「能力库」不需要新建存储，它已经是了**」⇒ **成品层已存在 = `ctx.subagents` 的 provider 注册表**。
+- **旁挂账本**：`~/.dsh/capabilities/registry.json`；lineage = `{id, version, source, acceptance, holdoutHash, registeredAt, supersededBy}`；
+  **四动作**：注册 / 升级(supersede) / 合并(merge) / 淘汰(retire)；★ **注册 ≠ 采纳**（`register` 只建 `pending`，过门并写回 `acceptance` 才算）。
+- ★ **它与 `packages/skill-tree`（自学习 skill 树，**孤儿包**：只被自己包内引用、未挂载）双向零引用、关系未裁决** ⇒ **O30**。
+- 评估与更正过程见 `docs/skill-as-agent-spec.md` **§20**。
 
 | 主题 | 文件 | 什么时候读 |
 |---|---|---|

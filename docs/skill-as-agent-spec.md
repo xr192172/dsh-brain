@@ -1205,3 +1205,84 @@ usage 两源归并（O11）、种子/分身三列切分、切分标记普查、A
 |---|---|---|
 | **O30** | ★ **裁决两条材料线的关系**（§20.4 的 ①②③） | `skill-tree` 的去向与改名、成品层的上架来源 |
 | **O31** | **`capability-registry` 的 entry 与 `ctx.subagents` provider 的对应关系**（一个 capability = 一个 provider？一对多？改名/版本怎么映射） | 成品层与账本层的接线 |
+
+---
+
+## 21. 四路并行取证结果（2026-09-22；**每条关键指控我都独立复核过**）
+
+> 产出：`out/w12-o7-per-child-preset.md` / `w12-o30-o31-material-lines.md` / `w12-o28-snapshot-dedup.md` / `w12-o27-face-fingerprint.md`
+> + 新脚本 `scripts/face-audit.mjs`（可复跑）
+
+### 21.1 ★★ 更正 §20.2：两条材料线的关系**不是"从未被定义"，而是"文档里写过、从未落成代码或裁决"**
+
+**我核验了 W2 的纠正（逐字，`docs/revised-architecture-2026-09-20.md`）：**
+
+| 行 | 原文 |
+|---|---|
+| `:273` | "`capability-registry` 有 `lineage`（注册/升级/合并/淘汰）+ `supersededBy`；**`SkillNode`（技能树，未移植）本身就是候选池**" |
+| `:285` | "⇒ **Skill 树是这套操作的对象与账本**：新子 agent 不断长出来，能力面决定'该新建 / 该合并 / 该融合'。" |
+| `:350` | "7. **skill → subagent 的构建路径**：**`SkillNode.Script/Tools` 升格成 provider 时**，…" |
+| `:347` | "｜**相同**（能力面重合）｜**合并**｜一个（`SkillNode.Absorb` / `AbsorbOutcome` 就是它的现成字段）｜" |
+
+⇒ ★★ **这份文档已经把 O30 的【方案②】写出来了**（"`SkillNode.Script/Tools` 升格成 provider"），
+并明确了 Skill 树的角色是**"候选池 + 对象与账本"**。
+⇒ **⇒ 所以 O30 的选择不是从零裁决，而是"把已写过的方案落成代码 + 正式登记"。**
+⇒ ⚠️ **一处状态矛盾要澄清**：该行说 `SkillNode` **"未移植"**，但 `packages/skill-tree` **确实存在（TS 移植版）**
+  ⇒ **文档与代码状态不一致**（可能是该行写在移植之前）⇒ **新增 O32，必须先澄清哪个是现行事实。**
+⇒ ★ 而它**没落成代码/裁决**的原因正是用户指出的：**没登记**（见铁律 #24）。
+
+### 21.2 ✅ O7 关闭：**没有公开的 per-child preset 入口**
+
+**我核验**：`childSessionMeta(parent, childDepth, lineageSeedLength)` —— **三个形参，没有 preset override**（`dsh-subagent/lib/types/child-agent.js:80`）。
+⇒ 加上 `meta.agentPreset` 是"**记录**"而非"**指令**"（写入 `dsh-session/lib/index.js:1667`；两个创建点硬编码 `childSessionMeta`）⇒
+**O7 = 无公开入口。**
+**今天的可行做法**（代价由轻到重）：
+- **(b) 子代 scope 遮蔽**（D6 路线，**已有 (d) 实测支持**）—— **零 patch，首选**
+- **(c) `toolFilter` 裁**（只能裁，不能加）
+- **(e) 换 provider 名**（provider 由 preset 的 `tool-subagent` 行决定 ⇒ 我们 `subagent-council` 就是这么做的）
+- **(a) patch `childSessionMeta`**（最后手段）
+- ★ **新发现**：`subagents.registerContinuableSetup()`（`dsh-subagent/lib/types/index.js:155-157`）是**公开的子代 creation-window 挂点**，
+  但**只覆盖 continuable 子代**，且贡献契约是**同步**的。
+
+### 21.3 ✅ O28 关闭：**去重成立 —— 仅变化时注入**
+**我核验**（`dsh-agent-loop/lib/index.js:64-67` 逐字）：
+```js
+if (this.retained === void 0 && current.length === 0) return;
+const snapshot = current.length === 0 ? CLEARED : current;
+if (this.retained?.text === snapshot) return;      // ★ 纯文本等值比较
+```
+⇒ **判重 = 纯文本等值**；**提交 = 消息尾端追加新消息（全文，非 diff）** ⇒ 历史**只在变化时增长一条**，**从不改写已有消息** ⇒ **前缀安全** ✓
+⇒ `retained` 恢复：倒扫 `session.events`，要求 `seq ∈ session.surface.nodes`；**被压缩遮蔽 ⇒ `retained = null` ⇒ 自动重发** ✓
+
+**★★ 由此得到一条对我们设计的硬约束（W3 的实测发现，重要）：**
+> **判重是纯文本等值 ⇒ 任何"每步都变"的 provider 会让快照每步失效。**
+> 上游对时间戳正是这么办的：`time-context` **不走 `systemPrompt.context()`**，而挂 `agent/pre-step` 自己追加 + 自带 `refreshIntervalMs` 节流。
+> **⇒ 我们注入的 face 指纹必须【只在能力集真变时才变】—— 绝不掺时间戳 / 会话 id / 序号 / 端口。**
+
+### 21.4 ✅ O27 关闭：face 指纹已定义、审计脚本已跑通 —— **并量出两个真问题**
+**跑通结果**：`node scripts/face-audit.mjs` → `scanned=185 sessions, face-changes=86, stale-claims=0`（产物 `out/face-audit.txt`）
+**指纹**：`sha256("dsh-face/v1\n" + |S|len(system)+system + |T|n+ 字典序各工具的 名+canonicalJSON(对象))[0:8]`（**含 schema 全文**）
+
+| 实测发现 | 证据 | 结论 |
+|---|---|---|
+| ★ **`stale-claims=0` ≠ "审计通过"** | 本机有 **369 条** runtime-context 快照，**没有一条带 `face=`** | 脚本把"无宣称"与"宣称都对"**分开报** ⇒ **这正是防"假绿"的正确姿势**（铁律 #7/#12） |
+| ★★ **最大一类假阳性：端口** | 77 个会话内变化点里 **33 个**的差异**只在 `system` 里的 Web GUI 端口**（`:3087 → :3089`，我已核验 `out/face-audit.txt:1060-1089`） | **端口一跳指纹就变 ⇒ 判重失效 ⇒ 多塞一条快照** ⇒ **写进快照的指纹必须先做端口归一化** |
+| ★★ **只哈希"工具名集合"一定会漏** | `fd6d7819` 的 `seq 8646→9853`：工具数 69→69、名字集同、**system 逐字相同**，**face 仍变了** | 差异只在 **tools 条目内容** ⇒ **这就是"指纹含 schema 全文"的实测依据**（不是推理） |
+
+### 21.5 ✅ O30 / O31 有答案（待裁决）
+- **O30**：推荐 **②**（`skill-tree` 是 capability 的上游）**但不能是"自动升格"版**；
+  **①不可取的机制有 5 条**（两个写者各累加一份"用了几次"、ID 空间不可 join、状态机不同构、阈值分歧、合并判据方向相反）；
+  **② 比 ③ 省**（② 的落点可复制 `capability-registry.mjs:231-266` 的既有形状；③ 要改"照搬 Go、改一条就得全量回归"的移植产物）。
+  ★ **分水岭（判据能否对齐）：只有行为信号层能对齐**；机械门需给 `SkillNode` 补 4 项不变量声明；
+  **硬判据两侧都是空的**（`SkillEvaluator` 全仓无实现；capability 的 L3/`holdoutHash` 未实施）
+  ⇒ **今天只能做"候选入池 + 只经注册门采纳"的单向门。**
+- **O31**：**不是 1:1，且"接线"根本不存在** —— `kind:'mcp-server'` 的 entry 没有 provider（现场 `design-canvas`：`provider=null`）；
+  映射分散三处（旁挂 JSON / `subagent-council/src/index.ts:122` 唯一 `registerProvider` 调用点 / preset 配置），**只有后两处是真的**；
+  **`supersede` 只改 JSON，从不碰 `ctx.subagents`** ⇒ **版本映射只能靠"注销+注册"保持，而这是 `check` 查不到的那类错误。**
+
+### 21.6 新增未闭合
+
+| # | 未闭合 | 挡住 |
+|---|---|---|
+| **O32** | **澄清状态矛盾**：`revised-architecture-2026-09-20.md:273` 说 `SkillNode` **"未移植"**，但 `packages/skill-tree` 存在（TS 移植版） | O30 的裁决前提 |
+| **O33** | **端口归一化**：face 指纹必须先把 `system` 里的 `127.0.0.1:<port>` 归一化，否则每次换端口都多塞一条快照 | S3/S4 |
