@@ -2130,3 +2130,58 @@ FAIL  vectors-pairing-l3-negative-controls-have-same-shape-positive
 |---|---|---|
 | **O60** | **"负向向量被删"无保护** | 见 37.5-2 |
 | **O61** | **`transition` 弱配对**（不比 `from`/`node.status`） | 见 37.5-1 |
+
+---
+
+## 38. ★★★★★ **里程碑：契约被 Go 实现实际跑通（14/14 PASS）** —— 而且它真的暴露了契约的缺口
+
+> 用户选 ②（动 Go）。**这是"把契约拿去实际用一次"的第一步，结果证明这一步比继续磨判据更有价值。**
+
+### 38.1 动 Go 前的两个前置（都已处理）
+
+| 前置 | 处置 |
+|---|---|
+| ★ **`ai-base` 仓有 479 项未提交改动**（462 M / 10 D / 7 ??；`472 files +21157 −22821`；HEAD=`5ea9777f`(2026-08-26)；改动 mtime **2026-09-03 / 09-06** ⇒ **约 2.5 周前，不是并发作业**） | ★ **（a）绝不 commit / add；（b）只碰指定文件；（c）给 5 个目标文件做基线快照**：`out/ai-base-baseline-2026-09-22/`（含 `MANIFEST.sha256` + `BASELINE.txt`）⇒ **我的改动可精确 diff、可无损回滚** |
+| ★ **基线是否可编译**（否则我的改动会背假红） | **实测：`go build ./...` exit 0；`go test ./internal/memory/...` exit 0（ok 4.220s）** ⇒ **基线健康** |
+| Go 工具链 | ✅ 在（`go1.26.4`） |
+
+### 38.2 P1：真实 Go 代码符合契约（改动四处 + 新增文件）
+
+- ★★ **"装饰门 → 真门"的那一行**：`skill_tree.go` 的 L3 分支
+  `if !l0 {` ⇒ **`if !l0 && voc.IsInjectable(node.Status) {`** ⇒ **L3 现在也要求可注入状态**；
+- `skill_import.go`：`Status: "active"` ⇒ **`pending`**；`archived` 复活 ⇒ **回 `pending`**（重新导入 ≠ 重新采纳）；
+- **状态词汇表集中**到新文件 `internal/memory/gate_policy.go`；★ **策略值全部走 `GatePolicy` 接口，判定处零字面量**（响应 `ai-base/AGENTS.md` 第 4 条"不硬编码策略"）；
+- **状态迁移** `TransitionSkillStatus`：与 `builder.go:491 InvalidateNodes` **同形（读 → 改 → `UpsertNodes`）** + **回执位**，并用 `*string` **区分"缺 `proofLevel`"与"显式 `null`"**；
+- `builder.go` / `active_skills_injection.go` / `skill_registry.go` **逐字节未改动**（已核）。
+
+### 38.3 P2：Go CLI 让 14 条向量真正跑在 Go 上
+
+- **新增** `cmd/gatecheck/main.go`：实现 runner 的"实现协议"（`visible` / `transition`）。
+  ★ **纯适配层** —— 它**复用真实判定逻辑**（`visible` → 真实 `GetActiveSkills`；`transition` → 真实 `TransitionSkillStatus`），
+  **不许另写平行实现**（否则验证的是假的）；`ok:false` 时**不写文件**（避开契约明记的"假红"）。
+- ★ **状态写回按契约**（`writeback.mode="in-place"`、`readback.field="status"`）：原地回写 `--node` 的 `status` + `receipt`。
+
+### 38.4 ★★★ 我的独立复核（四项）
+
+| 项 | 结果 |
+|---|---|
+| ★★★ **`gate-vector-run.mjs --impl "<go exe>"`** | **`EXIT=0` / `14/14 PASS / 0 FAIL`**；关键对照行 **`l3-active-trigger-match-visible=PASS  l3-pending-trigger-match-hidden=PASS`** ⇒ **Go 实现"既没漏也没全封"**<br>（runner 自带免责："只证明**这批向量覆盖到的判据**一致，**不等于门已被 Go 侧实现**" —— 这个边界要保留） |
+| Go 基线仍绿 | `go build ./...` **exit 0**；`go test ./internal/memory/...` **ok** |
+| ★ **契约词汇表不完整** | **`demoted` / `absorbed` 确实存在**，且 `internal/memory/gate_policy.go:83/214-215` **自己写着它们"在【契约词汇表之外】"** ⇒ **子代理的说法被证实**，且它把这个边界写进了代码注释 |
+| 未污染别人的改动 | ai-base 未提交 **479 → 483**，多出来的**正好是它新增的 4 项**（`cmd/gatecheck/`、`gate_policy.go`、`skill_gate.go`、`skill_gate_test.go`） |
+
+### 38.5 ★★ 子代理如实报的三件事（我的裁决）
+
+| # | 它报的 | 我的裁决 |
+|---|---|---|
+| **1** | ★ **它碰了 2 个【既有测试文件】**（超出 allow 列表）：因为 `import ⇒ pending` 之后有 **6 个既有测试失败**（它们**用 `ImportSkill` 造节点、又断言它能被注入**），它在每处加了一行 `adoptForInjection(...)` | ★ **接受** —— 那些测试**原本就把"导入即采纳"这个 bug 固化了**。但**这是 scope 扩大**，必须记账（**新 O63**） |
+| **2** | ★★ **L3 用的是"显式排除不可注入集"，不是字面 `== active`** —— 因为 **`demoted` 必须保持可注入**（否则 `TestSkillTreeGetActiveSkillsDemotedPenalty` 挂，且 `:1118/:1148` 的降权成死代码） | ★ **接受**，且这正是本轮的**真发现**：**契约词汇表缺 `demoted`/`absorbed`**（**新 O62**）。对契约的 5 个合法状态，两种写法结论完全相同（向量全过），并已用新测试钉住差异 |
+| **3** | **`requires` 依赖边也加了同一条件**（同一条注入路径的第二个入口） | ★ **接受** —— **否则 `pending` 的依赖可随 `active` 主技能被注入 = 真漏洞**。它主动标了"若认为越权可删" |
+
+### 38.6 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O62** | ★ **契约词汇表补 `demoted` / `absorbed`**（现有词汇表不含它们；代码里它们是真实状态且有语义） | 契约与实现的一致性 |
+| **O63** | ★ **"测试固化了被修的 bug"要作为一类单独处理**（更新它们 vs 保持红 ⇒ 需要一个明示规则） | 后续每次修 bug 都会遇到 |
+| **O64** | **`ai-base` 的 479 项未提交改动** ⇒ 我的改动混在其中；**需要在某处正式记录"哪些是本轮新增"** | 跨仓可追溯性 |
