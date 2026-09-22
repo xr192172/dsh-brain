@@ -1335,3 +1335,55 @@ if (this.retained?.text === snapshot) return;      // ★ 纯文本等值比较
 `capability-sources.mjs` 头部注释就写着"**假漂移比不报更坏**"）。
 ⇒ **凡是"某文件缺了 / 某测试红了"这类否定性读数，先换一种【可靠调法】复验一次再下结论**
 （统计用 `.mjs`、列目录用 `ls -R`、跑测试用显式文件列表）。
+
+---
+
+## 23. ★★★ P3 第一块落地：`scripts/capability-intake.mjs`（候选入池 + 只经注册门采纳）
+
+> 依据 §22.3（P3 是刻意留空的空位）+ W2 的建议（单向门）。**子代理执行 + 我独立复核 + 我清理残留。**
+
+### 23.1 交付
+
+**`scripts/capability-intake.mjs`**（新）：**候选 → 只建 `pending` → 跑注册门 → 只有过门才写 `acceptance` → 出可复算报表**。
+- **默认 dry-run**（无 `--apply` **不写库**）；`--apply` 才写，且**先 `capability-snapshot.mjs --save`**。
+- ★ **dry-run 的关键设计**：把 `registry.json` **复制进临时 `DSH_HOME` 沙箱**，在沙箱里 `register` + 跑门
+  ⇒ **既不动真库，又拿到"真实门的真实结论"**（门跑真判据：真 import 编译产物、真跑 `apply`）。
+- **候选来源三条**：① **显式清单**（`--candidate/--pkg/--role/…`，可用）② **外部来源**（`capability-sources`）
+  ③ ★ **`skill-tree` 候选池 = 暂不可用**（**无持久化 store**，移植计划 L3 的 `import/*`+`store/*` 未移植）⇒ **报表里单列一行如实说明**。
+- **报表字段**：候选 / 是否已在库 / 入池结果 / **门的每一级 `level`+`ok`+`detail`** / **`proofLevel`** / **`unenforced`** / 被拒 reason / 本次是 dry-run 还是 apply。
+
+### 23.2 我的独立复核（不只看它的报告）
+
+| 项 | 结果 |
+|---|---|
+| dry-run 独立重跑 | `candidates=1 registered=0 passed=0 rejected=1 apply=false`，**exit 0** ✓（且它**正确拒了**我造的候选） |
+| **不改真库** | 库的 `updatedAt` 在 dry-run 前后**未变**（`2026-09-22T06:01:13.201Z`）✓ |
+| `proofLevel` / `unenforced` 原样出现 | ✓（被拒候选 `"L0"`、过门候选 `"L1"`，均 `unenforced=["L2","L3","L4"]`） |
+| 库里现在有什么 | ★ **5 条**：`spawn` / `fork` / `council-architect` / `design-canvas` **均 `active` + `门:L1`** ⇒ **这条能力库线是真的在用的**；外加 1 条 selftest 残留 |
+
+### 23.3 ★★ 两条诚实边界（子代理如实报出，我照记）
+
+1. ★ **「过门 ⇒ 真写 `acceptance`」只在【沙箱】里演示过，没在真库上跑过。**
+   理由：跑它就会往**共享能力库**写一条**编造的 `active` 采纳记录**，而 registry **没有 `delete`**（`retire` 也留痕）。
+   ⇒ **同一条分支、同一道门，只差 `DSH_HOME`** —— 但**"真库上跑过"这件事没有证据**，必须记账。
+2. **门一定会写库**（**被拒也写 `failed` 回执**）⇒ 脚本只在**沙箱判定过门**时才对真库跑门；
+   **被拒时不对真库跑门**（真库那条保持 `kind:"none"`），reason 仍逐项如实记录在报表里。
+
+### 23.4 ⚠️ 我自己的验收门设计得不好（通用教训）
+
+**我的验收门第 2 条要求"带 `--apply` 再跑一次 ⇒ 确实入池"** ⇒ 子代理照做 ⇒ **真库被写进一条编造的 `intake-selftest-design`**。
+**⇒ 我随后用官方路径清理：`capability-registry.mjs retire intake-selftest-design --reason "selftest cleanup…"`**（清理前先 `capability-snapshot.mjs --save`）
+⇒ 现在状态是 `retired`（**留痕但不生效** —— registry 无 `delete`，这是可审计的设计）。
+
+⇒ ★ **纪律（新增）：设计验收门时要问"它会不会污染【共享可变状态】"**；
+**能沙箱化的就不许写真库** —— 本块的 dry-run 沙箱**本来就能证明整条链路**，我却在门里要求了"写真库"，
+**等于用"污染共享状态"换一个本来免费就能拿到的证据**。
+（共享状态的代价不是"多一条数据"，而是**别的会话/守护进程可能正读它** —— `capability-store.mjs` 头部正是为此而写。）
+
+### 23.5 未闭合（本块遗留）
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O34** | **`skill-tree` 候选池接入** —— 等 L3 的 `store/*` 落地 | 现在候选池无落盘数据源 |
+| **O35** | **"真库上跑通『过门 ⇒ 写 acceptance』"** —— 需要一条**真实**、值得采纳的候选（不能编造） | 沙箱演示 ≠ 真库跑过 |
+| **O36** | **`capability-registry` 无 `delete`** ⇒ 误入池只能 `retire`（留痕）⇒ 是否有必要加"回收" | 影响"试错成本" |
