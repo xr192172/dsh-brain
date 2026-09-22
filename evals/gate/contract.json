@@ -54,7 +54,110 @@
         "rule": "重新导入一个 archived 条目 ⇒ 结果态是 pending，不是 active",
         "why": "现状 skill_import.go:447-448 逐字 if Node.Status == \"archived\" { Node.Status = \"active\" } ⇒ 「复活」是一条绕门路径。重新导入 ≠ 重新采纳。"
       }
-    ]
+    ],
+
+    "legacyStates": {
+      "note": "★★ O62：契约词汇表【之外】、但实现里【真实存在且有语义】的旧状态。★ 为什么必须进契约而不是留给代码：契约与实现的差别**不在于谁对谁错，而在于差别本身没被写下来** —— 没有这份声明时，「demoted 到底能不能被注入」只能靠读 Go 源码猜；而猜错的方向是**静默**的（不是报错，是某个东西照常被注入）。",
+      "why": "★ 来源：docs/skill-as-agent-spec.md §38.5 第 2 条（O62）—— 实现侧的 L3 状态门用的是「显式排除不可注入集」，不是字面 `== active`，**因为 demoted 必须保持可注入**（否则 TestSkillTreeGetActiveSkillsDemotedPenalty 挂，且降权成死代码）。⇒ 对「契约词汇表外的状态」这两种写法结论不同 ⇒ 必须把差异显式声明出来。★ 与 states.values 的区别（这就是为什么不把它们并进 values）：(1) 它们【不参与门】—— 没有任何 transitions.rules 以它们为 from/to；(2) 并把它们进 values 会立刻与 visibility 的口径冲突 —— 校验项要求 invisibleStates 必须 = states.values 减去 adoptedState，而这两个态按实现事实是【可注入】的；(3) 它们由【生命周期/融合】路径写入，不是门的路径。",
+      "origin": "legacy",
+      "visibilityField": "injectable",
+      "visibilityRule": "每个 legacy 状态必须显式声明 injectable（true | false）—— 没有默认值、不许省略：省略 ⇒ 校验项 vocab-legacy-states-declared 会 FAIL（一条规则不明确就是一次假绿机会，与 receipt.status 缺读数不得当 passed 同一条纪律）。",
+      "evidenceRule": "每条 legacy 状态必须逐条带【文件:行】证据（evidence[].file / line / quote 三项皆非空），且引文必须是从 ai-base 只读取得的原文 —— 目的是防止以后有人「凭感觉」往这里加状态。守着它的是校验项 vocab-legacy-states-have-evidence。",
+      "values": [
+        {
+          "status": "demoted",
+          "injectable": true,
+          "injectableVia": ["L3"],
+          "scorePenalty": 0.7,
+          "meaning": "降权态：生命周期把成功率过低的技能标为 demoted（skill_tree.go:503 Demote / :571 RunLifecycle / :448）。它【仍可被注入】，只是在 L3 路径上分数 ×0.7（排序更低）。",
+          "why": "★ 实现事实（只读取证）：GetActiveSkills 的 L3 状态门是「显式排除不可注入集」（:1090 `if !l0 && voc.IsInjectable(node.Status)`），而 demoted 不在不可注入集（invisibleStates = pending/archived/invalidated/suspicious）⇒ 触发词命中即可见（:1118 只降权、不排除）。★ L0 路径仍然挡下它（:1086 是字面 `node.Status == voc.Adopted`）⇒ 它只走 L3。★ 若把它改成不可注入：:1118 / :1148 的降权成死代码，且既有用例 TestSkillTreeGetActiveSkillsDemotedPenalty 会挂（§38.5-2 已裁决接受）⇒ 契约按事实声明 injectable:true。",
+          "evidence": [
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1077-1079",
+              "quote": "if node.Status == StatusArchived {\n\t\t\tcontinue\n\t\t}",
+              "reading": "GetActiveSkills 的 Pass 1 **只对 archived 早退** ⇒ demoted 不会被这道早退挡下。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1090",
+              "quote": "if !l0 && voc.IsInjectable(node.Status) {",
+              "reading": "L3 的状态门是【显式排除不可注入集】（非字面 == active）⇒ IsInjectable(\"demoted\") = !IsInvisible(\"demoted\") = true ⇒ 放行（接着判 triggers 命中）。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1118",
+              "quote": "if node.Status == \"demoted\" {",
+              "reading": "命中后**只**做 score *= 0.7（:1119）—— 降权而非排除 ⇒ 它仍然出现在 result 里。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1148",
+              "quote": "if reqNode.Status == \"demoted\" {",
+              "reading": "依赖边（requires）同样只降权 ⇒ 同一条注入路径的第二个入口也不排除 demoted。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "503",
+              "quote": "node.Status = \"demoted\"",
+              "reading": "Demote 的写入处（另有 :448 / :571）⇒ 这个状态由生命周期真实写入，不是历史残留字段值。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/gate_policy.go",
+              "line": "83-84",
+              "quote": "两者对【契约词汇表之外】的旧状态（\"demoted\" / \"absorbed\"）表现不同：\n// L0 挡下它们（与改动前一致），L3 放行它们（与改动前一致 ⇒ 不误伤既有行为）。",
+              "reading": "★ 实现【自己】声明了这条边界：L0 挡下、L3 放行 —— 这正是 O62 要求契约补上的那句话。"
+            }
+          ]
+        },
+        {
+          "status": "absorbed",
+          "injectable": true,
+          "injectableVia": ["L3"],
+          "scorePenalty": 1,
+          "meaning": "已并入另一个节点：Absorb 成功时把被并入者标为 absorbed + AbsorbedBy 指向并入目标，并从 prinIndex 移除（skill_tree.go:803-806）。",
+          "why": "★ 据代码取证（这是 ① 要求的那道题）：absorbed **与 demoted 走【同一条】L3 判据** —— 早退只看 archived（:1077），状态门是 IsInjectable（:1090），而 absorbed 不在 invisibleStates 里 ⇒ IsInjectable(\"absorbed\") = true ⇒ 触发词命中即可见（且【没有】降权，scorePenalty = 1）。⇒ 契约按事实声明 injectable:true。★★ 如实记：这与「已并入」的直觉相反（读起来像该被排除），但代码事实如此，且实现自己也在 gate_policy.go:83-84 把 absorbed 与 demoted 并列声明为「L3 放行」。★ 注：它被排除的是【索引】（prinIndex / 模糊匹配），**不是**注入面 —— 两者不是一回事，见 :91 的注释与 :803-806 的写入。★ 若要把它改成不可注入，必须先改 Go（本任务明令禁改 ai-base）⇒ 本契约只记录事实，不发明事实。",
+          "evidence": [
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "91",
+              "quote": "statusAbsorbed = \"absorbed\" // merged into another node, excluded from indexes",
+              "reading": "★ 关键区分：被排除的是【indexes】（索引），不是 st.Nodes ⇒ 节点仍在 GetActiveSkills 遍历的集合里。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "803-806",
+              "quote": "// Mark absorbed: status + AbsorbedBy + remove from prinIndex.\n\tabsorbed.Status = statusAbsorbed\n\tabsorbed.AbsorbedBy = intoID\n\tdelete(st.prinIndex, normalizePrinciple(absorbed.Principle))",
+              "reading": "写入处逐字证明了上一条：只 delete prinIndex 一项，**没有**从 st.Nodes 删除。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1077-1079",
+              "quote": "if node.Status == StatusArchived {\n\t\t\tcontinue\n\t\t}",
+              "reading": "Pass 1 的早退只认 archived ⇒ absorbed 不被挡下。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1090",
+              "quote": "if !l0 && voc.IsInjectable(node.Status) {",
+              "reading": "absorbed ∉ invisibleStates ⇒ IsInjectable = true ⇒ 触发词命中即可见（与 demoted 同一条判据）。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/skill_tree.go",
+              "line": "1086",
+              "quote": "l0 := node.Score > 0.7 && node.UseCount > 10 && node.Status == voc.Adopted",
+              "reading": "L0 是字面 == adoptedState ⇒ 即使分数/次数达标，absorbed 也走不了 L0（只可能走 L3）。"
+            },
+            {
+              "file": "ai-base/agent-shell/internal/memory/gate_policy.go",
+              "line": "214-216",
+              "quote": "// 2. 契约 vocabulary 之外的旧状态（\"demoted\" / \"absorbed\"）本文件不覆盖：\n//    demoted 由生命周期写入（skill_tree.go Demote/Score），absorbed 已由\n//    statusAbsorbed 常量定义。",
+              "reading": "实现侧自己承认这两个状态「在契约词汇表之外」—— O62 就是把这句话变成契约里的一等公民。"
+            }
+          ]
+        }
+      ]
+    }
   },
 
   "receipt": {
@@ -154,12 +257,14 @@
   "visibility": {
     "note": "注入可见性：一个条目是否可以被注入 prompt。两条路径都必须在契约里显式声明。",
     "invisibleStates": ["pending", "archived", "invalidated", "suspicious"],
-    "invisibleRule": "凡 status != adoptedState（= active）者一律不可注入；invisibleStates 就是它的【枚举形式】= states.values 减去 adoptedState。★ 判定的机器可读形式只有这个枚举 —— 本字段只是文字说明，不参与判定（与「散文引用 kind:\"ref\" 不得当作通过」同一条纪律：散文不可断言）。",
+    "invisibleRule": "【只对本契约词汇表 states.values 的 5 个状态成立】凡 status != adoptedState（= active）者一律不可注入；invisibleStates 就是它的【枚举形式】 = states.values 减去 adoptedState。★ O62 补充边界：本规则【不覆盖】契约词汇表之外的旧状态（states.legacyStates）—— 它们的可见性【逐条】由 legacyStates.values[].injectable 显式声明（demoted / absorbed 皆为 true ⇒ 走 L3 时可见）。★ 为什么必须把这条边界写出来：实现侧的 L3 状态门是「显式排除不可注入集」（见 visibility.rules[L3].statusMode），而不是字面 == adoptedState ⇒ 对词汇表内 5 态两者结论相同，对词汇表外旧状态结论不同（L3 放行、L0 仍挡下）⇒ 不写出来就会有人以为旧状态「一律不可注入」。★ 判定的机器可读形式只有【这两处枚举/声明】 —— 本字段只是文字说明，不参与判定（与「散文引用 kind:\"ref\" 不得当作通过」同一条纪律：散文不可断言）。",
     "invisibleWhy": "★ O52（补全）：原文只列 [\"pending\",\"archived\"]，而 states.values 有 5 个值 ⇒ 严格按 invisibleStates 判的实现会把 invalidated / suspicious 判成「可见」（假绿）。补全后「不可见集」与词汇表口径一致：任何非 active 态都进不来（两条路径都 requireStatus == \"active\"）。★ 与检索侧的区别：states.meaning 里 suspicious 是「检索侧降权而不排除」——那是【检索路径】的行为；本契约管的是【注入路径】，注入侧一律不可见（降权 ≠ 可注入）。",
     "rules": [
       {
         "level": "L0",
         "requiresStatus": "active",
+        "statusMode": "strict-equals",
+        "statusModeNote": "★ O62：L0 的状态门是【字面严格等于 adoptedState】—— 依据 ai-base/agent-shell/internal/memory/skill_tree.go:1086 逐字 `l0 := node.Score > 0.7 && node.UseCount > 10 && node.Status == voc.Adopted`。⇒ 契约词汇表之外的旧状态（demoted / absorbed）在 L0 路径上**一律被挡下**（即使 score/useCount 达标）。",
         "conditions": [
           { "metric": "score", "op": ">", "value": 0.7 },
           { "metric": "useCount", "op": ">", "value": 10 }
@@ -169,8 +274,10 @@
       {
         "level": "L3",
         "requiresStatus": "active",
+        "statusMode": "explicit-exclusion",
+        "statusModeNote": "★★ O62（本轮的【真发现】）：实现侧 L3 的状态门**不是**字面 `== active`，而是【显式排除不可注入集】—— 依据 ai-base/agent-shell/internal/memory/skill_tree.go:1090 逐字 `if !l0 && voc.IsInjectable(node.Status) {`，而 IsInjectable(status) ≡ !IsInvisible(status) ≡ status ∉ invisibleStates（gate_policy.go:85-87）。⇒ 对 states.values 的 5 个状态，两种写法结论**完全相同**；但对契约词汇表【之外】的旧状态结论不同：L3 放行 demoted / absorbed（见 states.legacyStates，各自带 文件:行 证据），L0 仍挡下它们。★ 为什么这里仍写 requiresStatus = \"active\"：它表达的是【对契约词汇表内状态的要求】（L3 至少要做到 == active），statusMode 才表达实现的完整语义。★ 守着这条声明的是校验项 visibility-status-mode-declared（并交叉校验：声明了 explicit-exclusion ⇒ 必须声明 legacyStates 的 injectable）。",
         "condition": { "kind": "triggers-hit-taskHint" },
-        "why": "★ 触发词命中路径。现状 L3 分支**完全不检查 Status** ⇒ 只把导入处改成 pending 是装饰门（O45 §30.1：L0 被封而 L3 照走）。这一条是本契约最不能少的一条。"
+        "why": "★ 触发词命中路径。现状 L3 分支**完全不检查 Status** ⇒ 只把导入处改成 pending 是装饰门（O45 §30.1：L0 被封而 L3 照走）。这一条是本契约最不能少的一条。★ O62 补：本条的完整语义见 statusMode / statusModeNote —— 「要求 active」是对 5 个契约态说的，「显式排除不可注入集」是对全部状态说的；后者正是 demoted/absorbed 能走这条路的原因。"
       }
     ]
   },

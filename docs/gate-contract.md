@@ -65,6 +65,47 @@ pending | active | archived | invalidated | suspicious
 - 现状 `skill_import.go:447-448` 逐字 `if node.Status == "archived" { node.Status = "active" }`
   ⇒ ★ **「重新导入」是一条绕门路径**：它**不等于重新采纳**，结果必须是 `pending`。
 
+### 1.1 ★★ 词汇表【之外】的旧状态：`demoted` / `absorbed`（O62）
+
+> 机器可读形式：`contract.json` → `states.legacyStates`（**独立一组**，`origin: "legacy"`）。
+
+**为什么必须写进契约**：`ai-base` 自己的注释就写着它们「在契约词汇表之外」——
+`internal/memory/gate_policy.go:83-84` 逐字：
+
+> `// 两者对【契约词汇表之外】的旧状态（"demoted" / "absorbed"）表现不同：`
+> `// L0 挡下它们（与改动前一致），L3 放行它们（与改动前一致 ⇒ 不误伤既有行为）。`
+
+⇒ **差别本身没被写下来时，「`demoted` 能不能被注入」只能靠读 Go 源码猜**；
+而猜错的方向是**静默**的（不是报错，是某个东西照常被注入）。
+
+| 状态 | ★ 是否可注入 | 走哪条路径 | 文件:行 证据（只读原文） |
+|---|---|---|---|
+| `demoted` | ✅ **可注入**（L3，**带 0.7 降权**） | L3 | `skill_tree.go:1090` `if !l0 && voc.IsInjectable(node.Status) {`；`:1118` `if node.Status == "demoted" {`（只降权不排除）；写入处 `:503` `node.Status = "demoted"` |
+| `absorbed` | ✅ **可注入**（L3，无降权） | L3 | `skill_tree.go:91` `statusAbsorbed = "absorbed" // merged into another node, excluded from indexes`；`:803-806` 只 `delete(st.prinIndex, …)`、**没有**从 `st.Nodes` 删除；判据同 `:1090` |
+
+★ **两者都由 L0 挡下**：L0 的 `statusMode` 是 `strict-equals`（`skill_tree.go:1086` 逐字
+`l0 := node.Score > 0.7 && node.UseCount > 10 && node.Status == voc.Adopted`）。
+
+**为什么单开一组 `legacyStates` 而不是并进 `states.values`**（本契约的选择，理由在此）：
+
+1. ★ **并进去会与 visibility 的口径要求直接打架**：校验项要求
+   `invisibleStates` 必须 **= `states.values` 减去 `adoptedState`**（§4.1 的 O52），
+   而这两个态按实现事实是**可注入**的 ⇒ 并进 `values` 就等于要求契约自相矛盾。
+2. 它们**不参与门**：没有任何 `transitions.rules` 以它们为 `from` / `to`（它们由
+   生命周期 / 融合路径写入，不是门的路径）。
+3. ★ **分开才看得见差别**：并进 `values` 会让「契约词汇表」与「实现里全部状态」
+   这两件事混为一谈；分开则两者各自单一来源，且「差集」本身成为契约声明的一部分。
+
+★ **`absorbed` 的结论是按代码取证得到的，不是猜的，也与直觉相反**：`absorbed`
+（"已并入另一个节点"）读起来像**该被排除**，但代码事实是它与 `demoted` 走**同一条**
+L3 判据 ⇒ **可注入**（它被排除的是**索引**，不是注入面）。本契约只记录事实；若要改成
+不可注入，必须先改 Go。
+
+★ 守着它的校验项：`vocab-legacy-states-declared`（**每个状态必须显式 `injectable: true|false`**）/
+`vocab-legacy-states-have-evidence`（**逐条 `文件:行` 证据**，三项皆非空）/
+`vocab-covers-implementation-states`（词汇表必须覆盖实现用到的 7 个状态，且每个都有明确可见性）/
+`visibility-status-mode-declared`（见 §4.2）。
+
 ---
 
 ## 2. ② 判据回执（对齐 TS 侧 `capability-registry`）
@@ -189,6 +230,37 @@ pending | active | archived | invalidated | suspicious
 - 守着它的是校验项 `visibility-invalidated-and-suspicious-invisible`；
   机器判据由两条向量补齐：`invalidated-trigger-match-hidden` / `suspicious-trigger-match-hidden`
   （都走 **L3** 路径、`expect.visible:false`）。
+
+### 4.2 ★★ 「状态门」的**语义**也必须声明：`strict-equals` vs `explicit-exclusion`（O62）
+
+**改前的洞**：契约只写了 `visibility.rules[].requiresStatus = "active"`，
+**没写它是哪种语义** ⇒ 「L3 到底放不放行**契约词汇表之外**的状态」在契约里**读不出来**
+（只能去读 Go 源码）。而这两种写法**对词汇表内的 5 个状态结论完全相同**，
+**只**在词汇表外的状态上不同 ⇒ 这个洞是**静默**的。
+
+| 路径 | `statusMode`（本契约写死） | 逐字依据 | 对词汇表外旧状态的效果 |
+|---|---|---|---|
+| **L0** | `strict-equals` | `skill_tree.go:1086` `… && node.Status == voc.Adopted` | ★ **挡下**（即使 score/useCount 达标） |
+| ★ **L3** | `explicit-exclusion` | `skill_tree.go:1090` `if !l0 && voc.IsInjectable(node.Status) {`（`IsInjectable ≡ !IsInvisible ≡ status ∉ invisibleStates`，`gate_policy.go:85-87`） | ★ **放行** `demoted` / `absorbed`（契约声明的 `injectable:true`） |
+
+★ **为什么这里仍保留 `requiresStatus: "active"`**：它表达的是**对契约词汇表内状态的要求**
+（L3 至少要做到 `== active`），`statusMode` 才表达实现的完整语义。
+
+★ **守着它的校验项** `visibility-status-mode-declared`（**四项交叉自洽**）：
+
+1. 每条带 `requiresStatus` 的规则必须声明 `statusMode` ∈ `["strict-equals","explicit-exclusion"]`
+   + 非空 `statusModeNote`（"这条语义对应源码哪一处"）；
+2. 声明 `explicit-exclusion` ⇒ **必须**声明 `states.legacyStates`
+   （否则「显式排除」与「字面相等」的差别**无处安放**）；
+3. 某 legacy 状态声明「经 level X 可注入」而 X 是 `strict-equals` ⇒ **矛盾**（FAIL）；
+4. 没有一条规则声明 `requiresStatus` ⇒ FAIL（不许空判通过）。
+
+★ **同一处真发现的两个实现**（如实记，这是 O62 最有价值的一半）：
+本轮**之前** `scripts/gate-impl-reference.mjs` 的 L3 写的是**字面** `status === "active"`，
+而 Go 实现是**显式排除** ⇒ 两者对 `demoted`/`absorbed` 结论**相反**（实测同一份节点：
+Go ⇒ `{"visible":true}`，改前的参考实现 ⇒ `{"visible":false}`），
+而这个不一致**没有向量覆盖 ⇒ 静默**。O62 用两条新向量把它变成**可见的**，
+并把参考实现改成**按契约 `statusMode` 走**（§13.3）。
 
 ---
 
@@ -337,7 +409,7 @@ PASS / FAIL / NEEDS-EVIDENCE，不必再混入第四种「向量集不完整」�
 4. **校验器只验"契约自洽"，不验"契约被实现遵守"**。要证明"门被尊重"，需要 O45 §3 的 5 条验收门
    （含**阳性对照**：同两条改成 `active` 必须**出现**）—— 那需要一份**实现**。
    ★ 现状（W15/W16 后）：**实现与向量 runner 已经有了**（`scripts/gate-impl-reference.mjs` /
-   `gate-impl-broken.mjs` / `gate-vector-run.mjs`，14 条向量），所以"门被尊重"由
+   `gate-impl-broken.mjs` / `gate-vector-run.mjs`，**16** 条向量（O62 后；W15/W16 时 14 条）），所以"门被尊重"由
    `node scripts/gate-vector-run.mjs` 证明 —— 但**只覆盖向量覆盖到的那部分判据**，
    且**仍是 mjs 夹具，不是 Go 侧真实调用路径**（见第 1 条）。
 5. **`unenforced = ["L2","L3","L4"]` 是"本项目当前事实"的硬编码**：若将来 L2 被实施，
@@ -352,10 +424,10 @@ PASS / FAIL / NEEDS-EVIDENCE，不必再混入第四种「向量集不完整」�
 ## 9. 怎么用
 
 ```bash
-# 校验契约自洽（28 项检查，每项打印「防的是什么」；任一项失效 ⇒ 非零退出）
+# 校验契约自洽（★ 32 项检查，每项打印「防的是什么」；任一项失效 ⇒ 非零退出）
 node scripts/gate-contract-check.mjs
 
-# ★ 自证有分辨力：阳性对照（真契约必须全过）+ 24 份内存坏契约必须被指定规则挡下
+# ★ 自证有分辨力：阳性对照（真契约必须全过）+ ★ 27 份内存坏契约必须被指定规则挡下
 node scripts/gate-contract-check.mjs --selftest
 
 # 校验一份别的契约（例如你把 L3 的 active 要求删掉试试）
@@ -365,12 +437,14 @@ node scripts/gate-contract-check.mjs --contract <path>
 #   （例如"把 L3 的正向对照删掉"的临时副本 ⇒ 必须报「配对缺失」并非零退出）
 node scripts/gate-contract-check.mjs --vectors <vectors.json>
 
-# ★ 把契约喂给一份实现（14 条向量；runner 的状态读回约定与写回痕迹机制也都从契约读，O51 + O55）
-node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-reference.mjs"   # 14/14 PASS ⇒ exit 0
+# ★ 把契约喂给一份实现（★ 16 条向量；runner 的状态读回约定与写回痕迹机制也都从契约读，O51 + O55）
+node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-reference.mjs"   # ★ 16/16 PASS ⇒ exit 0
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs"      # 必须有一批 FAIL ⇒ exit 1
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --break o51-writeback"  # ★ 必须挂 fileChanged 那条
 # ★ O57：与 l3-status（"全放"）对称的"全封" —— visible 永远返回 false
 node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --break all-hidden"      # ★ 必须挂 L0/L3 两条正向可见性向量
+# ★★ O62：契约被【真实 Go 实现】跑通（重跑向量，证明契约/向量与实现一致）
+node scripts/gate-vector-run.mjs --impl "D:/project_develop/dsh-brain/out/gatecheck.exe"           # ★ 16/16 PASS ⇒ exit 0
 ```
 
 **改这份契约时必须跑的三条**：`node scripts/gate-contract-check.mjs`、
@@ -390,6 +464,7 @@ node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --bre
 
 ★ 三处**都只新增/收紧**：原有 19 项检查一项未删（21 + 1 = 22 项），
 原有 12 条向量的 `expect` 一个都没改（只新增 2 条 ⇒ 14 条）。
+（★ 这两处数字是**当次**记录：O62 后为 **32** 项检查 / **16** 条向量，见 §13。）
 逐条原始输出见 `out/w16-contract-gaps.md`。
 
 ---
@@ -407,7 +482,7 @@ node scripts/gate-vector-run.mjs --impl "node scripts/gate-impl-broken.mjs --bre
 | 层 | 修法 | 守着它的校验项 | 补的向量字段 |
 |---|---|---|---|
 | **① 写回痕迹** | `contract.json` → `implementations.state.writeback.evidence` 显式声明痕迹机制（`kind:"file-digest"` / `scope:"declared-writeback-file"` / `algorithm:"sha256"` / `field:"fileChanged"` / `compare` / `why` / `caveat`）；`gate-vector-run.mjs` 在每次 `transition` **前后**对**契约声明的写回文件**取 `sha256`+字节长度摘要，支持 `expect.fileChanged: true\|false`；契约没声明痕迹机制 / 声明了不认识的那种 ⇒ runner **exit 3 拒绝跑** | `impl-writeback-evidence-declared` | 5 条 transition 向量全补：正向对照 `fileChanged: true`，4 条被拒绝的 `fileChanged: false` |
-| **★★ ② 同形正向对照** | `contract.json` → `vectors.pairing`（`requireFor:"transition.negative-control"` / `mode:"same-transition-target"` / `vectorsFile` / `requirePairAsserts:"fileChanged"`）；**每条 `transition` 类的 `negative-control` 向量都必须存在一条【同 `transition.to`】且带 `fileChanged:true` 断言的 `positive-control` 向量**，缺一条即不合格、非零退出 | `vectors-pairing-rule-declared`、`vectors-negative-control-has-same-target-positive-pair` | —— （规则本身是新增的检查，不新增向量 ⇒ 仍是 14 条） |
+| **★★ ② 同形正向对照** | `contract.json` → `vectors.pairing`（`requireFor:"transition.negative-control"` / `mode:"same-transition-target"` / `vectorsFile` / `requirePairAsserts:"fileChanged"`）；**每条 `transition` 类的 `negative-control` 向量都必须存在一条【同 `transition.to`】且带 `fileChanged:true` 断言的 `positive-control` 向量**，缺一条即不合格、非零退出 | `vectors-pairing-rule-declared`、`vectors-negative-control-has-same-target-positive-pair` | —— （规则本身是新增的检查，不新增向量 ⇒ 当时仍是 14 条；O62 后 16 条，见 §13） |
 
 **为什么第②层才是 O55 的核心（也是为什么它不能只靠"记得别删"）**：
 第①层只提供"一个能被断言的信号"，而**这个信号有没有牙，取决于向量集里有没有一条期望它为
@@ -425,6 +500,7 @@ runner 的结果语义是 per-vector 的 PASS/FAIL/NEEDS-EVIDENCE，不必再混
 
 ★ 本次**只新增/收紧**：原有 22 项检查一项未删（22 + 3 = **25** 项）；
 原有 14 条向量的 `expect`（含 4 条负向）**一个判据都没改**，只**新增** `fileChanged` 字段。
+（★ 数字是**当次**记录：O62 后为 **32** 项检查 / **16** 条向量，见 §13。）
 逐条原始输出见 `out/w18-o55-writeback-trace.md`。
 
 ---
@@ -471,7 +547,7 @@ L3 的 `condition` 只声明了 `{"kind":"triggers-hit-taskHint"}` 而**没有�
 改以「`triggers` + `taskHint` 逐值相等」+「正向对照已被向量断言 `visible:true`」
 = 命中条件**以正向对照为证据**被固定 —— 这已足够把 `status` 隔离成唯一自变量。
 
-### 12.3 守着它的校验项（**25 → 28 项，原有项零删除**）
+### 12.3 守着它的校验项（**25 → 28 项，原有项零删除**；★ O62 后 28 → **32** 项，见 §13）
 
 | 校验项 | 守什么 |
 |---|---|
@@ -502,6 +578,12 @@ L3 的 `condition` 只声明了 `{"kind":"triggers-hit-taskHint"}` 而**没有�
 - ★ **旧模式不得回退**（实测，未回退）：`l3-status` 仍 4 条向量 FAIL（且**默认、`--break l3-status`
   两种跑法的逐向量结果逐字节相同**，只有一行回显的 `impl` 命令不同）；
   `o51-writeback` 仍挂 `fileChanged(写回痕迹 file-digest/sha256)`；`o53-receipt` 仍挂 `…missing-prooflevel`。
+- ★ **O62 补的边界（如实记）**：`all-hidden` 表达「全封」的手法是**只改 `requiresStatus`**
+  （换成不可达哨兵）⇒ 它**只能挡住走 `requiresStatus` 这条路的节点**；而 `demoted` / `absorbed`
+  走的是契约里**独立声明**的 `states.legacyStates`（`injectable:true`）那条路 ⇒ **哨兵管不到它们**。
+  实测（16 条向量下）：`all-hidden` ⇒ **14/16 PASS、2 FAIL**，且失败的**正好**是两条 `active`
+  正向可见性向量（与 O62 之前同为 2 FAIL、同样两条 ⇒ **未回退**）。要把两个 legacy 状态也一起封住，
+  需要改 `gate-impl-broken.mjs`（让哨兵同时中和 `statusMode`）—— **本次未改**（§13.4 记为未闭合）。
 
 ### 12.5 自检里新增的坏样本（19 → **24** 份，`--selftest` 全部被指定规则挡下）
 
@@ -527,8 +609,105 @@ L3 的 `condition` 只声明了 `{"kind":"triggers-hit-taskHint"}` 而**没有�
    **更难配对**（更严，不是更松）⇒ 不会产生假绿。
 4. ★ **本次没有改 `evals/gate/vectors.json`**：14 条向量一条未增未改（`expect` 一个都没动）——
    L0/L3 的正向对照**本来就在**，缺的只是"它们必须存在"这条**机器检查**。
+   （★ 当次记录：O62 后为 **16** 条向量 —— 新增 2 条覆盖契约词汇表外的旧状态，见 §13。）
 5. ★ 本轮**顺带发现**（未闭合，供后续参考）：`gate-vector-run.mjs` 的「两条关键对照」那行
    在向量缺失时会打印 `★ 向量缺失，无法判定`，但**不改变退出码**；
    ⇒ 「向量集完整性」这条信号**只有契约校验器有牙**（这也是它被放在那里的理由，§11 已记）。
 
 逐条原始输出见 `out/w19-o57-pairing-l0-l3.md`。
+
+---
+
+## 13. ★★ O62：契约词汇表补 `demoted` / `absorbed`（含两者的可见性）
+
+**缺口来源**：`docs/skill-as-agent-spec.md` **§38.5 第 2 条**逐字 ——
+
+> **L3 用的是"显式排除不可注入集"，不是字面 `== active`** —— 因为 **`demoted` 必须保持可注入**
+> （否则 `TestSkillTreeGetActiveSkillsDemotedPenalty` 挂，且其降权成死代码）。
+> ⇒ ★ **这是本轮真发现：契约词汇表缺 `demoted` / `absorbed`**（`ai-base` 的
+> `internal/memory/gate_policy.go:83/214-215` **自己写着它们"在契约词汇表之外"**）。
+
+### 13.1 两个状态的可见性结论（**判据不是猜的**：两条都是只读取证的代码事实）
+
+| 状态 | 可见性 | 路径 | 关键原文（`file:line`） |
+|---|---|---|---|
+| `demoted` | ★ **可注入**（**带 0.7 降权**） | **L3** | `skill_tree.go:1090` `if !l0 && voc.IsInjectable(node.Status) {`；`:1118` `if node.Status == "demoted" {`；`:1148` `if reqNode.Status == "demoted" {`；写入 `:503` `node.Status = "demoted"` |
+| `absorbed` | ★ **可注入**（无降权） | **L3** | `skill_tree.go:91` `statusAbsorbed = "absorbed" // merged into another node, excluded from indexes`；`:803-806` 只 `delete(st.prinIndex, …)`、**未**从 `st.Nodes` 删除；`:1090` 同一条判据 |
+| 两者在 **L0** | **不可见** | —— | `skill_tree.go:1086` `l0 := node.Score > 0.7 && node.UseCount > 10 && node.Status == voc.Adopted`（字面严格相等） |
+| 实现自己的说法 | —— | —— | `gate_policy.go:83-84` 逐字：`两者对【契约词汇表之外】的旧状态（"demoted" / "absorbed"）表现不同：L0 挡下它们（与改动前一致），L3 放行它们（与改动前一致 ⇒ 不误伤既有行为）。`；另见 `gate_policy.go:214-216` |
+
+★ **`absorbed` 的答案与直觉相反，但代码事实如此**：`absorbed`（"已并入另一个节点"）
+读起来像该被排除，可它被排除的是**索引**（`prinIndex` / 模糊匹配），**不是注入面** ——
+而 `GetActiveSkills` 遍历的正是 `st.Nodes`（`:1076` `for _, node := range st.Nodes`）。
+⇒ 契约按**事实**声明 `injectable: true`，**不发明事实**。
+
+### 13.2 ① 契约 / ② 向量 / ③ 校验器改了什么
+
+| 处 | 改法 |
+|---|---|
+| ★ `contract.json` → `states.legacyStates` | **新增独立一组**（`origin:"legacy"`）：每个状态**显式** `injectable: true\|false` + `meaning` + `why` + **逐条 `evidence[{file,line,quote}]`**。★ **不并进 `states.values`**，理由见 §1.1（并进去会与「`invisibleStates` 必须 = `values − adopted`」这条既有要求直接打架） |
+| `contract.json` → `visibility.invisibleRule` | 补**边界**：这条规则**只对 `states.values` 的 5 个状态成立**；词汇表外的旧状态由 `legacyStates[].injectable` **逐条**声明 |
+| `contract.json` → `visibility.rules[L0/L3]` | 各加 `statusMode`（`strict-equals` / `explicit-exclusion`）+ `statusModeNote`（点明对应源码行）——见 §4.2 |
+| ★ `vectors.json` | **14 → 16**：`l3-demoted-trigger-match-visible`、`l3-absorbed-trigger-match-visible`（都是 `role:"positive-control"`、`expect.visible:true`）。★ 按 **O57 配对规则**：这两条是**正向**⇒ **不需要**配负向对照（规则只要求每条 `l3.negative-control` **有**同形正向对照）；而它们**不满足**同形定义里的「正向对照 `node.status` 必须是 `active`」⇒ **不会被误当成**既有 4 条 L3 负向向量的对照（既有对照仍是 `l3-active-trigger-match-visible`） |
+| ★ `gate-contract-check.mjs` | **28 → 32 项**（原有项**零删除**，已用脚本逐 id 比对证明）：`vocab-legacy-states-declared` / `vocab-legacy-states-have-evidence` / `vocab-covers-implementation-states` / `visibility-status-mode-declared`；`--selftest` **24 → 27** 份坏样本 |
+
+★ **条数变了，所以"14"字样都跟着改**：当前态表述直接改成 **16**（§8.4 / §9）；
+**历史记录**（§10 / §11 / §12.6，记的是当次事实）**不改数字，只加一行指向本节的指针**
+（例：`（★ 当次记录：O62 后为 16 条向量，见 §13）`）—— 改写历史会让那些记录变成假的。
+检查项数同理（25 → 28 → **32**）。
+
+### 13.3 ★ 为什么必须改 `scripts/gate-impl-reference.mjs`（理由先写在这儿）
+
+**这不是"顺手改"，是不改就自相矛盾**：改前参考实现的 L3 状态门是**字面** `status === "active"`，
+而 Go 实现是**显式排除**（`voc.IsInjectable`）⇒ 两者对 `demoted` / `absorbed` 结论**相反**。
+**实测（同一份节点 + 同一个 taskHint）**：
+
+```
+demoted  ∧ triggers 命中：  Go exe ⇒ {"visible":true}   改前的参考实现 ⇒ {"visible":false}
+absorbed ∧ triggers 命中：  Go exe ⇒ {"visible":true}   改前的参考实现 ⇒ {"visible":false}
+demoted  ∧ L0 档（0.9/20）：Go exe ⇒ {"visible":false}  改前的参考实现 ⇒ {"visible":false}
+absorbed ∧ L0 档（0.9/20）：Go exe ⇒ {"visible":false}  改前的参考实现 ⇒ {"visible":false}
+```
+
+⇒ 新向量在 Go 上 PASS、在参考实现上 FAIL ⇒ **该怪的是实现，不是向量**。改法（策略走接口）：
+新增 `statusGatePasses(contract, rule, status)` —— **从契约读 `statusMode`**：
+
+- `strict-equals`（L0）⇒ 只有字面等于 `requiresStatus` 才放行；
+- `explicit-exclusion`（L3）⇒ 除 `requiresStatus` 外，**契约声明的 `states.legacyStates`
+  `injectable:true` 状态**也放行；契约没声明 `statusMode` ⇒ 退回最严的 `strict-equals`
+  （宁可挡下，也不默认放行）。
+
+★ **对契约词汇表的 5 个状态，这次改动不产生任何行为变化**（两种写法结论相同 ⇒
+原有 14 条向量一条都没改期望、也都没变红）。
+
+### 13.4 守着 O62 的四处断言（`--selftest` 实测逐条被挡下）
+
+| 坏样本 | 期望被挡下的规则 |
+|---|---|
+| **legacy 状态没有明确的可见性**（删掉 `demoted` 的 `injectable`） | `vocab-legacy-states-declared` + `vocab-covers-implementation-states` |
+| **legacy 状态没有 `文件:行` 证据**（清空 `absorbed` 的 `evidence`） | `vocab-legacy-states-have-evidence` |
+| **契约没声明 legacy 组**（删掉整个 `states.legacyStates`） | ★ 四项 O62 检查**全响**（含 `visibility-status-mode-declared`：L3 声明了 `explicit-exclusion` 却没处安放差异） |
+
+### 13.5 如实记的边界与未闭合
+
+1. ★★ **`--break all-hidden` 的含义变窄了**（不是回退，但要说清）：哨兵只改
+   `requiresStatus` ⇒ 挡不住走 `states.legacyStates` 那条路的 `demoted` / `absorbed`。
+   实测 **14/16 PASS、2 FAIL**（失败的仍是那两条 `active` 正向对照，与 O62 前同为 2 FAIL）⇒
+   「全封被抓」这条**未回退**。★ 要让它重新变成严格的"全封"，需改
+   `gate-impl-broken.mjs`（哨兵同时中和 `statusMode`）—— **本任务未授权改那个文件，故未改**（**未闭合**）。
+2. ★ **参考实现与 Go 在「契约与实现都没提过的状态」上仍然不同**：Go 的
+   `IsInjectable` 是 `!IsInvisible` ⇒ **未声明状态会被放行**；参考实现按契约声明取集合
+   ⇒ **未声明状态不可注入**（fail-closed）。当前**没有向量覆盖**那种状态（**未闭合**）。
+3. ★ **`absorbed` 是否**应该**可注入，本契约不下判断**：它只记录代码事实
+   （`injectable: true`）。若「已并入 ⇒ 该被排除」才是正确语义，那要改的是
+   `ai-base`（本任务明令禁改）⇒ 届时应先改 Go，再改契约与向量（**未闭合**）。
+4. ★ **Go 侧 `gate_policy.go` 是契约的【构建期快照】，不读运行期 `contract.json`**
+   （该文件自己的「边界」第 1 条已记）⇒ 这次契约补了 `legacyStates`，
+   **Go 侧快照并没有跟着变**（也不需要 —— 它的 L3 语义本来就是"显式排除"，
+   与契约现在的声明**恰好一致**；一致是**被向量证明的**，不是被类型系统保证的）。
+   「快照是否漂移」仍**没有机器检查**（**未闭合**，沿用该文件的记录）。
+
+**门结果（原始输出见 `out/w21-o62-legacy-states.md`）**：契约校验 **32 项 / exit 0**；
+参考实现 **16/16 PASS / exit 0**；★★ **Go 实现 16/16 PASS / exit 0**；
+四种 `--break` **全部仍被抓**（`l3-status` 4 FAIL / `o51-writeback` 1 FAIL /
+`o53-receipt` 1 FAIL / `all-hidden` 2 FAIL）。

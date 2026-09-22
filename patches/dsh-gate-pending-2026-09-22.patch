@@ -1,0 +1,121 @@
+diff --git a/internal/memory/skill_import.go b/internal/memory/skill_import.go
+index 9f8ea07..f82db15 100644
+--- a/internal/memory/skill_import.go
++++ b/internal/memory/skill_import.go
+@@ -392,10 +392,13 @@ func (st *SkillTree) ImportSkill(id, source, principle, fix string, triggers []s
+ 
+ 	now := time.Now().Format(time.RFC3339)
+ 	node := &SkillNode{
+-		ID:                id,
+-		Type:              "skill",
+-		Source:            source,
+-		Status:            "active",
++		ID:     id,
++		Type:   "skill",
++		Source: source,
++		// ★ 导入 ≠ 采纳（O45 落点 (a)；契约 states.rules.import-defaults-to-pending）：
++		// 新导入的条目是【候选能力】，默认未过门 ⇒ 取策略声明的 defaultOnImport，
++		// 不写死字面量（AGENTS.md 禁止行为第 4 条：策略走接口）。
++		Status:            st.gatePolicy().Vocabulary().DefaultOnImport,
+ 		Level:             1,
+ 		Score:             initialScore(source),
+ 		UseCount:          0,
+@@ -444,8 +447,11 @@ func (st *SkillTree) UpdateImport(id, principle, fix string, triggers []string,
+ 	node.Tools = fm.Tools // ch22 §6
+ 	node.ImportVersion++
+ 	node.ImportedAt = time.Now().Format(time.RFC3339)
+-	if node.Status == "archived" {
+-		node.Status = "active"
++	// ★ 重新导入一个 archived 条目 ⇒ 回到 pending（O45 落点 (a′)；契约
++	// states.rules.reimport-of-archived-goes-to-pending）：重新导入 ≠ 重新采纳，
++	// 否则「复活」就是一条绕门路径 —— 结果态取策略声明，不写死字面量。
++	if node.Status == StatusArchived {
++		node.Status = st.gatePolicy().Vocabulary().ReimportFromArchived
+ 	}
+ }
+ 
+diff --git a/internal/memory/skill_tree.go b/internal/memory/skill_tree.go
+index d768b3d..490411c 100644
+--- a/internal/memory/skill_tree.go
++++ b/internal/memory/skill_tree.go
+@@ -68,6 +68,11 @@ type SkillNode struct {
+ 	// absorption — the user explicitly wants this skill to stay independent.
+ 	Exclusive bool `json:"exclusive,omitempty"`
+ 
++	// Receipt 是「门」的判据回执位（O45 §2 落点 (c)；契约 receipt.schema）。
++	// 由 TransitionSkillStatus 在过门时写入；未过门的条目为 nil。
++	// ★ 词汇表与写入路径见 gate_policy.go / skill_gate.go。
++	Receipt *GateReceipt `json:"receipt,omitempty"`
++
+ 	// Lifecycle timestamps
+ 	LastUsedAt string `json:"last_used_at,omitempty"`
+ 	CreatedAt  string `json:"created_at,omitempty"`
+@@ -157,6 +162,7 @@ type SkillTree struct {
+ 	epoch int
+ 
+ 	evaluator SkillEvaluator    // held-out validation (nil = skip)
++	gate      GatePolicy        // 门的策略（nil = 默认契约策略，见 gate_policy.go）
+ 	prinIndex map[string]string // normalized principle → ID (O(1) lookup, NOT persisted)
+ }
+ 
+@@ -1045,8 +1051,13 @@ func (st *SkillTree) AllNodes() []*SkillNode {
+ // ── Active Skill Injection (ch09 §6) ──
+ 
+ // GetActiveSkills returns skills matching a task, sorted by score descending.
+-// L0: score>0.7 ∧ use_count>10 → always included.
+-// L3: triggers match taskHint keywords.
++// L0: score>0.7 ∧ use_count>10 ∧ status==adopted → always included.
++// L3: triggers match taskHint keywords ∧ status 不在不可注入集。
++//
++// ★ 注入侧的状态门（O45 落点 (b)；契约 visibility）：两条路径都必须过状态。
++// 改前 L0 要求 active，但 L3 分支【完全不检查 Status】⇒ 只把导入处改成
++// pending 就是【装饰门】（pending 技能照样从 L3 走）。本函数现在两条都过门，
++// 策略值来自 GatePolicy（见 gate_policy.go），此处不写死字面量。
+ //
+ // Direction 4: now also pulls in `requires` dependencies (composition).
+ // Dependencies are included with a score penalty (-0.1) so they rank below
+@@ -1055,13 +1066,15 @@ func (st *SkillTree) GetActiveSkills(taskHint string, brain string) []agent.Skil
+ 	st.mu.RLock()
+ 	defer st.mu.RUnlock()
+ 
++	voc := st.gatePolicy().Vocabulary()
++
+ 	keywords := tokenize(taskHint)
+ 	var result []agent.SkillEntry
+ 	seen := make(map[string]bool) // dedup by ID
+ 
+ 	// Pass 1: direct matches (L0/L3).
+ 	for _, node := range st.Nodes {
+-		if node.Status == "archived" {
++		if node.Status == StatusArchived {
+ 			continue
+ 		}
+ 		if brain != "" && node.Brain != "" && node.Brain != brain {
+@@ -1069,11 +1082,12 @@ func (st *SkillTree) GetActiveSkills(taskHint string, brain string) []agent.Skil
+ 		}
+ 
+ 		// L0: high-score stable skills always included.
+-		l0 := node.Score > 0.7 && node.UseCount > 10 && node.Status == "active"
++		// 契约 visibility.rules[L0].requiresStatus = active（严格等于）。
++		l0 := node.Score > 0.7 && node.UseCount > 10 && node.Status == voc.Adopted
+ 
+-		// L3: trigger match.
++		// L3: trigger match — ★ 也必须过状态门（契约 visibility.rules[L3].requiresStatus）。
+ 		l3 := false
+-		if !l0 {
++		if !l0 && voc.IsInjectable(node.Status) {
+ 			for _, trigger := range node.Triggers {
+ 				for _, kw := range keywords {
+ 					if strings.Contains(strings.ToLower(trigger), kw) {
+@@ -1124,7 +1138,10 @@ func (st *SkillTree) GetActiveSkills(taskHint string, brain string) []agent.Skil
+ 				continue
+ 			}
+ 			reqNode, ok := st.Nodes[reqID]
+-			if !ok || reqNode.Status == "archived" {
++			// ★ 依赖也过同一道状态门（契约 visibility 的不可注入集）——
++			// 否则 pending 条目仍可经 `requires` 边被注入（同一条注入路径的第二个入口，
++			// 不改它就是另一种「装饰门」）。契约词汇表之外的旧状态行为不变。
++			if !ok || !voc.IsInjectable(reqNode.Status) {
+ 				continue
+ 			}
+ 			reqScore := reqNode.Score

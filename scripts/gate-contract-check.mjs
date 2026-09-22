@@ -35,7 +35,9 @@
  *   ★★ O57 按类配对：删掉 L0 的正向对照、★★ 删掉 L3 的正向对照、
  *   ★ L0 正向对照的 expect.visible 被改成 false（配对无牙）、
  *   ★ L0 负向向量的档位被改到阈值外（"同档位/只差 status"这条同形判据被破坏）、
- *   ★ 契约没声明按类配对 rules(O57)），
+ *   ★ 契约没声明按类配对 rules(O57)、
+ *   ★★ O62 词汇表外的旧状态：legacy 状态没有明确可见性、★ 没有 文件:行 证据、
+ *   ★ 整个 legacy 组被删掉（四项 O62 检查必须全响）），
  *   断言校验器**会拒绝**，并打印每份坏契约被**哪条规则**挡下。
  *   ★ 同时跑一份**阳性对照**（未改动的真契约必须全过）——否则"全红"的校验器也能通过自检，
  *     那是"过度封锁"，与"假绿"同等有害。
@@ -93,6 +95,13 @@ const CLASS_LEVEL = { l0: 'L0', l3: 'L3' }
 const L3_CONDITION_KIND = 'triggers-hit-taskHint'
 /** ★ O57：由 L3_CONDITION_KIND 推导出的命中载体字段名。 */
 const L3_TRIGGER_FIELD = 'triggers'
+/** ★ O62：契约词汇表【之外】、但实现里真实存在的旧状态（必须显式声明可见性 + 逐条 文件:行 证据）。 */
+const REQUIRED_LEGACY_STATES = ['demoted', 'absorbed']
+/** ★ O62：实现真正用到的全部状态 = 契约词汇表 states.values + legacy 组；词汇表必须覆盖它们。 */
+const IMPL_USED_STATES = ['pending', 'active', 'archived', 'invalidated', 'suspicious', 'demoted', 'absorbed']
+/** ★ O62：可见性规则的「状态门语义」取值 —— strict-equals = 字面 == requiresStatus（L0 的现状）；
+ *  explicit-exclusion = 显式排除不可注入集（L3 的现状，Go skill_tree.go:1090 `voc.IsInjectable`）。 */
+const STATUS_MODES = ['strict-equals', 'explicit-exclusion']
 
 // ── ★ O57：按类配对检查用的小工具 ────────────────────────────────────────────
 
@@ -466,6 +475,157 @@ function checkContract(c, opts = {}) {
     missingExtraInvisible.length || undeclaredByVocab.length
       ? `invisibleStates = ${JSON.stringify(invisible)}；未声明不可见的态：${JSON.stringify([...new Set([...missingExtraInvisible, ...undeclaredByVocab])])}`
       : `不可见集（含 O52 补全）= ${invisible.join(', ')}（= states.values 减去 ${JSON.stringify(adoptedState)}）`,
+  )
+
+  // ══ C2. ★★ O62：契约词汇表【之外】的旧状态（states.legacyStates） ═══════════
+  //
+  // 来源：docs/skill-as-agent-spec.md §38.5 第 2 条 —— 实现侧的 L3 状态门用的是
+  // 「显式排除不可注入集」，不是字面 `== active`，**因为 `demoted` 必须保持可注入**
+  // （否则 TestSkillTreeGetActiveSkillsDemotedPenalty 挂，且降权成死代码）
+  // ⇒ 对【契约词汇表之外】的状态，两种写法结论不同 ⇒ 契约必须显式声明它们是否可注入。
+  // ★ 差别本身没被写下来时，「demoted 能不能被注入」只能靠读 Go 源码猜，
+  //   而猜错的方向是【静默】的（不是报错，是某个东西照常被注入）。
+
+  const legacyDecl = c?.states?.legacyStates
+  const legacyList = Array.isArray(legacyDecl?.values) ? legacyDecl.values : []
+  const legacyStatuses = legacyList.map((x) => x?.status)
+  const legacyProblems = []
+  if (!legacyDecl || typeof legacyDecl !== 'object') {
+    legacyProblems.push(
+      '缺 states.legacyStates（契约词汇表之外的旧状态没有任何声明 ⇒ 「demoted/absorbed 能不能被注入」只能去读 Go 源码猜）',
+    )
+  } else {
+    if (legacyList.length === 0) {
+      legacyProblems.push('states.legacyStates.values 不是非空数组 ⇒ 这条声明被架空（空判也能"通过"）')
+    }
+    if (typeof legacyDecl.origin !== 'string' || legacyDecl.origin.trim() === '') {
+      legacyProblems.push('缺 origin（"这些不是门的词汇表、而是实现里的旧状态"这层身份不许省略）')
+    }
+    const whereWritten = {
+      demoted: 'skill_tree.go:503 Demote / :571 RunLifecycle',
+      absorbed: 'skill_tree.go:91 statusAbsorbed / :804 Absorb',
+    }
+    for (const s of REQUIRED_LEGACY_STATES) {
+      if (!legacyStatuses.includes(s)) {
+        legacyProblems.push(`缺 ${s}（它是实现里真实存在的状态：${whereWritten[s] ?? '见 gate_policy.go:214-216'}）`)
+      }
+    }
+    const seenLegacy = new Set()
+    for (const x of legacyList) {
+      const st = x?.status
+      if (typeof st !== 'string' || st.trim() === '') {
+        legacyProblems.push(`有 legacy 条目缺 status（${JSON.stringify(x)}）`)
+        continue
+      }
+      if (seenLegacy.has(st)) legacyProblems.push(`${st} 重复出现`)
+      seenLegacy.add(st)
+      if (Array.isArray(values) && values.includes(st)) {
+        legacyProblems.push(
+          `${st} 同时出现在 states.values 与 states.legacyStates ⇒ 两组口径冲突（并进 values 还会与「invisibleStates 必须 = values − adoptedState」这条要求打架）`,
+        )
+      }
+      // ★ 明确可见性：injectable 必须是【显式布尔】—— 省略 = 没有声明（不许用别的字段代替）。
+      if (typeof x?.injectable !== 'boolean') {
+        legacyProblems.push(
+          `${st} 没有明确的可见性：injectable = ${JSON.stringify(x?.injectable)}（必须是显式 true/false —— 一条规则不明确就是一次假绿机会，与 receipt.status 缺读数不得当 passed 同一条纪律）`,
+        )
+      }
+      if (typeof x?.meaning !== 'string' || x.meaning.trim() === '') legacyProblems.push(`${st} 缺 meaning（它是什么状态）`)
+      if (typeof x?.why !== 'string' || x.why.trim() === '') legacyProblems.push(`${st} 缺 why（凭什么是这个可见性）`)
+    }
+  }
+  const injectableLegacy = legacyList.filter((x) => x?.injectable === true).map((x) => x?.status)
+  add(
+    'vocab-legacy-states-declared',
+    legacyProblems.length === 0,
+    '★★ O62（§38.5-2 的真发现）：实现里真实存在、契约词汇表【之外】的旧状态（demoted / absorbed）。★ 差别没被写下来时，「demoted 能不能被注入」只能靠读 Go 源码猜，而猜错的方向是【静默】的（不是报错，是某个东西照常被注入）。⇒ 每个旧状态必须【显式】声明 injectable（true|false）+ meaning + why，且必须与 states.values 分属两组（并进 values 会与 visibility 的口径要求打架）。',
+    legacyProblems.length
+      ? `states.legacyStates 不合格：${legacyProblems.join('；')}`
+      : `legacy 状态齐：${legacyList.map((x) => `${x?.status}: injectable=${JSON.stringify(x?.injectable)}`).join(' / ')}（origin=${JSON.stringify(legacyDecl?.origin)}；可注入者 = ${JSON.stringify(injectableLegacy)}）`,
+  )
+
+  const evProblems = []
+  if (legacyList.length === 0) {
+    evProblems.push('states.legacyStates.values 不是非空数组 ⇒ 没有【逐条证据】可核（不许空判通过）')
+  }
+  for (const x of legacyList) {
+    const st = x?.status ?? '(无 status)'
+    const ev = x?.evidence
+    if (!Array.isArray(ev) || ev.length === 0) {
+      evProblems.push(`${st} 没有 evidence（凭什么说它是这个可见性？）`)
+      continue
+    }
+    ev.forEach((e, i) => {
+      const miss = ['file', 'line', 'quote'].filter((k) => typeof e?.[k] !== 'string' || e[k].trim() === '')
+      if (miss.length) evProblems.push(`${st} 的第 ${i + 1} 条证据缺 ${JSON.stringify(miss)}`)
+    })
+  }
+  add(
+    'vocab-legacy-states-have-evidence',
+    evProblems.length === 0,
+    '★ O62：legacy 状态必须【逐条】带 文件:行 证据（evidence[].file / line / quote 三项皆非空，引文取自 ai-base 源码的只读原文）—— 目的是防止以后有人「凭感觉」往 vocabulary 里加状态：一个状态必须有代码里的落点（写入处 + 读取处），否则它是个想象出来的状态。',
+    evProblems.length
+      ? `证据不合格：${evProblems.join('；')}`
+      : `每条 legacy 状态都有 文件:行 证据：${legacyList
+          .map((x) => `${x?.status} → ${(x.evidence ?? []).map((e) => `${e.file}:${e.line}`).join('、')}`)
+          .join('；')}`,
+  )
+
+  // ★ O62：词汇表必须覆盖【实现用到的状态】，且每个状态都必须有明确的可见性。
+  const legacyHasVisibility = new Map(legacyList.map((x) => [x?.status, typeof x?.injectable === 'boolean']))
+  const notCovered = IMPL_USED_STATES.filter(
+    (s) => !(Array.isArray(values) && values.includes(s)) && !legacyStatuses.includes(s),
+  )
+  const noVisibility = IMPL_USED_STATES.filter((s) => {
+    if (Array.isArray(values) && values.includes(s)) return !(declaredInvisible(s) || s === adoptedState)
+    return legacyHasVisibility.get(s) !== true
+  })
+  add(
+    'vocab-covers-implementation-states',
+    notCovered.length === 0 && noVisibility.length === 0,
+    '★ O62：词汇表必须覆盖【实现真正用到的状态】—— 契约词汇表 5 态 + legacy 组（demoted / absorbed）—— 且**每个状态都必须有明确的可见性**（契约态：落在 invisibleStates 里或就是 adoptedState；legacy 态：显式 injectable）。★ 缺覆盖 ⇒ 契约对实现「部分失明」（那部分行为没有判据管）；缺可见性 ⇒ 该状态的注入行为无人负责（假绿的机会）。',
+    notCovered.length || noVisibility.length
+      ? `未覆盖的状态：${JSON.stringify(notCovered)}；没有明确可见性的状态：${JSON.stringify(noVisibility)}`
+      : `${IMPL_USED_STATES.length} 个实现状态全部被覆盖且都有明确可见性（契约态 ${JSON.stringify(values)}；legacy 态 ${JSON.stringify(legacyStatuses)}）`,
+  )
+
+  // ★★ O62：可见性规则的「状态门语义」必须显式声明 —— 且必须与 legacyStates 交叉自洽。
+  const modeProblems = []
+  const modeRules = vRules.filter((r) => typeof r?.requiresStatus === 'string' && r.requiresStatus.trim() !== '')
+  if (modeRules.length === 0) modeProblems.push('没有任何可见性规则声明 requiresStatus ⇒ 状态门语义无从判定')
+  for (const r of modeRules) {
+    if (!STATUS_MODES.includes(r?.statusMode)) {
+      modeProblems.push(`${r?.level} 的 statusMode = ${JSON.stringify(r?.statusMode)}（必须在 ${JSON.stringify(STATUS_MODES)} 里）`)
+      continue
+    }
+    if (typeof r?.statusModeNote !== 'string' || r.statusModeNote.trim() === '') {
+      modeProblems.push(`${r?.level} 声明了 statusMode 但没写 statusModeNote（这条语义对应源码的哪一处？）`)
+    }
+    if (r.statusMode === 'explicit-exclusion' && legacyList.length === 0) {
+      modeProblems.push(
+        `${r?.level} 声明 explicit-exclusion，但契约没有声明 states.legacyStates ⇒ 差异无处安放（显式排除与字面相等【只】在契约词汇表外的状态上结论不同 ⇒ 那些状态必须被声明出来）`,
+      )
+    }
+    if (r.statusMode === 'strict-equals') {
+      const bad = legacyList.filter(
+        (x) => x?.injectable === true && Array.isArray(x?.injectableVia) && x.injectableVia.includes(r.level),
+      )
+      if (bad.length) {
+        modeProblems.push(
+          `${r?.level} 声明 strict-equals（字面 == ${JSON.stringify(r.requiresStatus)}），却有 legacy 状态声明「经 ${r.level} 可注入」（${JSON.stringify(
+            bad.map((x) => x.status),
+          )}）⇒ 自相矛盾：词汇表外的状态不可能字面等于契约态`,
+        )
+      }
+    }
+  }
+  add(
+    'visibility-status-mode-declared',
+    modeProblems.length === 0,
+    '★★ O62（本轮的【真发现】）：实现侧 L3 的状态门是「显式排除不可注入集」（ai-base skill_tree.go:1090 `voc.IsInjectable`），不是字面 `== active` —— 而契约原来只写了 requiresStatus，**没写它是哪种语义** ⇒「L3 到底放不放行词汇表外的状态」在契约里读不出来（只能去读 Go）。⇒ 每条带 requiresStatus 的规则必须声明 statusMode（strict-equals | explicit-exclusion）+ statusModeNote，且与 legacyStates 交叉自洽：声明 explicit-exclusion ⇒ 必须有 legacyStates；某 legacy 状态声称「经 level X 可注入」而 X 是 strict-equals ⇒ 矛盾。',
+    modeProblems.length
+      ? `状态门语义声明不合格：${modeProblems.join('；')}`
+      : `状态门语义已声明：${modeRules.map((r) => `${r.level}=${r.statusMode}`).join(' / ')}（explicit-exclusion 与 legacyStates 已交叉自洽）`,
   )
 
   // ══ D. 状态迁移 ════════════════════════════════════════════════════════════
@@ -951,6 +1111,38 @@ const BAD_CASES = [
       delete c.vectors.pairing.classes
     },
   },
+  {
+    name: '★★ O62：legacy 状态没有明确的可见性（把 demoted 的 injectable 删掉）',
+    why: '「demoted 能不能被注入」在契约里读不出来 ⇒ 只能去读 Go 源码猜，而猜错的方向是静默的。★ 覆盖性检查也必须跟着 FAIL（该状态的可见性无人负责）。',
+    expect: ['vocab-legacy-states-declared', 'vocab-covers-implementation-states'],
+    mutate: (c) => {
+      const d = c.states.legacyStates.values.find((x) => x.status === 'demoted')
+      delete d.injectable
+    },
+  },
+  {
+    name: '★ O62：legacy 状态没有 文件:行 证据（把 absorbed 的 evidence 清空）',
+    why: '没有代码落点的状态 = 凭感觉加的状态 ⇒ 必须被挡下。',
+    expect: ['vocab-legacy-states-have-evidence'],
+    mutate: (c) => {
+      c.states.legacyStates.values = c.states.legacyStates.values.map((x) =>
+        x.status === 'absorbed' ? { ...x, evidence: [] } : x,
+      )
+    },
+  },
+  {
+    name: '★ O62：契约没声明 legacy 组（删掉整个 states.legacyStates）',
+    why: '契约词汇表之外的真实状态一个都没声明 ⇒ 契约对实现部分失明。★ 四项 O62 相关检查必须**全跟着 FAIL**（尤其 visibility-status-mode-declared：L3 声明了 explicit-exclusion 却没处安放差异）—— 不许因为"规则没声明"就静默跳过。',
+    expect: [
+      'vocab-legacy-states-declared',
+      'vocab-legacy-states-have-evidence',
+      'vocab-covers-implementation-states',
+      'visibility-status-mode-declared',
+    ],
+    mutate: (c) => {
+      delete c.states.legacyStates
+    },
+  },
 ]
 
 // ── 输出 ────────────────────────────────────────────────────────────────────
@@ -1139,16 +1331,24 @@ const O57_ADDED = [
   'vectors-pairing-l3-negative-controls-have-same-shape-positive',
 ]
 const nO57 = checks.filter((x) => O57_ADDED.includes(x.id)).length
+// ★ O62：契约词汇表之外的旧状态（legacyStates）—— 补进契约 + 必带明确可见性与 文件:行 证据
+const O62_ADDED = [
+  'vocab-legacy-states-declared',
+  'vocab-legacy-states-have-evidence',
+  'vocab-covers-implementation-states',
+  'visibility-status-mode-declared',
+]
+const nO62 = checks.filter((x) => O62_ADDED.includes(x.id)).length
 
 console.log('门契约校验 · dsh-gate-contract/v1')
 console.log('═'.repeat(72))
 console.log(`契约文件：${contractFile}`)
 console.log(`JSON 解析：✅ 成功（本脚本用 node 的 JSON.parse 读了一遍：${rawBytes.length} 字节，顶层键 ${Object.keys(contract).length} 个：${Object.keys(contract).join(', ')}）`)
 console.log(`向量集：${vectorsArg ? '（--vectors 指定）' : '（按契约 vectors.pairing.vectorsFile）'}${vectorsInput.source ?? '(未声明)'}${vectorsInput.error ? ` ❌ ${vectorsInput.error}` : ''}`)
-console.log(`目标：契约必须**自洽** —— 词汇表单一来源 / 回执不撒谎 / 迁移有门 / 两条注入路径都要求 active / 实现协议可断言 / ★ 写回痕迹与向量配对都已被声明(O55) / ★★ 配对规则按类覆盖 transition + L0 + L3(O57)`)
+console.log(`目标：契约必须**自洽** —— 词汇表单一来源 / 回执不撒谎 / 迁移有门 / 两条注入路径都要求 active / 实现协议可断言 / ★ 写回痕迹与向量配对都已被声明(O55) / ★★ 配对规则按类覆盖 transition + L0 + L3(O57) / ★★ 契约词汇表之外的旧状态必须显式声明可见性 + 带 文件:行 证据(O62)`)
 console.log(`每项都打印「防的是什么」；任一项不满足 ⇒ 非零退出。
 `)
-console.log(`共 ${checks.length} 项检查：★ 其中 O55 新增 ${nO55} 项（${O55_ADDED.join(' / ')}）；★ O57 新增 ${nO57} 项（${O57_ADDED.join(' / ')}）⇒ 原有检查一项未删（O57 前 25 项 → 现 ${checks.length} 项）。`)
+console.log(`共 ${checks.length} 项检查：★ 其中 O55 新增 ${nO55} 项（${O55_ADDED.join(' / ')}）；★ O57 新增 ${nO57} 项（${O57_ADDED.join(' / ')}）；★★ O62 新增 ${nO62} 项（${O62_ADDED.join(' / ')}）⇒ 原有检查一项未删（O57 前 25 项 → O62 前 28 项 → 现 ${checks.length} 项）。`)
 console.log('')
 printReport(checks, { verbose: true })
 console.log('')

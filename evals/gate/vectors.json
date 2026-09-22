@@ -1,7 +1,7 @@
 {
   "vectors": "dsh-gate-vectors/v1",
   "contract": "evals/gate/contract.json",
-  "note": "离线测试向量（纯数据）。L0/L3 = 注入可见性；transition = 状态迁移门。判据按 contract.json 的 visibility.rules 与 transitions.rules。★ O55：transition 向量另有 expect.fileChanged —— 含义见 contract.json → implementations.state.writeback.evidence（runner 对【契约声明的写回文件】在调用实现前后各取一次 sha256 摘要；摘要变了 = 文件确实被写过）。★ 负向迁移向量的 fileChanged:false 单独不能分辨「从不写回」，它靠 contract.json → vectors.pairing 强制配有的【同 to 正向对照】来兜（§35.4）。",
+  "note": "离线测试向量（纯数据）。L0/L3 = 注入可见性；transition = 状态迁移门。判据按 contract.json 的 visibility.rules 与 transitions.rules。★ O55：transition 向量另有 expect.fileChanged —— 含义见 contract.json → implementations.state.writeback.evidence（runner 对【契约声明的写回文件】在调用实现前后各取一次 sha256 摘要；摘要变了 = 文件确实被写过）。★ 负向迁移向量的 fileChanged:false 单独不能分辨「从不写回」，它靠 contract.json → vectors.pairing 强制配有的【同 to 正向对照】来兜（§35.4）。★ O62：本批 16 条 —— 新增两条 l3 positive（l3-demoted-trigger-match-visible / l3-absorbed-trigger-match-visible），覆盖契约词汇表之外的旧状态（contract.json → states.legacyStates，demoted / absorbed 都是 injectable:true ⇒ 走 L3 可见）；它们是 positive-control ⇒ 按 O57 的按类配对规则不需要负向对照。",
   "cases": [
     {
       "id": "l0-active-highscore-visible",
@@ -146,6 +146,38 @@
       },
       "taskHint": "how do I deploy the service safely",
       "expect": { "visible": false }
+    },
+    {
+      "id": "l3-demoted-trigger-match-visible",
+      "kind": "l3",
+      "role": "positive-control",
+      "why": "★ O62：demoted（契约词汇表【之外】的旧状态，见 contract.json → states.legacyStates）**必须保持可注入** —— 走 L3、带 0.7 降权。依据（只读取证）：skill_tree.go:1077 的早退只认 archived；:1090 的 L3 状态门是「显式排除不可注入集」`voc.IsInjectable` ⇒ demoted ∉ invisibleStates（pending/archived/invalidated/suspicious）⇒ 放行；:1118 命中后只做 score*=0.7（降权而非排除）。★ 这条挂（visible:false）就意味着 L3 被写成了字面 `== active` —— 那正是本轮之前 mjs 参考实现的写法（实测 demoted -> visible:false，而 Go 实现 -> visible:true）⇒ 契约/向量与实现的不一致会被这条向量第一次看见。★ 它是 positive-control ⇒ 按 O57 配对规则**不需要**配负向对照（规则只要求每条 l3.negative-control 有同形正向对照）。",
+      "node": {
+        "id": "n-l3-demoted-trigger-match-visible",
+        "type": "skill",
+        "status": "demoted",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": true }
+    },
+    {
+      "id": "l3-absorbed-trigger-match-visible",
+      "kind": "l3",
+      "role": "positive-control",
+      "why": "★ O62：absorbed（契约词汇表之外的旧状态）**同样可注入** —— 这是 ① 那道题「absorbed 呢？」的代码答案，不是猜的：它与 demoted 走【同一条】L3 判据（:1077 早退只认 archived；:1090 `voc.IsInjectable(node.Status)`；absorbed ∉ invisibleStates ⇒ true）⇒ triggers 命中即可见，且**无降权**（:1118/:1148 只对 \"demoted\" 降权）。★ 「被排除」的是【索引】而非注入面：:91 逐字 `excluded from indexes`，:803-806 只 `delete(st.prinIndex, …)`、**没有**从 st.Nodes 删除，而 GetActiveSkills 遍历的正是 st.Nodes。★★ 如实记：这与「已并入 ⇒ 该被排除」的直觉相反（实现侧 gate_policy.go:83-84 也把 absorbed 与 demoted 并列声明为「L3 放行」）⇒ 本向量按【代码事实】断言 visible:true；若将来 Go 侧改成排除它，这条向量会如实变红。",
+      "node": {
+        "id": "n-l3-absorbed-trigger-match-visible",
+        "type": "skill",
+        "status": "absorbed",
+        "score": 0.3,
+        "useCount": 0,
+        "triggers": ["deploy", "rollback"]
+      },
+      "taskHint": "how do I deploy the service safely",
+      "expect": { "visible": true }
     },
     {
       "id": "transition-pending-to-active-no-receipt",

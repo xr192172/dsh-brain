@@ -15,7 +15,19 @@
  * 光有 `contract.json` + 校验器，只能证明"设计不装饰"；要证明"门被尊重"，
  * 必须有**一份能被向量打分的实现**。这个文件就是那份实现（参考版，正确的）。
  * 它的孪生兄弟 `gate-impl-broken.mjs` 故意坏掉一处（L3 分支不检查 status），
- * 用来证明 `evals/gate/vectors.json` 这 14 条**有分辨力**（不是一批全绿的装饰向量）。
+ * 用来证明 `evals/gate/vectors.json` 这 16 条**有分辨力**（不是一批全绿的装饰向量）。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ★ O62：状态门按契约 `visibility.rules[].statusMode` 走（本文件改动理由）
+ *
+ * 改前本实现的 L3 状态门是**字面** `status === "active"`，而 Go 实现
+ * （`internal/memory/skill_tree.go:1090` `voc.IsInjectable(node.Status)`）是
+ * **「显式排除不可注入集」** ⇒ 两者对契约词汇表外的旧状态（demoted / absorbed）结论相反
+ * （实测：同一份 demoted 节点，Go ⇒ `{"visible":true}`，改前的本实现 ⇒ `{"visible":false}`）。
+ * 这处不一致在本轮之前**没有向量覆盖 ⇒ 静默**；O62 把它补进契约（`states.legacyStates`）
+ * 并补了向量 ⇒ 本实现必须跟着契约声明走（策略走接口），否则同一批向量在 Go 上 PASS、
+ * 在参考实现上 FAIL，就该怪实现而不是怪向量。
+ * ★ 对契约词汇表的 5 个状态，改动**不产生任何行为变化**（两种写法结论相同 ⇒ 原有向量全过）。
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * ★ 策略不写死：本实现【不硬编码】任何阈值/状态字面量，全部从契约读取
@@ -174,13 +186,64 @@ export function triggersHit(triggers, taskHint) {
 }
 
 /**
+ * ★ O62：契约词汇表【之外】的旧状态里，被声明为【可注入】的那些（states.legacyStates）。
+ *
+ * 为什么需要它：实现的 L3 状态门是「**显式排除不可注入集**」，不是字面 `== active`
+ * （依据 ai-base/agent-shell/internal/memory/skill_tree.go:1090
+ *   `if !l0 && voc.IsInjectable(node.Status) {`；IsInjectable ≡ 不在 invisibleStates 里）。
+ * 对契约词汇表（states.values）的 5 个状态，两种写法结论**完全相同**；
+ * 差别**只**出现在契约词汇表之外的旧状态上 —— demoted 必须保持可注入（否则
+ * skill_tree.go:1118/:1148 的降权成死代码），absorbed 走同一条判据（同为可注入）。
+ *
+ * ⇒ 本实现按【契约声明】取这份集合（策略不写死在实现里）：
+ *   `states.legacyStates.values[*].injectable === true ⇒ status`。
+ *   契约没声明某状态 ⇒ **不注入**它（fail-closed，偏严方向）。
+ * ★ 如实记的边界：这与 Go 侧的 `!IsInvisible`（未声明状态会被**放行**）在
+ *   「契约与实现都没提过的状态」上不同；当前没有向量覆盖那种状态（报告「不确定/未验证」已记）。
+ */
+export function legacyInjectableStates(contract) {
+  const set = new Set()
+  const legacy = contract?.states?.legacyStates?.values
+  if (!Array.isArray(legacy)) return set
+  for (const ls of legacy) {
+    if (ls?.injectable === true && typeof ls?.status === 'string' && ls.status.trim() !== '') {
+      set.add(ls.status)
+    }
+  }
+  return set
+}
+
+/**
+ * ★ O62：按契约 `visibility.rules[].statusMode` 判「状态门是否放行」。
+ *
+ *   - 契约**没声明** `requiresStatus` ⇒ 不挡（这条路径没有状态要求）；
+ *   - `statusMode = "strict-equals"`（L0 的语义，契约逐字 + skill_tree.go:1086）⇒ 只有
+ *     字面等于 `requiresStatus` 才放行 ⇒ 契约词汇表外的旧状态在 L0 一律被挡下；
+ *   - `statusMode = "explicit-exclusion"`（L3 的语义，skill_tree.go:1090）⇒ 除
+ *     `requiresStatus` 外，**契约声明的 legacy 可注入状态**也放行。
+ *
+ * ⚠️ 契约**没声明** `statusMode` 时退回最严的旧语义（字面 `==`）—— 宁可答不上来/挡下，
+ *   也不默认放行（校验项 `visibility-status-mode-declared` 会把"没声明"判 FAIL）。
+ * ★ 副作用（如实记）：`--break all-hidden` 把 `requiresStatus` 换成不可达哨兵时，
+ *   只能挡住走 `requiresStatus` 这条路的状态；legacy 状态走的是独立声明的
+ *   `states.legacyStates` 那条路 ⇒ 哨兵管不到它们（详见 `gate-impl-broken.mjs` §坏法④
+ *   与报告「不确定/未验证」）。
+ */
+export function statusGatePasses(contract, rule, status) {
+  if (!rule?.requiresStatus) return true
+  if (status === rule.requiresStatus) return true
+  if (rule.statusMode === 'explicit-exclusion') return legacyInjectableStates(contract).has(status)
+  return false
+}
+
+/**
  * 按契约判「L0 路径是否可见」。
- * ★ 契约 `visibility.rules[level=L0]` 里有 `requiresStatus: "active"` —— 这是**门的一半**：
- *   没有它，`status=pending` 但 score/use 达标的条目照样被注入。
+ * ★ 契约 `visibility.rules[level=L0]` 里有 `requiresStatus: "active"` + `statusMode: "strict-equals"`
+ *   —— 这是**门的一半**：没有它，`status=pending` 但 score/use 达标的条目照样被注入。
  */
 export function l0Visible(contract, node) {
   const rule = visibilityRule(contract, 'L0')
-  if (rule.requiresStatus && statusOf(node) !== rule.requiresStatus) return false
+  if (!statusGatePasses(contract, rule, statusOf(node))) return false
   const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
   if (conditions.length === 0) return false
   return conditions.every((c) => compare(c.op, node?.[c.metric], c.value))
@@ -193,10 +256,14 @@ export function l0Visible(contract, node) {
  *    若有人把契约里这条 `requiresStatus` 删掉（= `gate-impl-broken.mjs` 干的事），
  *    本函数会**如实地**跟着放行 —— 这就是"策略走接口"的代价与价值：
  *    坏策略一眼可见，而不是散落在某段 if 里。
+ * ★ O62：状态门改为按契约 `statusMode` 走（见 `statusGatePasses`）—— 本契约是
+ *    `explicit-exclusion`（逐字对齐 Go 的 `voc.IsInjectable`）⇒ demoted / absorbed
+ *    这两个契约词汇表外的旧状态（见 `states.legacyStates`）在 L3 上**可注入**，
+ *    而在 L0（`strict-equals`）上仍被挡下。
  */
 export function l3Visible(contract, node, taskHint) {
   const rule = visibilityRule(contract, 'L3')
-  if (rule.requiresStatus && statusOf(node) !== rule.requiresStatus) return false
+  if (!statusGatePasses(contract, rule, statusOf(node))) return false
   return triggersHit(node?.triggers, taskHint)
 }
 
