@@ -1286,3 +1286,52 @@ if (this.retained?.text === snapshot) return;      // ★ 纯文本等值比较
 |---|---|---|
 | **O32** | **澄清状态矛盾**：`revised-architecture-2026-09-20.md:273` 说 `SkillNode` **"未移植"**，但 `packages/skill-tree` 存在（TS 移植版） | O30 的裁决前提 |
 | **O33** | **端口归一化**：face 指纹必须先把 `system` 里的 `127.0.0.1:<port>` 归一化，否则每次换端口都多塞一条快照 | S3/S4 |
+
+---
+
+## 22. O32 关闭：`skill-tree` 移植现状 = **前半段已落地、后半段刻意留空**（2026-09-22）
+
+### 22.1 权威文件是 `docs/skill-tree-port-plan.md`（不是 `revised-architecture:273`）
+
+**该计划逐字**：
+- 上游 = `D:\project_develop\ai-base\agent-shell\internal\memory\`（**只读，不改**）；
+- **"本阶段只做数据层（对应 `memory-asset-triage.md` §6 的 P2）。执行器（P3）刻意不做 —— 顺序理由是「数据先行、执行器可替换」"**；
+- 边界表 —— **管**：`SkillNode` 数据模型 + 生命周期 + `Absorb` 账本 + 导入器 + 确定性评分层；
+  **不管**：`GetActiveSkills` / 注入 / **`spawn provider` 委派（执行器，P3）** / 注册门 L1·L3 的具体实现（挂在 `SkillEvaluator` 接口上，**本层只留挂载点**）；
+- **"本表只是把它从 Go 搬到 TS，不新增字段、不改语义"**。
+
+⇒ ⚠️ **`revised-architecture-2026-09-20.md:273` 说 "`SkillNode`（技能树，未移植）" 是【过期/狭义措辞】**
+（同文档 `:376`/`:380` 还有"移植"待办列 ⇒ 该文档是规划态）。
+**⇒ 现行事实以 `skill-tree-port-plan.md` + 代码为准。**
+
+### 22.2 实测：移植是**部分**完成（用可靠方式核过）
+
+| 计划阶梯 | 应有 | **实际** | 状态 |
+|---|---|---|---|
+| **L0** 纯函数层 | `tokenize` 等 | `src/text/tokenize.ts`（333 行） | ✅ 在 |
+| **L1** 类型层 | `index.ts`（计划原文标"**★ 本次已落地**"） | `src/index.ts`（222 行） | ✅ 在 |
+| **L2** | `gravity-field.ts` / `skill-tree.ts` / `heat-store.ts` | **只有 `src/skill-tree.ts`（673 行）** | ⚠️ **缺 `gravity-field` / `heat-store`** |
+| **L3** | `import/*.ts` / `store/*.ts` | **全缺** | ❌ 未移植 |
+
+**测试**：`node --test test/skill-tree.test.mjs test/tokenize.test.mjs test/ablation-check.mjs`
+⇒ **61 tests / pass 61 / fail 0** ⇒ **已移植部分健康**（含 `ablation-check.mjs` = 消融自证门）。
+
+### 22.3 ★★ 由此得到"下一步做什么"的权威答案
+
+**P3（执行器）是【刻意留空的空位】**，其清单现成：**`GetActiveSkills` / 注入 / `spawn provider` 委派 / 注册门 L1·L3 实现**。
+⇒ ★ **O30 的②、O7、O26 全部落在这个空位上** ⇒ **我们写的是"填 P3 的空位"，不是"改照搬产物"**
+  ⇒ **这坐实了 W2 的判断："② 比 ③ 省"**（③ 要改"照搬 Go、改一条就得全量回归"的移植产物）。
+⇒ ⇒ **P3 的第一块 = W2 建议的单向门**：**"候选入池 + 只经注册门采纳"**（挂载点 = L1 已留的 `SkillEvaluator` 接口）。
+
+### 22.4 ⚠️ 我这一轮自己造了两次"假信号"（诚实记录，且这是通用教训）
+
+| 我的做法 | 得到的 | 真相 |
+|---|---|---|
+| `node --test test/` | **1 fail** | ❌ **调法错**（`test/` 被当模块路径）⇒ 正确调法 **61 pass / 0 fail** |
+| `find src -type f -name "*.ts"` + `for [ -e ]` | "src 没 .ts、缺 5 个文件" | ❌ **这台 shell 的 `find`/`for` 失效**（**铁律 #5 已记**）⇒ 实际 `src/` 有 3 个文件 |
+
+⇒ ★ **纪律（新增）**：**"调法错"会造出【假红】与【假缺失】** ——
+而**假红比不报更坏**（它骗人去修一个不存在的问题，还会让人不再信任这个检查；我们自己的
+`capability-sources.mjs` 头部注释就写着"**假漂移比不报更坏**"）。
+⇒ **凡是"某文件缺了 / 某测试红了"这类否定性读数，先换一种【可靠调法】复验一次再下结论**
+（统计用 `.mjs`、列目录用 `ls -R`、跑测试用显式文件列表）。
