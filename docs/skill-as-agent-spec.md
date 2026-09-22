@@ -1123,3 +1123,85 @@ usage 两源归并（O11）、种子/分身三列切分、切分标记普查、A
 **二分对；判据已在现有 schema 里（`Tools` 非空 = 可升格）；
 但不要做成两棵独立的树 —— 做成"一棵真相源 + 一个可执行投影 + 一份谱系账本"。
 真正缺的不是第二棵树，而是 O7 / O26 两个前置 + 成品的实体字段。**
+
+---
+
+## 20. ★★★★★ **更正 §19**：我们**已经有"成品层"了**，而且它**不是树** —— 是 `ctx.subagents` 的 provider 注册表
+
+> 起因：用户授权改名并说明"`skill-tree` 原本是记忆系统里做自学习/自进化的，现在要迁到 agent 里"。
+> **我先按铁律 #17 查"有没有人做过"（含我们自己做过的）—— 查出了关键事实，必须更正 §19。**
+
+### 20.1 ★★★ 关键发现：`docs/capability-registry-evolution.md` 里已经把这件事**设计过了**
+
+逐字（该文档 62KB，我只读关键行）：
+
+| 行 | 原文 |
+|---|---|
+| `:7` | **核心论断：「sub agent 就是它的能力；sub agent 的能力就是它的能力。这比自己给自己改好得多。」** |
+| `:5` | "装配完成 → 验收 → **形成一个新 sub agent → 注册为新 sub agent**" |
+| `:8` | "最后一条要求：**「重要的是能不能把市面上已有的 Agent 注册为 sub agent 让它调用。」**" |
+| `:20` | ｜"sub agent 就是它的能力"成立吗？｜**成立，而且是架构可判定的** —— **顶层能力 = 已注册 provider 的并集**｜ |
+| `:23` | "外部 Agent 能接进来吗？ → **能，且是官方设计目标** —— 注释原文「Provider-side vocabulary for **OUT-OF-PROCESS** subagent backends」" |
+| **`:30`** | ★ **"`ctx.subagents` 是进程单例、注册名全局唯一、自带跨会话查询面（`listChildren`/`followup`）→ \*\*「能力库」不需要新建存储，它已经是了\*\*（§3.4）"** |
+| `:384` | "→ 需要一个**旁挂**的 `capability-registry.json`：`{ id, version, source, acceptance, holdoutHash, registeredAt, supersededBy }`" |
+
+⇒ ★★ **所以"成品树"不是要新建的东西**：
+**成品层 = `ctx.subagents` 的 provider 注册表**（进程单例、名字全局唯一、自带 `listChildren`/`followup`）
+⇒ **它就是"可委派名册"，而且文档早就判定"能力库不需要新建存储"。**
+
+### 20.2 ★★ 而"材料层"我们**有两套，且互不认识**（这才是真问题）
+
+| 材料线 | 是什么 | 状态 |
+|---|---|---|
+| **`scripts/capability-*`**（registry / gate / sources / store / snapshot） | **外部来源归一化 + 注册门 + lineage 账本**（`id/version/source/acceptance/holdoutHash/supersededBy`；四动作 注册/升级/合并/淘汰；"**注册 ≠ 采纳**"——register 只建 `pending`） | ✅ **在用**（62KB 设计文档 + 门 + 快照） |
+| **`packages/skill-tree`** | **自学习 / 自进化 skill 树**（`SkillNode` + `Absorb` 账本 + `Tools` 升格门 + L3 成熟度） | ⚠️ **孤儿包**（见 20.3） |
+
+**★ 二者互不提及**（双向 grep 零命中：能力库文档里 `SkillTree / 技能树 / absorb` 全无；`skill-tree` 侧 `capability` 零命中）
+⇒ **⇒ 两条材料线各自演化，关系【从未被定义】。这才是要先解决的问题，而不是"要不要第二棵树"。**
+
+### 20.3 ★ `packages/skill-tree` 现在是**孤儿包**（未被挂载、零引用）
+
+实测：`skill-tree` 只被**它自己包内**的文件引用（`package.json` / `src/*` / `test/*`），
+**没有任何 profile / preset / `cordis.patch.yml` 引用它**
+⇒ **它没被挂载、没注册任何东西**（与 §3 一致：纯数据层、刻意不含执行器）。
+
+### 20.4 ⇒ **改名的正确顺序变了**（撤回上一轮"改名成本低、可以做"的说法）
+
+**名字应当反映"它在架构里的位置"；位置未定 ⇒ 现在改名只是给一个还没归档的东西贴标签。**
+**⇒ 应先做一次【裁决】—— 三条候选关系：**
+
+| 候选 | 内容 | 评价 |
+|---|---|---|
+| **① 两条并行材料线** | `skill-tree` = **内部自学习**材料（经验 → skill）；`capability-*` = **外部来源**材料（MCP/插件/外部 Agent） | ⚠️ 风险：**又变成两份互不相识的账** |
+| **② `skill-tree` 是 capability 的上游** | skill 成熟（L3 / 有 `Tools`）⇒ **升格为 capability** 走注册门 | ✅ 合 D19"别做两个真相源" |
+| **③ 合并** | `SkillNode` 成为 `capability-registry` 的一种 **entry 来源**（只留一个真相源） | ✅ 最彻底，改动最大 |
+
+**⇒ 我的倾向：② 或 ③**（都指向"一个真相源"）；**① 不可取**（会重演"两份账、必然漂移"）。
+**⇒ 裁决之前：`skill-tree` 保持原名、保持不动**（它现在是孤儿，不动零风险）。
+
+### 20.5 ★★ 修正后的整体结构（**取代 §19.3 的表述**）
+
+```
+【成品层】ctx.subagents 的 provider 注册表        ← 已存在，不需要新建"树"
+            进程单例 / 名字全局唯一 / 自带 listChildren + followup
+            （每个 provider = 一个可委派的 sub agent）
+                 ↑ 由谁上架、上架何版本、依据何判据
+【账本层】capability-registry.json（旁挂）          ← 已存在
+            { id, version, source, acceptance, holdoutHash, registeredAt, supersededBy }
+            "注册 ≠ 采纳"：register 只建 pending；过门并写回 acceptance 才算
+                 ↑ 材料从哪来
+【材料层】两条线，关系待裁决（§20.4）
+            · scripts/capability-*（外部来源：MCP / 工具插件 / 外部 Agent）  ← 在用
+            · packages/skill-tree（内部自学习：SkillNode + Absorb + Tools 升格门）← 孤儿包
+```
+
+⇒ ★ **⇒ 对用户"两棵树"的最终回答**：
+**你直觉里的"成品"已经有了（它是注册表，不是树）；你直觉里的"材料"有两份、还没对齐。
+⇒ 下一步不是"建第二棵树"，而是「定两条材料线的关系」→ 再给 `skill-tree` 一个位置 → 名字随之而来。**
+
+### 20.6 新增未闭合
+
+| # | 未闭合 | 挡住 |
+|---|---|---|
+| **O30** | ★ **裁决两条材料线的关系**（§20.4 的 ①②③） | `skill-tree` 的去向与改名、成品层的上架来源 |
+| **O31** | **`capability-registry` 的 entry 与 `ctx.subagents` provider 的对应关系**（一个 capability = 一个 provider？一对多？改名/版本怎么映射） | 成品层与账本层的接线 |
