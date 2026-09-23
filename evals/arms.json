@@ -1,0 +1,31 @@
+{
+  "_comment": "臂注册表（配置型/注册型）。★ 每个臂 = 一个【代 / 比赛区】，不是两个固定槽位。装载口径见 scripts/arms-registry.mjs；消费方：scripts/mem-arm.mjs（--arms/--arm）、scripts/memory-effect-judge.mjs（--arms）。",
+  "_fields": {
+    "name": "臂名（唯一）",
+    "role": "control（对照）| treat（处理）| gen（一个代，结构性同处理位）",
+    "cwd": "该臂的【沙箱/比赛区】—— 被测 agent 的工作目录（必须是建好的 git 工作树）",
+    "store": "该臂的【记忆库】—— 与 cwd 分开，两臂互不污染",
+    "preset": "可选：preset 名或工具面声明（自变量的一种）",
+    "label": "人读的一句话（报告里直接引用）"
+  },
+  "_controlled_note": "controlled = 受控量清单（哪些维度【必须相同】；未列出的即自由量/自变量）。判据机器只认识 face / system / tools / toolNames / preset。",
+  "controlled": ["system", "toolNames"],
+  "arms": [
+    {
+      "name": "A",
+      "role": "control",
+      "cwd": "D:/project_develop/_abA/wt",
+      "store": "D:/project_develop/_abA/store",
+      "preset": "council",
+      "label": "对照臂（当代基线）：D: 卷上的工作树 + 空记忆库；工具面/preset 与 B 臂受控相同。"
+    },
+    {
+      "name": "B",
+      "role": "treat",
+      "cwd": "C:/_abB-experiment-root/wt",
+      "store": "C:/_abB-experiment-root/store",
+      "preset": "council",
+      "label": "处理臂（当代处理）：C: 卷上的工作树（跨卷 ⇒ 相对路径够不到 A）+ 累积记忆库。"
+    }
+  ]
+}

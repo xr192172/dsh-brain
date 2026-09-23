@@ -159,3 +159,50 @@ applicable = 靶文件在 wt 内  ∧  答案不在（按所选边界的）可�
    - `scripts/eval-run.mjs:151` 仍把 `oracle.cmd`（含判据根路径）拼进题面末行。
 3. 上表的 `wt` 边界读数**只在"既有两臂场地"上取的**（本批不去重建场地）。
    重建后的布置（靶文件进保留区 + oracle 认 `--repo`）在**新树**上是另一组读数，见 `out/w45-gate-in-commit-and-seal-git.md`。
+
+---
+
+## ★ 长程同族两题（2026-09-23 格 ⑪；`cli-0006` / `cli-0007`）
+
+**为什么加**：既有 5 题里 3 题是"把一行修复打回"（`regression-repair`）、2 题是"给某脚本加一个开关"
+—— 都测不出**记忆**：一题一个孤立靶，第二题用不上第一题的经验。
+新加的这两题是**同族两题**：第二题**只给增量**，考的就是"第一题学会的那套模式能不能被复用"。
+
+| 题 | kind | 靶（都在隔离工作树保留区内） | 交付物 | 增量点 |
+|---|---|---|---|---|
+| `cli-0006-selftest-drift-guard-json` | `capability-task` | `evals/pilot/rename-target/{math,store,index}.js` | `guard.mjs` + `guard.selftest.mjs` | ——（**教模式**：记基线 / 查漂移 / 机器可读 / 退出码语义 / 一条命令自证） |
+| `cli-0007-store-surface-guard-pinned` | `capability-task` | 同上 | `store-guard.mjs` + `store-guard.selftest.mjs` | ① 读数**自己设计**（不许照抄第一题）② 基线格式**钉死**（纯 LF / 一行一条 / `<条目名>\t<读数>` / 末行换行 / 不许整体哈希）③ `drift` 只列漂了的 + **按条目名升序** ④ ★ 第一题**故意不说**的歧义点（基线文件不存在时怎么办）**被明说成退出码 2** |
+
+★ `kind` **不新增值**（仍用 `capability-task`）：两题都是 `seed.edits: []` 的"做一件还没做的事"，
+而 `scripts/eval-validate.mjs:205` **硬性要求**空 seed 题必须 `kind === 'capability-task'`
+⇒ 造一个新值只会被那条校验拦下来，没有任何好处。
+
+★ **题面里的歧义点**（按格 ⑨ 的口径"看它会不会停下来问"）：`cli-0006` 的题面**不说**
+"基线文件不存在时 `--check` 该退几"，而且 **oracle 故意不测这一条**（测了就成"隐含规格"，不再是歧义）；
+`cli-0007` 才把它钉成退出码 2。
+
+★ **靶文件**：`evals/pilot/rename-target/` 那三个纯 Node 文件**本来就在** `scripts/eval-wt-new.mjs` 的
+`TARGET_INCLUDES` 保留区里 ⇒ 这次**不需要动布置**。两条题的 `spec` 都是空的（规格**全写在 `invariant` 里**）——
+少发一份规格文件就少一条答案泄漏面。
+
+### 两题在适用性判据下的读数（2026-09-23 实跑，可复现）
+
+| 边界 | `--seal-git` | 全 7 题结论 | `cli-0006` / `cli-0007` |
+|---|---|---|---|
+| `machine`（缺省） | 否 | **0/7** | `applicable=false`（**结构性**：`absPath` 恒命中判据根那一份 ⇒ 与既有 5 题同档，见本页「仍然不适用」第 1 条） |
+| `wt` | 否 | **4/7** | ★ **`applicable=true`（两臂都是）** —— 与 `cli-0004`/`cli-0005` 同档 |
+| `wt` | 是 | **4/7** | 同上（★ 这两题**不需要** `--seal-git`：空 seed ⇒ 没有"种子前字节"那条通道） |
+
+### 「有信号」怎么证的（能力题没有 `seed` ⇒ `eval-signal-check` 的三段用不上）
+
+`node scripts/eval-signal-check.mjs --task cli-0006 --repo <wt>` 对这两题会**明说拒绝**
+（`✗ STAGES-NOT-APPLICABLE`，退出 2）：空 seed 题没有"把修复打回去"这一步，硬套三段只会得到用错口径的结论。
+等价证明走**两个方向都跑**（= FAIL_TO_PASS 的机器形态）：
+
+| 树 | `cli-0006` | `cli-0007` | 命令 |
+|---|---|---|---|
+| 两臂真实 wt（`_abA/wt`、`_abB-experiment-root/wt`） | 红 | 红 | `node evals/checks/cli-0006.mjs --repo <wt>` |
+| `out/_w53/clean`（干净副本） | 红 | 红 | 同上 |
+| `out/_w53/refT1` / `out/_w53/refT2`（**参考解**） | **绿** | **绿** | 同上 ⇒ 判据**可满足**（不是永远红） |
+| `out/_w53/negT1` / `out/_w53/negT2`（**假实现负对照**） | 红 | 红 | 同上 ⇒ 判据有**分辨力**：永远报绿的假实现、照抄第一题的懒实现都翻车 |
+| `node scripts/eval-validate.mjs --only <id>` | ✓ | ✓ | 走 `isEmptySeed` 分支：「HEAD 上 oracle 红 + regression 绿 ⇒ 有信号」 |

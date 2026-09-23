@@ -82,6 +82,11 @@
  *   node scripts/mem-arm.mjs --name A --root D:/project_develop/_abA --expect present
  *   ★ O86（跨卷两臂，别忘 --peer）：
  *   node scripts/mem-arm.mjs --name B --root C:/_abB-experiment-root --peer D:/project_develop/_abA --expect absent
+ *   ★★ w59（**臂注册表**：臂 = 一个"代/比赛区"，场地/记忆库/preset 都从注册表读 —— 不写死 A/B）：
+ *   node scripts/mem-arm.mjs --arms evals/arms.json --arm B --expect absent
+ *     · 与 `--root` / `--cwd` / `--store` **互斥**（臂的场地与记忆库要么由注册表给，要么由命令行给）；
+ *     · 不给 `--peer` ⇒ **自动**取"另一条臂的场地所在的实验根"（O86 互不可见判据照跑）；
+ *     · 证据默认落 `<臂根>/evidence/w29-arm-<臂名>.json`；`--preset` 可覆盖注册表里的 preset。
  *   例：
  *   node scripts/mem-arm.mjs --name treat --store out/mem-store-treat --cwd out/mem-arm-treat --expect present
  *   node scripts/mem-arm.mjs --name ctrl  --store out/mem-store-ctrl  --cwd out/mem-arm-ctrl  --expect absent
@@ -94,6 +99,8 @@ import crypto from 'node:crypto'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { decompress } from 'fzstd'
+// ★★ w59：臂注册表（配置型/注册型）的**唯一装载口径**；只在显式给了 `--arms` 时用到。
+import { ArmsRegistryError, loadArmsRegistry } from './arms-registry.mjs'
 
 const REPO = 'D:/project_develop/dsh-brain'
 const FRONT = process.env.DSH_FRONT ?? 'http://127.0.0.1:3080'
@@ -105,7 +112,6 @@ const argv = process.argv.slice(2)
 const argOf = (k) => { const i = argv.indexOf(k); return i < 0 ? null : (argv[i + 1] ?? null) }
 const has = (k) => argv.includes(k)
 
-const NAME = argOf('--name') ?? 'arm'
 /** ★ O85：实验根。给了它 ⇒ `store=<root>/store`、`cwd=<root>/wt`（两臂各一个，互不共享）。 */
 const ROOT_ARG = argOf('--root')
 const ROOT = ROOT_ARG ? path.resolve(ROOT_ARG) : null
@@ -113,33 +119,82 @@ if (ROOT_ARG && !path.isAbsolute(ROOT_ARG)) {
   console.log(`[stop] --root 必须是绝对路径（用 D:/… 而不是 /d/…）：${ROOT_ARG}`)
   process.exit(2)
 }
-/** ★★ O86：另一臂的实验根。给了它 ⇒ 起会话**之前**先判定"本臂够不到对方"（够得到就 exit 2）。 */
-const PEER_ARG = argOf('--peer')
+const NAME_ARG = argOf('--name') ?? null
+let NAME = NAME_ARG ?? 'arm'
+/** ★★ w59：臂注册表（`--arms <file>` + `--arm <name>`）—— 臂 = 一个"代/比赛区"，场地/记忆库/preset 都从注册表读。
+ *   ★ 不给它 ⇒ 下面的 `--root` / `--cwd` / `--store` 行为与本参数存在之前**逐字相同**。 */
+const ARMS_ARG = argOf('--arms')
+const ARM_ARG = argOf('--arm')
+/** 本臂在注册表里的那条（不给注册表 ⇒ null）。 */
+let ARM_ENTRY = null
+/** ★ 注册表模式下，"另一臂的实验根"（用于 O86 互不可见判据）；不给 --peer 时自动取。 */
+let PEER_FROM_REGISTRY = null
+if (ARMS_ARG) {
+  if (!ARM_ARG) {
+    console.log('用法错误：给了 --arms <注册表> 就必须再给 --arm <臂名>（注册表里声明了哪些臂会一并打印）')
+    try {
+      const r = loadArmsRegistry(String(ARMS_ARG), { base: process.cwd() })
+      console.log(`  注册表 ${r.file} 里声明的臂：${r.arms.map((a) => `${a.name}=${a.role}`).join('  ')}`)
+    } catch { /* 用法错误只提示臂名；注册表本身坏掉时由下面的正式装载报错 */ }
+    process.exit(2)
+  }
+  if (ROOT_ARG || argOf('--cwd') || argOf('--store')) {
+    console.log('用法错误：--arms 与 --root / --cwd / --store **互斥**（臂的场地与记忆库要么由注册表给，要么由命令行给，别同时给）')
+    process.exit(2)
+  }
+  let reg
+  try {
+    reg = loadArmsRegistry(String(ARMS_ARG), { base: process.cwd() })
+  } catch (e) {
+    if (e instanceof ArmsRegistryError) { console.log(`[stop] ${e.message}`); process.exit(2) }
+    throw e
+  }
+  ARM_ENTRY = reg.arms.find((a) => a.name === String(ARM_ARG)) ?? null
+  if (!ARM_ENTRY) {
+    console.log(`[stop] 注册表 ${reg.file} 里没有臂 "${ARM_ARG}"；声明的臂：${reg.arms.map((a) => `${a.name}=${a.role}`).join('  ')}`)
+    process.exit(2)
+  }
+  NAME = ARM_ENTRY.name
+  const other = reg.arms.filter((a) => a.name !== ARM_ENTRY.name)
+  PEER_FROM_REGISTRY = other.length ? path.dirname(other[0].cwd) : null
+}
+/** ★★ O86：另一臂的实验根。给了它 ⇒ 起会话**之前**先判定"本臂够不到对方"（够得到就 exit 2）。
+ *  ★ w59：注册表模式下没给 `--peer` 时**自动**取"另一条臂的场地所在的实验根"（跨卷才过得了判据）。 */
+const PEER_ARG = argOf('--peer') ?? (PEER_FROM_REGISTRY ? PEER_FROM_REGISTRY.replace(/\\/g, '/') : null)
 if (PEER_ARG && !path.isAbsolute(PEER_ARG)) {
   console.log(`[stop] --peer 必须是绝对路径（用 D:/… 而不是 /d/…）：${PEER_ARG}`)
   process.exit(2)
 }
-/** `--store` ＞ `--root`/store ＞ 旧缺省 `out/mem-store-<name>`（**旧缺省逐字不变**）。 */
+/** `--store` ＞ `--root`/store ＞ **注册表**（`arm.store`）＞ 旧缺省 `out/mem-store-<name>`（**旧缺省逐字不变**）。 */
 const STORE = argOf('--store')
   ? path.resolve(argOf('--store'))
   : ROOT
     ? path.join(ROOT, 'store')
-    : path.resolve(REPO, `out/mem-store-${NAME}`)
-/** `--cwd` ＞ `--root`/wt ＞ 旧缺省 `out/mem-arm-<name>`（**旧缺省逐字不变**）。 */
+    : ARM_ENTRY
+      ? ARM_ENTRY.store
+      : path.resolve(REPO, `out/mem-store-${NAME}`)
+/** `--cwd` ＞ `--root`/wt ＞ **注册表**（`arm.cwd`）＞ 旧缺省 `out/mem-arm-<name>`（**旧缺省逐字不变**）。 */
 const CWD = argOf('--cwd')
   ? path.resolve(argOf('--cwd'))
   : ROOT
     ? path.join(ROOT, 'wt')
-    : path.resolve(REPO, `out/mem-arm-${NAME}`)
+    : ARM_ENTRY
+      ? ARM_ENTRY.cwd
+      : path.resolve(REPO, `out/mem-arm-${NAME}`)
+/** ★ w59：preset（= 工具面/人格的一种自变量）。`--preset` ＞ 注册表 `arm.preset` ＞ 旧缺省 `council`。 */
+const PRESET = argOf('--preset') ?? ARM_ENTRY?.preset ?? 'council'
 const PHRASE = argOf('--phrase') ?? 'ZXQ-MEM-PROBE-7f3a91-DO-NOT-LEAK'
 const EXPECT = argOf('--expect') ?? null // present | absent | null(只报)
 const TASK = argOf('--task') ?? '只回一个字：好'
-/** ★ O85：证据落点。给了 `--root` 且没给 `--evidence` ⇒ 留在**臂的根下**。 */
+/** ★ O85：证据落点。给了 `--root` 且没给 `--evidence` ⇒ 留在**臂的根下**。
+ *  ★ w59：注册表模式同理 —— 留在**本臂场地所在的实验根**下（`<臂根>/evidence/`）。 */
 const EVIDENCE = argOf('--evidence')
   ? path.resolve(argOf('--evidence'))
   : ROOT
     ? path.join(ROOT, 'evidence', `w29-arm-${NAME}.json`)
-    : path.join(REPO, 'out', `w29-arm-${NAME}.json`)
+    : ARM_ENTRY
+      ? path.join(path.dirname(ARM_ENTRY.cwd), 'evidence', `w29-arm-${NAME}.json`)
+      : path.join(REPO, 'out', `w29-arm-${NAME}.json`)
 
 /* ── 载体模板（唯一的"策略"处，集中在这里，便于审阅与替换）────────────
  * 两臂用**逐字相同**的模板，只有「记忆条目块」不同 ⇒ 差异只有自变量本身。 */
@@ -206,7 +261,16 @@ const JUDGE_ROOT_IN_ANCESTORS = ANC.includes(path.resolve(REPO))
 const INSIDE_JUDGE_ROOT = isInside(REPO, CWD)
 
 console.log(`===== 臂 ${NAME} =====`)
-console.log(`[root  ] ${ROOT ?? `（未给 --root ⇒ 缺省：${path.join(REPO, 'out')} —— ★ 两臂的 store/产物会同处判据根的 out/ 下）`}`)
+/** ★ w59：注册表模式下打印的是"这一臂是谁"（场地/记忆库/preset/人读说明），而不是那条 --root 缺省提示
+ *  （那条提示在注册表模式下是**错的** —— 注册表已把场地与记忆库给定了）。★ 不给注册表 ⇒ 走 else 分支，逐字同旧。 */
+const WT_ROOT = ROOT ?? (ARM_ENTRY ? path.dirname(ARM_ENTRY.cwd) : null)
+if (ARM_ENTRY) {
+  console.log(`[registry] ${ARMS_ARG}  ·  臂 ${NAME}（role=${ARM_ENTRY.role}）preset=${PRESET}`)
+  console.log(`[registry] ${ARM_ENTRY.label}`)
+  console.log(`[root  ] ${WT_ROOT}（由注册表的 cwd 推得）${PEER_FROM_REGISTRY && !argOf('--peer') ? `；未给 --peer ⇒ 自动取另一臂的实验根 ${PEER_FROM_REGISTRY}` : ''}`)
+} else {
+  console.log(`[root  ] ${ROOT ?? `（未给 --root ⇒ 缺省：${path.join(REPO, 'out')} —— ★ 两臂的 store/产物会同处判据根的 out/ 下）`}`)
+}
 console.log(`[store ] ${STORE}`)
 console.log(`[cwd   ] ${CWD}`)
 console.log(`[evidence] ${EVIDENCE}`)
@@ -224,15 +288,15 @@ if (ROOT) {
  * 为什么：`--root` 的语义是"这条臂的场地已在那个根下建好了"（wt = 判据够不到的工作树）。
  * 若 cwd 不存在就 mkdir，会造出一个**没有 git、没有源码**的空壳并照常注入 ⇒ 读数没意义。
  * ⇒ 拒绝跑，并把建树的命令原样打出来（宁可不给结论，也不给一个用错场地的结论）。 */
-if (ROOT && !argOf('--cwd')) {
+if ((ROOT || ARM_ENTRY) && !argOf('--cwd')) {
   if (!fs.existsSync(CWD)) {
     console.log(`[stop] ${CWD} 不存在 ⇒ 先建工作树：`)
-    console.log(`       node scripts/eval-wt-new.mjs --root ${ROOT} --name wt`)
+    console.log(`       node scripts/eval-wt-new.mjs --root ${WT_ROOT} --name wt`)
     process.exit(2)
   }
   if (!fs.existsSync(path.join(CWD, '.git'))) {
     console.log(`[stop] ${CWD} 不是 git 工作树（缺 .git）⇒ 拒绝把注入载体写进一个非工作树的目录`)
-    console.log(`       node scripts/eval-wt-new.mjs --root ${ROOT} --name wt`)
+    console.log(`       node scripts/eval-wt-new.mjs --root ${WT_ROOT} --name wt`)
     process.exit(2)
   }
 }
@@ -304,7 +368,7 @@ console.log(`[carrier] 含短语=${carrier.includes(PHRASE)}`)
 
 /* ── ③ 建会话（永远新建）───────────────────────────────────── */
 const winCwd = CWD.replace(/\//g, '\\')
-const c = await rpc('session.create', { cwd: winCwd, agentPreset: 'council' })
+const c = await rpc('session.create', { cwd: winCwd, agentPreset: PRESET })
 console.log(`[create] status=${c.status} value=${JSON.stringify(valOf(c))} err=${JSON.stringify(errOf(c))}`)
 const sid = valOf(c)?.sessionId
 if (!sid) { console.log('[stop] 没拿到 sessionId'); process.exit(2) }

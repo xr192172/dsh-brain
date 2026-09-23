@@ -1,0 +1,125 @@
+diff --git a/node_modules/@deepseek-ai/dsh-pwsh-local/lib/index.js b/node_modules/@deepseek-ai/dsh-pwsh-local/lib/index.js
+index ab96883..cc94e4b 100644
+--- a/node_modules/@deepseek-ai/dsh-pwsh-local/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-pwsh-local/lib/index.js
+@@ -155,8 +155,89 @@ const ENV_OVERRIDES = {
+ * garbles non-ASCII output; pwsh 7 defaults to UTF-8 and is unaffected. The
+ * statements ride on line 1 after `; ` separators so PowerShell error line
+ * numbers stay accurate.
++*
++* ★ LOCAL PATCH (dsh-brain): guarded by the session's language mode.
++*   `[System.Text.UTF8Encoding]::new(...)` is a NON-CORE .NET type call, so a
++*   ConstrainedLanguage session (pwsh under the `read-only` sandbox rung — it
++*   cannot write its AppLocker probe files in temp) refuses to create the type.
++*   The unguarded preamble therefore reported, on EVERY command's stderr, two
++*   lines of `InvalidOperation: Cannot create type. Only core types are
++*   supported in this language mode.` — errors that belong to the harness's own
++*   preamble and have nothing to do with the user's command, emitted before the
++*   pinning could even take effect (so they arrived mojibake'd as well).
++*   Guarding is not "swallowing a failure": the assignment is simply not
++*   attempted where the language mode forbids it, and pwsh 7 is UTF-8 by
++*   default anyway, so nothing is lost on the platform where the guard fires.
++*   Verified in a real `dsh-sandbox-windows-acl` runner: read-only -> stderr
++*   empty (was 2 lines), stdout still `中文-输出-OK`; workspace-write -> unchanged.
++*/
++const ENCODING_PREAMBLE = "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false) }; ";
++/**
++* ★ LOCAL PATCH (dsh-brain): stderr substrings of the "the native child could
++* not be started, or its stdio could not be redirected" family, as recorded
++* from real confined sessions on this host:
++*   · `ResourceUnavailable: 程序'node.exe'运行失败： 拒绝访问`            (zh-CN pwsh)
++*   · `程序'git.exe'运行失败： StandardOutputEncoding is only supported when
++*      standard output is redirected`                                   (zh-CN pwsh + .NET)
++*   · `Program 'node.exe' failed to run: Access is denied`              (en-US pwsh)
++* Matched case-insensitively against the command's OWN stderr only.
++*/
++const REDIRECT_FAILURE_SIGNATURES = [
++	"运行失败",
++	"failed to run",
++	"is only supported when standard output is redirected",
++	"is only supported when standard error is redirected",
++];
++/**
++* Whether the command TEXT itself asks PowerShell to move a stream: a pipeline,
++* a file redirect, a handle merge/null-sink, or capturing a native command's
++* output into a variable. A heuristic on the text on purpose — the point is
++* only to name the strong correlation, never to attribute a cause.
+ */
+-const ENCODING_PREAMBLE = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); ";
++const REDIRECTION_PATTERNS = [
++	/[|]/,
++	/(^|[^0-9>])>>?(?![&0-9])/,
++	/[0-9]?>>?&[0-9]/,
++	/[0-9]?>>?\$null/i,
++	/(^|[\s;(])[$\w:[\].]+\s*=\s*(&\s*)?[A-Za-z_.\\/][\w.\\/-]*/m,
++];
++/**
++* The advisory note appended to a failed run's stderr when BOTH conditions hold:
++* the failure carries one of {@link REDIRECT_FAILURE_SIGNATURES} AND the command
++* text asks for a pipe/redirection (see {@link REDIRECTION_PATTERNS}).
++*
++* Why this exists: the raw text of that failure family is `程序'node.exe'运行失败：
++* 拒绝访问` — it names the PROGRAM and never the redirection, so an operator
++* reads it as "the command is broken / the code is broken" and retries the same
++* shape, or concludes the build produced nothing. In confined sessions on this
++* host that family correlated 19/19 with a redirect or pipe in the command
++* (see `out/w51-tool-fix-and-long-tasks.md` §A1). The note says so explicitly
++* and names the two rewrites that keep the information: drop the merge (the tool
++* already captures stderr into the result's `[stderr]` section), or have the
++* script emit `--json` / write a file. It is deliberately worded as a
++* CORRELATION, and it never changes the exit code, the stdout, or the sandbox
++* classification (it contains none of the backend's denial signatures).
++*
++* @param command - the PowerShell command text this executor was given.
++* @param stderr - the run's collected stderr text (left unmodified).
++* @param exitCode - the run's exit code; a clean exit is never annotated.
++* @returns the note to append, or null when either condition is absent.
++*/
++function redirectionFailureNote(command, stderr, exitCode) {
++	if (exitCode === 0 || exitCode === null) return null;
++	if (typeof command !== "string" || typeof stderr !== "string" || stderr.length === 0) return null;
++	const lowered = stderr.toLowerCase();
++	if (!REDIRECT_FAILURE_SIGNATURES.some((signature) => lowered.includes(signature.toLowerCase()))) return null;
++	if (!REDIRECTION_PATTERNS.some((pattern) => pattern.test(command))) return null;
++	return [
++		"[diagnostic] This failure belongs to the \"the child process could not be started, or its stdio could not be redirected\" family, and this command uses a pipe or a redirection",
++		"  (`|`, `>`, `>>`, `2>&1`, `2>$null`, or capturing a native command into a variable). In a confined session those two facts correlate strongly.",
++		"  Two rewrites usually work:",
++		"    (1) drop the pipe/redirection and run the same command as-is - the tool already captures stderr into the result's [stderr] section, so merging the streams is not required;",
++		"    (2) when machine-readable output is wanted, have the script emit `--json` or write a file, then read that file.",
++		"  (This is a CORRELATION note, not a root-cause claim. It does not change the exit code or the output.)",
++	].join("\n");
++}
+ /** Default SIGTERM→SIGKILL grace period (the `graceMs` config). */
+ const DEFAULT_GRACE_MS = 3e3;
+ /** Default per-stream spill cap (the `maxSpillBytes` config). */
+@@ -328,13 +409,22 @@ var PwshLocalExecutor = class PwshLocalExecutor extends ShellExecutor {
+ 			const collected = PwshLocalExecutor.collected(handle);
+ 			const timedOut = timeoutOf(d.signal, "BASH_TIMEOUT") !== void 0;
+ 			const aborted = d.signal.aborted && !timedOut;
++			const stderrOutput = finalOutput(collected.stderr);
++			/* ★ LOCAL PATCH (dsh-brain): name the redirect/pipe correlation of this
++			   failure family in the text the model actually reads. Append-only: exit
++			   code, stdout, timedOut/aborted and the sandbox denial classification are
++			   all untouched (the note carries none of the backend's denial signatures). */
++			const note = redirectionFailureNote(spec.command, stderrOutput.text, outcome.exitCode);
+ 			return {
+ 				...outcome,
+ 				timedOut,
+ 				aborted,
+ 				timeoutMs: spec.timeoutMs,
+ 				stdout: finalOutput(collected.stdout),
+-				stderr: finalOutput(collected.stderr)
++				stderr: note === null ? stderrOutput : {
++					...stderrOutput,
++					text: `${stderrOutput.text}${stderrOutput.text.length > 0 && !stderrOutput.text.endsWith("\n") ? "\n" : ""}${note}`
++				}
+ 			};
+ 		} catch (e_1) {
+ 			env_1.error = e_1;
+@@ -408,4 +498,4 @@ var PwshLocalExecutor = class PwshLocalExecutor extends ShellExecutor {
+ 	onProcessDone(_proc, _stderr, _spawnFailed, _spawnError) {}
+ };
+ //#endregion
+-export { ENCODING_PREAMBLE, ENV_OVERRIDES, PwshLocalExecutor, PwshLocalExecutor as default, assertServiceablePwshConfig, candidatePwshPaths, resolvePwshPath };
++export { ENCODING_PREAMBLE, ENV_OVERRIDES, PwshLocalExecutor, PwshLocalExecutor as default, REDIRECT_FAILURE_SIGNATURES, REDIRECTION_PATTERNS, assertServiceablePwshConfig, candidatePwshPaths, redirectionFailureNote, resolvePwshPath };

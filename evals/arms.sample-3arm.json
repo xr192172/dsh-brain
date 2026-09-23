@@ -1,0 +1,31 @@
+{
+  "_comment": "★ 三臂样例注册表（1 控制 + 2 处理）—— 用来证明【臂数可扩】：注册表里声明 3 个臂，判据机器照样能装载并跑通（用合成读数即可，不必真跑会话）。★ 本文件里的 cwd/store 是**占位路径**（示例，不要求存在）。",
+  "_why": "旧形态把臂写死成 A/B 两个槽位 ⇒ 臂数扩不了。现在一份注册表就是一族臂，臂数任意（≥2，至少 1 control + 1 treat）。",
+  "controlled": ["system", "toolNames"],
+  "arms": [
+    {
+      "name": "ctl",
+      "role": "control",
+      "cwd": "D:/project_develop/_gen-sample/ctl/wt",
+      "store": "D:/project_develop/_gen-sample/ctl/store",
+      "preset": "council",
+      "label": "样例·控制臂：空记忆库 + 基线 preset。"
+    },
+    {
+      "name": "t1",
+      "role": "treat",
+      "cwd": "D:/project_develop/_gen-sample/t1/wt",
+      "store": "D:/project_develop/_gen-sample/t1/store",
+      "preset": "council",
+      "label": "样例·处理臂 1：累积记忆库（与 ctl 只差记忆这一个自变量）。"
+    },
+    {
+      "name": "t2",
+      "role": "gen",
+      "cwd": "D:/project_develop/_gen-sample/t2/wt",
+      "store": "D:/project_develop/_gen-sample/t2/store",
+      "preset": "council+memory",
+      "label": "样例·处理臂 2（用 gen 标成『一个代』）：preset 本身也是自变量 —— 用来演示 role=gen 与多处理臂。"
+    }
+  ]
+}

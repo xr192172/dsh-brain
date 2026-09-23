@@ -125,6 +125,32 @@ const CAPABILITY_TARGETS = {
       'invariant 逐字："让 scripts/verify-drain-after-swap.mjs 支持 --json"；oracle = evals/checks/cli-0004.mjs 里 `TARGET = path.join(REPO, "scripts", "verify-drain-after-swap.mjs")`（REPO = 判据根）',
     evidence: ['scripts/verify-drain-after-swap.mjs'],
   },
+  // ★ 2026-09-23（格 ⑪ 的长程同族两题）：靶 = rename-target 那三个纯 Node 文件，
+  //   它们**本来就在** `eval-wt-new.mjs` 的 TARGET_INCLUDES 保留区里 ⇒ 不需要动布置。
+  //   两条题都是空 seed 的能力题（交付物 `guard.mjs` / `store-guard.mjs` 在 HEAD 里根本不存在）。
+  //   `spec: []` —— 规格**全写在 invariant 里**（故意不另发规格文件：少一条答案泄漏面）。
+  'cli-0006-selftest-drift-guard-json': {
+    targets: [
+      'evals/pilot/rename-target/math.js',
+      'evals/pilot/rename-target/store.js',
+      'evals/pilot/rename-target/index.js',
+    ],
+    spec: [],
+    source:
+      'invariant 逐字："`evals/pilot/rename-target/` 是个零依赖的纯 Node 小工程（math.js / store.js / index.js），既有入口 `node index.js --selftest` 会打印 5 行纯数据读数 … 在**同目录**新建 `guard.mjs` …"；oracle = evals/checks/cli-0006.mjs 里 `DIR = path.join(REPO, "evals", "pilot", "rename-target")`（REPO = `--repo` ＞ `DSH_EVAL_REPO` ＞ 判据根）',
+    evidence: ['evals/pilot/rename-target'],
+  },
+  'cli-0007-store-surface-guard-pinned': {
+    targets: [
+      'evals/pilot/rename-target/math.js',
+      'evals/pilot/rename-target/store.js',
+      'evals/pilot/rename-target/index.js',
+    ],
+    spec: [],
+    source:
+      'invariant 逐字："对象换成 `evals/pilot/rename-target/store.js` 暴露的**存储层行为面**（put / get / size）" + "在**同目录**新建 `store-guard.mjs`"；oracle = evals/checks/cli-0007.mjs 里 `DIR = path.join(REPO, "evals", "pilot", "rename-target")`（REPO = `--repo` ＞ `DSH_EVAL_REPO` ＞ 判据根）',
+    evidence: ['evals/pilot/rename-target'],
+  },
 }
 
 const lf = (s) => String(s ?? '').replace(/\r\n/g, '\n')
