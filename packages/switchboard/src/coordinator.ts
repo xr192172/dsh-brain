@@ -481,7 +481,26 @@ export class Coordinator {
     const gateCmd = fast ? undefined : (verifyOverride && verifyOverride.trim()) || cfg.verifyCmd
     if (gateCmd) {
       const gateCfg = { ...cfg, verifyCmd: gateCmd }
-      const gate = await this.runVerifyGate(gateCfg, b, old)
+      // ★ O100 修复②（2026-09-23）：verify 阶段的**异常**必须与"判据不通过"走同一条收口路径
+      //   （非破坏回滚 + 如实记录），见本文件开头 :6-7 的既有语义，以及 probe / 启动健康检查 /
+      //   稳定观察窗三处同类的 `return this.rollbackFlip(...)`。
+      //   旧实现**只处理 `gate.ok === false` 这个返回值**情形。
+      //   为什么这是缺陷：`runVerifyGate` 里 `new Promise((res) => { ... spawn(...) })` 的 executor
+      //   **同步抛错**时（实用例见修复①：裸 .mjs 路径 ⇒ `spawn()` 同步抛 `EFTYPE`，早于任何
+      //   `.on('error')` 注册），Promise 构造器把它转成 **reject** ⇒ `await` 抛出 ⇒ 逃出本方法
+      //   的 `try{...}finally{...}`（**只有 finally、没有 catch**）⇒ 最终被
+      //   main.ts:140 的 `void coord.handover(...).catch(console.error)` 吞掉。实测后果
+      //   （out/_c4.txt + out/_probe5.txt）：无 record、无回滚、无 retire ⇒ stage 永卡 `verify`，
+      //   旧代成孤儿（gen-3131 至今监听 :3131）。⇒ 在此把 reject 与 `ok:false` 收敛为同一出口，
+      //   协程绝不再死在 verify。**不动状态机、不动 retire 触发条件**，只是给异常路径补上记录+回滚。
+      let gate: { ok: boolean; summary: string }
+      try {
+        gate = await this.runVerifyGate(gateCfg, b, old)
+      } catch (e) {
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
+        this.record('verify-gate 异常（已捕获，走非破坏回滚）：' + msg)
+        return this.rollbackFlip(old, b, cfg, `(verify-gate 异常) 已回滚旧代 ${old.inst.gen}：${msg}`)
+      }
       if (!gate.ok) {
         return this.rollbackFlip(old, b, cfg, `(verify-gate 失败) 已回滚旧代 ${old.inst.gen}：${gate.summary}`)
       }
@@ -582,6 +601,17 @@ export class Coordinator {
     if (['node', 'node.exe', 'python', 'python3', 'deno'].includes(exe.toLowerCase())) {
       script = parts[1] ?? ''
       rest = parts.slice(2)
+    } else if (['.mjs', '.js', '.cjs'].some((ext) => exe.toLowerCase().endsWith(ext))) {
+      // ★ O100 修复①（2026-09-23）：**裸脚本路径**（.mjs/.js/.cjs）且**未显式给出解释器** ⇒
+      //   用当前控制面进程的可执行文件（`process.execPath`）当解释器前缀。
+      //   为什么必须：旧实现把脚本路径直接当可执行文件 `spawn(脚本路径, [...])`；Windows 上
+      //   `.mjs` 不是可执行映像 ⇒ CreateProcess 返回 ERROR_BAD_EXE_FORMAT ⇒ Node 在 `spawn()`
+      //   调用内**同步抛 `EFTYPE`**（实测：`out/_o100-spawnprobe.mjs`，A2 段）—— 连
+      //   `child.on('error')` 都来不及注册，所以本方法内 `child.on('error')` 的既有兜底
+      //   **永远不会触发**（这正是修复②存在的理由）。
+      //   ★ 白名单语义**不变**：下面仍按 **脚本路径 `scriptAbs`** 校验（白名单认的是那个 .mjs 的路径，
+      //     不是 node）；本行只决定"用什么跑它"。
+      exe = process.execPath
     }
     const scriptAbs = script && (isAbsolute(script) ? script : resolve(cfg.verifyCwd ?? cfg.workDir, script))
     if (!scriptAbs || !this.inVerifyAllow(scriptAbs, allow)) {
