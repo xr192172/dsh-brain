@@ -3106,3 +3106,59 @@ win32 后端 = **`@deepseek-ai/dsh-sandbox-windows-acl`**（**包确实存在**�
 |---|---|---|
 | **O98** | **换代后必须做行为复验**（静态自证 ≠ 生效；旁路被拒 + 阳性对照才是终局证据） | O92 的真实生效 |
 | **O99** | ★ **换代的"会话接管"副作用**应写进运维手册（窗口期 503 + 会话迁移）—— **`handover-vs-restart.md` 已有，但没在"要改代码时"这条路径上被读到** | 避免下次又先说"要重启" |
+
+---
+
+## 54. ✅✅ **换代成功 + 沙箱改动【行为级】生效**（三次换代，三种结果各一种）—— 附一处我的无效读数
+
+### 54.1 换代：**换了三次，三种结果各占一种**（这本身就是有价值的证据）
+
+| # | `verify` 传法 | 结果（权威流水 `handover-status.jsonl`） |
+|---|---|---|
+| 1 | 仓库 `scripts/…mjs` | ★ **`{"result":"rolled-back","note":"(verify-gate 失败) 已回滚旧代 gen-3131：verifyCmd 脚本不在白名单(verifyAllowList)→安全拒绝：…/w36-verify-swap.mjs","gen":"gen-3132"}`**<br>⇒ ★★ **验证闸真的在工作（fail-closed）**——根因：白名单是 `…\Temp\verifyout`（`start-switchboard.ps1:52`） |
+| 2 | 白名单目录内 `.mjs` **裸路径** | ★★ **flip 已完成但交接协程死掉**：`runVerifyGate` **只认字面 `node/node.exe/…`**，否则**把脚本路径当可执行文件 spawn** ⇒ `.mjs` 不可执行 ⇒ **在 Promise executor 内同步抛错** ⇒ **既没记录结果、也没回滚、也没退役旧代**，stage 卡 `verify` **5 分钟** ⇒ **O100（真 bug）** |
+| 3 | **`node <白名单脚本>`** | ✅ **成功**：`flip to gen-3134` / `verify-boot-health ok` / **`verify-gate ok: cmd exit=0 static:mcp-client-confine + static:dcb-FS_SANDBOX_DENIED + regression:gate-16/16`** / `retire gen-3133` / **`已切换 → gen-3134`** |
+
+★ **`lease.json`（权威）**：**`activeGen = {gen: "gen-3134", port: 3134, pid: 12492}`** ✓（**我复核**）
+★ 成功那次的 `freeze` 是 **`running=0→cancel=0`**、`resume-session` 是**它新建的会话** ⇒ **本次没取消任何在跑回合、用户的会话没被接手** ✓
+
+### 54.2 ★★★ 行为级复验（**终局证据，静态自证不算**）
+
+| # | 要证明的 | 结果 |
+|---|---|---|
+| 1 | ★★ **旁路被拒（bridge）** | `safe_rename`（带 `project_dir` + `dry_run:false`）写判据根 ⇒<br>**`安全重命名 被沙箱拒绝，未落盘：cannot write "D:\…\evals\pilot\rename-target": file access denied under workspace-write mode…`** ⇒ **与 `sandboxRefusalText` 逐字一致** ✓ |
+| 2 | ★★ **旁路被拒（MCP）** | `mcp__design-canvas__edit_code` 写判据根 ⇒ **`EPERM: operation not permitted`，未落盘** ✓ |
+| 3 | ★★★ **阳性对照（不许全封）** | 同一会话**在自己工作树**写 `w37-positive.txt` ⇒ **`Created file`**，`git -C _abA/wt status` 显示 **`?? w37-positive.txt`** ✓✓ |
+| 4 | **shell 未回退** | 仍 `file access denied under workspace-write mode`，文件未创建 ✓ |
+| 5 | **判据根零污染** | `git status` / `git diff -- evals/pilot` 均空 ✓ |
+
+⇒ ★★★ **⇒ O92 的两个改动【真的生效了】**（不是"代码在磁盘上"而已）。
+★ 另注：A 项**前两次没打到判定**（缺 `project_dir`；默认 `dry_run` 只出预览）⇒ **第三次才真正触发 fence** ⇒ **它也如实标了**（"参数不对就没测到"这件事，值得记住）。
+
+### 54.3 ★★ 我的复核 + **一次无效读数（我自己的）**
+
+- ✅ **`lease.json` = `gen-3134` / pid 12492**；`:3080`=200、`:3134`=200；
+- ★ 我一度用 **`kill -0 <pid>`** 判定"两个旧代 pid 已不在" ⇒ ★★ **那是【无效读数】**（**MSYS pid 空间 ≠ Windows pid**）；
+  改用 **`netstat -ano`** 后真相明确：
+  ```
+  :3080 LISTENING 17360     ← 前门
+  :3131 LISTENING 23292     ← ★ 旧代 gen-3131 【仍在监听】
+  :3134 LISTENING 12492     ← 新代（= lease 的 pid ✓）
+  ```
+  ⇒ **子代理"遗留旧代"的说法成立**，我的判定错。
+  ★ 顺带：`tasklist //FI …` 在 Git Bash 下**无输出**（参数转义问题）⇒ **也是无效读数**。
+
+### 54.4 ⚠️ 须处理：**`gen-3131` 是"沙箱改动之前"的旧代，仍占着 `:3131`**
+
+- 它**不在前门链路**（`lease` 指向 3134）⇒ **用户的前端（`:3080`）应当打到新代** ✓；
+- ★ 但**任何直连 `:3131` 的客户端会打到【旧代码】**（= 没有沙箱 seam 的那一版）⇒ **这是一个真实风险**；
+- ★★ **不能用 `kill`**：`index.ts:311-316` 的 **P2 安全层明确把"杀宿主 PID"列为禁止就地操作** ⇒
+  **正路是用正式原语 `/admin/retire`**（`admin.ts:63`）⇒ **先读它的契约再调用**（**O101**）。
+
+### 54.5 新增未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O100** | ★★ **`runVerifyGate` 的 spawn bug**：传 `.mjs` 裸路径时会**当可执行文件 spawn** ⇒ 同步抛错 ⇒ **stage 卡 5 分钟、不记录、不回滚、不退役**（**失败路径本身不 fail-safe**） | 换代的健壮性 |
+| **O101** | ★ **用 `/admin/retire` 正式退役 `gen-3131`**（及更早的 `gen-3082`）；**禁止 `kill`**（P2） | 消除"旧代码仍在监听"的风险 |
+| **O102** | **`verify` 闸的白名单语义**（`verifyAllowList` 指向 `…\Temp\verifyout`）应被文档化 —— 否则**第一次换代必然被拒**（我们刚好撞上） | 换代的可用性 |
