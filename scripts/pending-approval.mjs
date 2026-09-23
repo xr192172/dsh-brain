@@ -81,7 +81,7 @@ function blockingLevels(level) {
 const USAGE = `pending-approval.mjs —— R0/R1 的「待批记录 + 一句确认」（O107）
 
 用法（五条命令）：
-  record --level <R0|R1> --note "<一句话>" [--paths <p1,p2>] [--by <谁>]
+  record --level <R0|R1> --note "<一句话>" [--paths <p1,p2>] [--by <谁>] [--fingerprint <hex>]
   list   [--level <L>] [--all] [--json]
   show   <id> [--json]
   approve <id> [--by <谁>] [--note "<一句确认>"]
@@ -147,6 +147,7 @@ function foldRecords(entries) {
         status: 'pending',
         note: e.note ?? '',
         paths: Array.isArray(e.paths) ? e.paths : [],
+        fingerprint: typeof e.fingerprint === 'string' ? e.fingerprint : null,
         by: e.by ?? null,
         createdAt: e.at ?? null,
         approvedBy: null,
@@ -184,7 +185,7 @@ const now = () => new Date().toISOString()
 
 function parseArgv(argv) {
   const flags = { _: [] }
-  const takesValue = new Set(['level', 'note', 'paths', 'by', 'dir'])
+  const takesValue = new Set(['level', 'note', 'paths', 'by', 'dir', 'fingerprint'])
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (!a.startsWith('--')) {
@@ -253,6 +254,13 @@ function cmdRecord(flags) {
   if (!flags.note || String(flags.note).trim() === '') throw new Error('record 需要 --note "<一句话>"（这是给人看的那一句）')
   const declared = requireLevel(flags.level, { allowR2: false })
   const rec = reconcileLevel(declared, flags.paths)
+  // ★ 可选的内容指纹（加法式：不给就是 null ⇒ 老行为一字不变）
+  let fingerprint = null
+  if (flags.fingerprint !== undefined && flags.fingerprint !== null && String(flags.fingerprint).trim() !== '') {
+    const fp = String(flags.fingerprint).trim().toLowerCase()
+    if (!/^[0-9a-f]{16,128}$/.test(fp)) throw new Error(`--fingerprint 必须是 16~128 位 hex（实收 ${JSON.stringify(flags.fingerprint)}）`)
+    fingerprint = fp
+  }
   const id = newId()
   const entry = {
     schema: SCHEMA,
@@ -262,6 +270,7 @@ function cmdRecord(flags) {
     status: 'pending',
     note: String(flags.note).trim(),
     paths: flags.paths ?? [],
+    ...(fingerprint ? { fingerprint } : {}),
     by: flags.by ?? 'cli',
     at: now(),
     source: 'record',
@@ -272,6 +281,7 @@ function cmdRecord(flags) {
     id,
     level: entry.level,
     status: 'pending',
+    fingerprint,
     file: path.relative(ROOT, storeFile(flags.dir)).replace(/\\/g, '/'),
     inferred: rec.inferred,
     reconcile: rec.note,

@@ -10,12 +10,49 @@
  * ④ 字符串常量 `'computeHash-v1'` 必须**原样保留**（它被当作持久化命名空间，改了会让旧数据失效）。
  *
  * 退出码：0 = 通过；1 = 失败（并打印每条判据的读数）。
+ *
+ * 用法：node evals/pilot/rename-target/check.mjs                  # 判判据根那一份（不带参数时与改动前逐字相同）
+ *       node evals/pilot/rename-target/check.mjs --repo <被测工作树>   # ★ 判**指定那棵树**里的靶文件
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+/**
+ * ── ★★ 格 ⑩（O117）：oracle 必须能指向**被测的那棵树** ──────────────────────
+ *
+ * **原来的问题**：`HERE = 自身所在目录` ⇒ **硬编码判据根那一份** `math.js/store.js/index.js`
+ *   ⇒ 无论隔离工作树里有什么，它只判判据根 ⇒ **把靶文件搬进 wt 也没用**。
+ *
+ * **现在的优先级**：`--repo` ＞ `DSH_EVAL_REPO` ＞ **自身相对路径**（= 判据根，**逐字回退，行为不变**）。
+ *   `--repo` / `DSH_EVAL_REPO` 给的是**仓库根**（与 `eval-validate.mjs --repo` 同口径），
+ *   靶目录 = `<repo>/evals/pilot/rename-target`。不给参数时 `HERE` 与改动前**逐字相同**。
+ * ★ 靶文件不在指定树里 ⇒ **大声报错并非零退出**（判不了就是不合格，不是通过）。
+ */
+const HERE_DIR = path.dirname(fileURLToPath(import.meta.url))
+function resolveRepoArgv() {
+  const a = process.argv.slice(2)
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] === '--repo') return { repo: a[i + 1] ?? null, src: '--repo' }
+    if (a[i].startsWith('--repo=')) return { repo: a[i].slice('--repo='.length), src: '--repo=' }
+  }
+  if (process.env.DSH_EVAL_REPO) return { repo: process.env.DSH_EVAL_REPO, src: 'DSH_EVAL_REPO（环境变量）' }
+  return { repo: path.resolve(HERE_DIR, '../../..'), src: '自身相对路径（默认 = 判据根；与改动前逐字相同）' }
+}
+const _resolved = resolveRepoArgv()
+const REPO = path.resolve(_resolved.repo ?? '')
+const HERE = path.join(REPO, 'evals', 'pilot', 'rename-target')
+
+console.log(`cli-0005 oracle —— REPO = ${REPO.replace(/\\/g, '/')}`)
+console.log(`  来源：${_resolved.src}`)
+console.log(`  靶目录：${HERE.replace(/\\/g, '/')}`)
+const _missing = ['math.js', 'store.js', 'index.js'].filter((f) => !fs.existsSync(path.join(HERE, f)))
+if (_missing.length) {
+  console.log('')
+  console.log(`cli-0005 oracle：**不合格** —— 指定树里缺靶文件 ${_missing.join(', ')}（目录 ${HERE.replace(/\\/g, '/')}）⇒ 判不了（判不了 ≠ 通过）`)
+  process.exit(1)
+}
+
 const OLD = 'computeHash'
 const NEW = 'digestOf'
 const NS = "'computeHash-v1'"

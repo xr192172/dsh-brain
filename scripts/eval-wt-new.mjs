@@ -120,6 +120,18 @@
  *     （`../../../project_develop/dsh-brain/scripts/…`）。本轮堵住的只有**臂间互见**这一条。
  *     残余风险见 `out/w32-o86-arms.md`「残余风险」。
  *
+ * ── ★★ O117（格 ⑩）：**靶文件在 wt 内**（能力题的靶子单独捞回）──────────────────
+ *   上面 O69/R1 的"排除"解决的是"判据别进被测树"；但它顺手把**靶文件**也排掉了 ——
+ *   而 `cli-0004` 的靶子在 `scripts/`、`cli-0005` 的靶子在 `evals/pilot/rename-target/`
+ *   ⇒ 这两题在隔离布置下**天然无解**（agent 在 cwd 里找不到要改的文件）⇒ 它只能去判据根找
+ *     ⇒ 这正是格 ⑨ 的结构性根因（同一句话：**题面与隔离布置自相矛盾**）。
+ *   **处置**：`TARGET_INCLUDES` —— 用 sparse-checkout 的 `--no-cone`（后写的覆盖先写的）
+ *   把**靶文件**捞回来，`scripts/` 与 `evals/` 目录因此存在、但里面**只有靶文件**：
+ *     · R1 仍然成立（oracle / 规格 / 题面 / 任务集**一个都不在**树里，[7] 逐条断言）；
+ *     · "靶文件在 wt 内"变成**可打印的读数**（[4b]）。
+ *   ⚠️ 捞回靶文件**不等于**"答案不可达"：那还要求封 git（`scripts/eval-seal-git.mjs`）
+ *     与 oracle 认 `--repo`（两个能力题的 oracle 原先硬编码自身相对路径）。
+ *
  * ── 用法 ────────────────────────────────────────────────────────────────
  *   node scripts/eval-wt-new.mjs --name w25-R1
  *   node scripts/eval-wt-new.mjs --root D:/project_develop/_abA --name wt
@@ -162,6 +174,31 @@ const allOf = (k) => {
  *   默认项是 R1 的最小面，**故意不允许关掉**（关掉它等于自己把判据放回被测目录）。
  */
 const DEFAULT_EXCLUDES = ['scripts', 'evals', 'docs', 'patches', '.workbuddy']
+/**
+ * ── ★★ O117（格 ⑩）：**能力题的靶文件必须落进工作树** ────────────────────────
+ *
+ * **为什么**：判据 `applicable = 靶文件在 wt 内 ∧ 答案不可达`（`scripts/eval-task-applicability.mjs`）。
+ * 靶文件不在 wt 里 ⇒ 被测 agent 在**自己的 cwd 里无解** ⇒ "去判据根找文件"是被题面**逼出来**的必然行为
+ * （格 ⑨ 的结构性根因，也是 w41 的 k=4/k=5 的真实成因）。
+ * ★ `cli-0005` 的靶子在 `evals/pilot/rename-target/`、`cli-0004` 的靶子在 `scripts/`
+ *   —— 正好都在默认排除区里 ⇒ 这两题在隔离布置下**天然无解**。
+ *
+ * ★★ 但**只放靶文件**：`evals/checks/cli-0004.mjs`（oracle）、`evals/pilot/rename-target/check.mjs`（oracle）、
+ *   `evals/pilot/rename-target/README.md`（含期望名的**规格**）、`evals/pilot/tasks.jsonl`（题面 + seed）
+ *   —— **一个都不放**（它们才是"答案"），[7] 会逐条断言它们不在树里。
+ *   ⚠️ 规格文件故意不进保留区：它写着期望的新名字 ⇒ 进了就变成"答案在 wt 里"，`applicable` 反而为 false。
+ *     （题面 `invariant` 已经把"`computeHash` → `digestOf`"说全了 ⇒ 少了 README 只是缺上下文，不是无解。）
+ *
+ * **怎么做的**：sparse-checkout 的 `--no-cone` 模式里，**后写的模式覆盖先写的** ——
+ *   先 `!/<排除项>/` 把整目录排掉，再 `/<靶文件>` 把靶文件单独捞回来。
+ *   ⇒ 结果：`scripts/` 与 `evals/` 目录**存在**，但里面**只有靶文件**（[4] 断言"排除区里只有允许清单里那些"）。
+ */
+const TARGET_INCLUDES = [
+  'scripts/verify-drain-after-swap.mjs', // cli-0004 的靶文件（scripts/ 排除区里单独捞回）
+  'evals/pilot/rename-target/math.js', // cli-0005 的靶文件 ×3（evals/ 排除区里单独捞回）
+  'evals/pilot/rename-target/store.js',
+  'evals/pilot/rename-target/index.js',
+]
 /** ★ 判据清单：这些**必须**在工作树里不存在 —— 这是 R1 的机器证据（存在性断言，无启发式）。 */
 const JUDGE_FILES = [
   'scripts/eval-validate.mjs',
@@ -193,6 +230,8 @@ const USAGE = `${NAME} —— 起一个**不含判据**的隔离工作树（R1�
                       node scripts/eval-wt-new.mjs --peer-only --dir D:/project_develop/_abA/wt --peer C:/_abB-experiment-root
   --dir <abs>       直接指定目录（必须绝对路径；与 --name 二选一，优先级最高）
   --exclude <p>     额外排除的仓库相对目录（可重复，**追加**）。默认已排除：${DEFAULT_EXCLUDES.join(' , ')}
+  --include <p>     ★★ O117：额外**捞回**的靶文件（仓库相对**文件**路径，可重复，追加）。
+                    默认已捞回（两个能力题的靶子）：${TARGET_INCLUDES.join(' , ')}
   --no-hygiene      只排除规格点名的两个目录（scripts , evals），不带 docs/patches/.workbuddy
   --json <file>     把结论写成 JSON（默认不写）
   -h, --help        打印本用法
@@ -440,6 +479,8 @@ const PEER_ONLY = argv.includes('--peer-only')
 /** `--no-hygiene`：退回"只排规格点名的两个目录"（`scripts` / `evals`）—— 留给想复现旧行为的人。 */
 const baseExcludes = argv.includes('--no-hygiene') ? ['scripts', 'evals'] : DEFAULT_EXCLUDES
 const extraExcludes = allOf('--exclude')
+/** ★★ O117：额外**捞回**的靶文件（仓库相对路径，可重复；追加在 TARGET_INCLUDES 之后）。 */
+const extraIncludes = allOf('--include')
 const jsonOut = argOf('--json')
 if (rootArg && !path.isAbsolute(rootArg)) {
   process.stderr.write(`[${NAME}] 用法错误：--root 必须是绝对路径（用 D:/… 而不是 /d/…）\n`)
@@ -505,18 +546,26 @@ if (PEER_ONLY) {
 }
 
 const EXCLUDES = [...new Set([...baseExcludes, ...extraExcludes])].map((p) => p.replace(/\\/g, '/').replace(/\/+$/, ''))
+/**
+ * ★★ O117：捞回的靶文件清单（默认含两个能力题的靶子；`--include` 可追加）。
+ * ★ 在主仓里不存在的项**直接报出来并丢弃** —— 否则会变成"稀疏模式写了但什么都没捞回来"的假证据。
+ */
+const INCLUDES_RAW = [...new Set([...TARGET_INCLUDES, ...extraIncludes])].map((p) => p.replace(/\\/g, '/').replace(/^\/+/, ''))
+const INCLUDES_MISSING = INCLUDES_RAW.filter((p) => !fs.existsSync(path.join(ROOT, p)))
+const INCLUDES = INCLUDES_RAW.filter((p) => !INCLUDES_MISSING.includes(p))
 
 /** ★★ O85 的核心读数：判据根在不在工作树的祖先链上。 */
 const ANCESTORS = ancestorsOf(DIR)
 const JUDGE_ROOT_IN_ANCESTORS = ANCESTORS.includes(path.resolve(ROOT))
 const DIR_INSIDE_JUDGE_ROOT = isInside(ROOT, DIR)
 
-const result = { name: name ?? path.basename(DIR), dir: DIR, root: ROOTDIR, excludes: EXCLUDES, repo: ROOT, at: new Date().toISOString() }
+const result = { name: name ?? path.basename(DIR), dir: DIR, root: ROOTDIR, excludes: EXCLUDES, includes: INCLUDES, includesMissing: INCLUDES_MISSING, repo: ROOT, at: new Date().toISOString() }
 say(`${NAME} —— 起隔离工作树（不含判据）`)
 say(`  仓库      : ${ROOT}`)
 say(`  建树根    : ${ROOTDIR}${rootArg ? '' : '   （缺省：判据根内的 out/_wt/）'}`)
 say(`  目标目录  : ${DIR}`)
 say(`  排除      : ${EXCLUDES.map((e) => e + '/').join(' , ')}`)
+say(`  捞回靶文件: ${INCLUDES.length ? INCLUDES.join(' , ') : '（无）'}${INCLUDES_MISSING.length ? `   ⚠ 主仓里不存在、已丢弃：${INCLUDES_MISSING.join(' , ')}` : ''}`)
 if (DIR_INSIDE_JUDGE_ROOT) {
   say('')
   say('  ⚠ 建树根在**判据根内部** ⇒ R1 只挡住了"树里没有判据"，**没挡住**"从这棵树 `..` 上去')
@@ -555,7 +604,7 @@ say(`  ✓ 已建：${DIR}`)
 // ── [2] sparse-checkout 排除（★ 同样带 -c；这一步会把文件按 autocrlf 重新检出）──
 say('')
 say('[2] sparse-checkout --no-cone 排除判据目录（排除 ≠ 删除）')
-const patterns = ['/*', ...EXCLUDES.map((e) => `!/${e}/`)]
+const patterns = ['/*', ...EXCLUDES.map((e) => `!/${e}/`), ...INCLUDES.map((p) => `/${p}`)]
 const init = gitIn(DIR, ['sparse-checkout', 'init', '--no-cone'])
 const set = init.status === 0 ? gitIn(DIR, ['sparse-checkout', 'set', '--no-cone', ...patterns]) : init
 if (set.status !== 0) {
@@ -590,9 +639,42 @@ check(fs.existsSync(built.lib), 'O72 要害：packages/switchboard/lib/index.js 
 // ── [4] 证据：排除生效 + 工作树是"干净"的 ─────────────────────────────────
 say('')
 say('[4] 证据 A：排除生效 且 工作树没被改脏（★ 含上一步的链接与构建产物）')
+/**
+ * ★★ O117：本条判据从"排除目录**不存在**"改成更强的形态 ——
+ *   **排除区里出现的文件必须恰好是允许清单（`INCLUDES`）里的那些**。
+ * 为什么改：靶文件被**刻意捞回**到 `scripts/` 与 `evals/` 里 ⇒ "目录不存在"不再是正确判据
+ *   （继续用它只会假红）；而"目录里只有靶文件"既保住了 R1，又把"捞回"变成**可打印的读数**。
+ */
+function walkFiles(dirAbs, base, out = []) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(dirAbs, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const e of entries) {
+    const abs = path.join(dirAbs, e.name)
+    if (e.isDirectory()) walkFiles(abs, base, out)
+    else out.push(path.relative(base, abs).replace(/\\/g, '/'))
+  }
+  return out
+}
+const excludeAreaRows = []
 for (const e of EXCLUDES) {
   const abs = path.join(DIR, e)
-  check(!fs.existsSync(abs), `已排除：${e}/ 不存在于工作树`, fs.existsSync(abs) ? `（仍在！${abs}）` : '')
+  if (!fs.existsSync(abs)) {
+    check(true, `已排除：${e}/ 不在工作树（本来就没有）`, '')
+    excludeAreaRows.push({ dir: e, exists: false, files: [], unexpected: [] })
+    continue
+  }
+  const found = walkFiles(abs, DIR)
+  const unexpected = found.filter((f) => !INCLUDES.includes(f))
+  excludeAreaRows.push({ dir: e, exists: true, files: found, unexpected })
+  check(
+    unexpected.length === 0,
+    `排除区 ${e}/ 里只有允许保留的靶文件`,
+    unexpected.length ? `**多出 ${unexpected.length} 个**：${unexpected.slice(0, 6).join(', ')}` : `区内文件：${found.join(' , ') || '（空目录）'}`,
+  )
 }
 const status = gitIn(DIR, ['status', '--porcelain'])
 const statusLines = String(status.stdout ?? '').split('\n').filter((l) => l.trim())
@@ -601,6 +683,20 @@ const diffStat = gitIn(DIR, ['diff', '--stat'])
 check(String(diffStat.stdout ?? '').trim() === '', 'git -C <wt> diff --stat 为空', JSON.stringify(String(diffStat.stdout ?? '').trim().slice(0, 120)))
 const wtHead = String(gitIn(DIR, ['rev-parse', 'HEAD']).stdout ?? '').trim()
 check(wtHead === repoHead, '工作树 HEAD == 主仓 HEAD', `${wtHead} vs ${repoHead}`)
+
+// ── [4b] ★★ O117 证据：能力题的靶文件**真的落进了工作树**（贴的是实际路径）────────
+say('')
+say('[4b] O117 证据：捞回的靶文件在工作树里的**实际路径**（判据是"文件真的在"，不是"模式写了"）')
+const targetRows = []
+for (const rel of INCLUDES) {
+  const abs = path.join(DIR, rel)
+  const exists = fs.existsSync(abs)
+  targetRows.push({ file: rel, inWt: exists, abs: abs.replace(/\\/g, '/') })
+  check(exists, `靶文件在 wt 内：${rel}`, exists ? abs.replace(/\\/g, '/') : '**不存在 ⇒ 该题在隔离布置下无解**')
+}
+// 反向自证：这些靶文件在主仓里确实存在（否则"wt 里有"是在空集上为真 = 假绿）
+const targetInRepo = INCLUDES.filter((rel) => fs.existsSync(path.join(ROOT, rel)))
+check(targetInRepo.length === INCLUDES.length, `反向自证：${INCLUDES.length} 个靶文件在主仓里都在（${targetInRepo.length}/${INCLUDES.length}）`, '')
 
 // ── [5] 证据 B：行尾（CRLF 坑）真的被治住 ─────────────────────────────────
 say('')
@@ -723,6 +819,8 @@ result.checks = {
   seedRows,
   judgeRows,
   judgeInRepo,
+  targetRows,
+  excludeAreaRows,
   build: { lib: built.lib, skipped: built.skipped, why: built.why },
   eol: { files: eolRows.length, wCrlf: crlfRows.map((l) => l.trim().split(/\s+/).pop()) },
 }
@@ -764,6 +862,9 @@ say(`    node scripts/check-all.mjs --repo "${DIR}"`)
 say(`    node scripts/memory-judge-poison-check.mjs --wt "${DIR}"`)
 say(`  （也可以只用环境变量：DSH_EVAL_REPO="${DIR}"）`)
 say(`  工作树里 git 跟踪文件 ${trackedWt} 个；node_modules：${result.nodeModules ? '已接（junction → 判据根）' : '**没接上**（构建/判据可能跑不动）'}`)
+say(`  ★★ O117 捞回的靶文件（在工作树里，判据根里的 oracle 用 --repo 判它们）：`)
+for (const t of targetRows) say(`      ${t.inWt ? '在 ✓' : '**不在 ✗**'}  ${t.file}`)
+say(`      ⇒ 绝对路径：${targetRows.filter((t) => t.inWt).map((t) => t.abs).join('  |  ') || '（一个都没有）'}`)
 say(`  O85 隔离读数：判据根在祖先链上 = ${result.judgeRootInAncestors ? '**是**（判据在 agent 够得到的地方）' : '否'}；` +
   `工作树在判据根内部 = ${result.dirInsideJudgeRoot ? '**是**' : '否'}（祖先链 ${result.ancestors.length} 级）`)
 if (peerVerdict) {

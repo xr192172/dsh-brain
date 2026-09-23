@@ -28,13 +28,48 @@
  *   · ★ **`R0a/R0b/R0c` 是裸 `console.log`（无 id/level 结构）** ⇒ 要额外结构化，**最容易漏**
  * ⇒ 所以本 oracle **必须查全 15 个** —— 否则"只改那 11 个"也能蒙过，题目就失去区分度。
  *
- * 用法：node evals/checks/cli-0004.mjs        # 退出 0 = 通过；非 0 = 不通过（并逐条打印原因）
+ * 用法：node evals/checks/cli-0004.mjs                        # 退出 0 = 通过；非 0 = 不通过（并逐条打印原因）
+ *       node evals/checks/cli-0004.mjs --repo <被测工作树>      # ★ 判**指定那棵树**的 scripts/verify-drain-after-swap.mjs
  */
 import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../..')
+/**
+ * ── ★★ 格 ⑩（O117）：oracle 必须能指向**被测的那棵树** ──────────────────────
+ *
+ * **原来的问题**：`REPO = 自身路径/../..` ⇒ **硬编码判据根** ⇒ 无论隔离工作树里有什么，
+ *   它只判判据根那一份 ⇒ **把靶文件搬进 wt 也没用**（oracle 看都不看）。
+ *   判据机器（`scripts/eval-task-applicability.mjs`）把这一条报成 `oracleBindsWt=false`。
+ *
+ * **现在的优先级**：`--repo` ＞ `DSH_EVAL_REPO` ＞ **自身相对路径**（= 判据根，**逐字回退，行为不变**）。
+ *   ⇒ 不给参数时与改动前**逐字相同**（判据、退出码、输出都不变）；给了才换靶。
+ * ★ 本文件把"用的是哪棵树"**打印出来**（含靶文件存不存在）—— 否则"oracle 到底判了谁"没法复核。
+ * ★ 靶文件不在指定树里 ⇒ **大声报错并非零退出**（不弱化：判不了就是不合格，不是通过）。
+ */
+const HERE_DIR = path.dirname(fileURLToPath(import.meta.url))
+function resolveRepoArgv() {
+  const a = process.argv.slice(2)
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] === '--repo') return { repo: a[i + 1] ?? null, src: '--repo' }
+    if (a[i].startsWith('--repo=')) return { repo: a[i].slice('--repo='.length), src: '--repo=' }
+  }
+  if (process.env.DSH_EVAL_REPO) return { repo: process.env.DSH_EVAL_REPO, src: 'DSH_EVAL_REPO（环境变量）' }
+  return { repo: path.resolve(HERE_DIR, '../..'), src: '自身相对路径（默认 = 判据根；与改动前逐字相同）' }
+}
+const _resolved = resolveRepoArgv()
+const REPO = path.resolve(_resolved.repo ?? '')
 const TARGET = path.join(REPO, 'scripts', 'verify-drain-after-swap.mjs')
+
+console.log(`cli-0004 oracle —— REPO = ${REPO.replace(/\\/g, '/')}`)
+console.log(`  来源：${_resolved.src}`)
+console.log(`  靶文件：${TARGET.replace(/\\/g, '/')}  存在=${fs.existsSync(TARGET)}`)
+if (!fs.existsSync(TARGET)) {
+  console.log('')
+  console.log(`cli-0004 oracle：**不合格** —— 指定树里没有靶文件（${TARGET}）⇒ 判不了（不弱化：判不了 ≠ 通过）`)
+  process.exit(1)
+}
 
 /** 判据全集（15 个）—— 从真代码核出来的，**不是**照抄草案 */
 const CRITERIA = ['R0a', 'R0b', 'R0c', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R8b', 'R9', 'R9b']

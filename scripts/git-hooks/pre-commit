@@ -1,0 +1,38 @@
+#!/bin/sh
+# dsh-brain · pre-commit —— ★ R0/R1 未批 ⇒ 拦住提交（O115；v2：门自己判层、自己挂票）
+#
+# 安装（一次性，仓库本地配置）：
+#     git config core.hooksPath scripts/git-hooks
+#   （或 `node scripts/gate-commit-check.mjs --install`）
+# 复核：`node scripts/gate-commit-check.mjs --status`
+#
+# ★★ 准确定性（按独立见证者裁决修正措辞）：这是**默认路径上的条件门**，
+#    **不是机器约束**。已知一步绕过路径：`git commit --no-verify`、
+#    `git -c core.hooksPath=<别处> commit`、直接改本文件、改本地 core.hooksPath。
+#    即客户端钩子的固有限制；本地侧无解 —— 见 `scripts/gate-commit-check.mjs` 文件头「诚实边界」。
+#
+# 判据与完整说明见 `scripts/gate-commit-check.mjs` 文件头；本文件只做两件事：
+#   ① 找到判据侧的检查器（本树 → 公共 .git 的父目录，两处依次找）；
+#   ② 把它的退出码原样传回去（非零 ⇒ git 中止这次提交）。
+# ★ 找不到检查器 ⇒ **放行**：隔离工作树（eval-wt-new 建的，scripts/ 被排除）里没有本脚本，
+#   而那里的 `git commit`（被测 agent 的正常动作）不该被堵死。这条是刻意设计，不是漏。
+set -u
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+common=$(git rev-parse --git-common-dir 2>/dev/null) || common=''
+common_root=$(dirname "$common" 2>/dev/null) || common_root=''
+
+check=''
+for cand in "$top/scripts/gate-commit-check.mjs" "${common_root:-.}/scripts/gate-commit-check.mjs"; do
+  if [ -n "$cand" ] && [ -f "$cand" ]; then
+    check="$cand"
+    break
+  fi
+done
+
+if [ -z "$check" ]; then
+  echo "[dsh-pre-commit] ⊘ 这棵树里没有判据侧的 gate-commit-check.mjs（隔离树）⇒ 放行" >&2
+  exit 0
+fi
+
+exec node "$check" --hook pre-commit --repo "$top"
