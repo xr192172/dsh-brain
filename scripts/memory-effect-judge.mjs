@@ -27,12 +27,26 @@
  *   node scripts/memory-effect-judge.mjs --face "<cmd>"
  *                                                    REAL·**面驱动**：真调 --face 那条记忆面做
  *                                                    reset/remember/count 排练 ⇒ **三条对照断言有真读数**
+ *   node scripts/memory-effect-judge.mjs --face "<cmd>" --face-readonly
+ *                                                    REAL·**面驱动·只读**（第 ⑧ 格新增）：**绝不**
+ *                                                    reset/remember，只对**已经存在的真实 store**
+ *                                                    读 count ⇒ 判据机器能读真 store 而**不改动它**。
+ *                                                    见下面「--face-readonly」一节。
  *
  * 其它参数：
  *   --readings <file>   用外部读数 JSON 取代内置假数据（schema 见 loadReadings）
  *   --face "<cmd>"      ★ 记忆面命令（默认 = node scripts/memory-stub.mjs）。
  *                       给了它 ⇒ REAL 模式由「骨架态」变「面驱动」（见下）。
  *                       ★ 不带 --face 时，本脚本行为与加它之前**逐字相同**。
+ *   --face-readonly     ★★ **只读开关**（必须与 --face 一起用）：本模式下**只调面的 count**，
+ *                       **不 reset、不 remember** ⇒ 可以安全指向**别人的真实 store**。
+ *                       · `--arm-a/--arm-b` 在本模式下可给**逗号分隔的多个 db 路径**
+ *                         （= 各检查点 k 的 store 快照）⇒ A2/A3 拿到**逐 k 的真 count**；
+ *                         给单一路径时，每个检查点读同一个库（值相同，A3 自然不递增 ⇒ 如实报）。
+ *                       · 本模式**额外产**一项完整性证据：读 count 前后对每个 db 目录做
+ *                         **逐文件 sha256**，报 `unchanged` ⇒ 「读数没有改动 store」可被机器复核。
+ *                       · ★ 判据口径（A1/A2/A3、四态、退出码）**一字未改**；本次只**加**了
+ *                         「读得到」的能力（第 ⑧ 格前置 A）。
  *   --arm-a/--arm-b <p> 两臂 db 路径（默认 out/memory-judge/arm-a.json / arm-b.json；
  *                       --selftest 时默认落到 out/memory-judge/selftest/ 下，避免误写真实臂的库；
  *                       --face 时默认落到 out/memory-judge/face/arm-a / arm-b ——★ 面驱动的
@@ -164,13 +178,18 @@ const USAGE = `${REPORT_NAME} —— 记忆效果判据机器骨架（不驱动�
   node scripts/memory-effect-judge.mjs --selftest
   node scripts/memory-effect-judge.mjs                       # REAL 模式（无真实读数 ⇒ 全部 NEEDS-EVIDENCE）
   node scripts/memory-effect-judge.mjs --face "<cmd>"        # REAL·面驱动（三条对照断言有真读数）
+  node scripts/memory-effect-judge.mjs --face "<cmd>" --face-readonly
+                                                             # REAL·面驱动·只读（读真实 store 的 count，不 reset）
 
 参数：
   --readings <file>   外部读数 JSON 取代内置假数据
   --face <cmd>        ★ 记忆面命令（默认 node scripts/memory-stub.mjs）；
                       给了它 ⇒ REAL 模式变「面驱动」，真调该面做 reset/remember/count
-  --arm-a <path>      臂 A（控制，空库）的 db 路径
-  --arm-b <path>      臂 B（处理，累积）的 db 路径
+  --face-readonly     ★ 只读开关（必须配 --face）：只调 count，不 reset / 不 remember；
+                      --arm-a/--arm-b 可给逗号分隔的多个 db（各 k 的 store 快照）⇒ 逐 k 真 count；
+                      报告里额外给「读数前后 store 逐文件 sha256 一致」的完整性证据
+  --arm-a <path>      臂 A（控制，空库）的 db 路径（--face-readonly 下可逗号分隔多个）
+  --arm-b <path>      臂 B（处理，累积）的 db 路径（同上）
   --out <path>        报告路径（默认 ${path.relative(ROOT, DEFAULT_REPORT)}）
   --break <name>      故意破坏注入数据（仅配 --selftest）：${Object.keys(BREAKS).join(' | ')}
 
@@ -356,6 +375,28 @@ function readCount(dbPath, k) {
     err: r.ok ? null : r.error,
     dbExists: fs.existsSync(dbPath),
   }
+}
+
+/** ★ 只读模式的完整性证据：递归列目录下每个文件的相对路径 + sha256（**只读，不写**）。 */
+function dirHashes(dir) {
+  const out = []
+  const walk = (d, rel) => {
+    if (!fs.existsSync(d)) return
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name)
+      const r = rel ? `${rel}/${e.name}` : e.name
+      if (e.isDirectory()) walk(p, r)
+      else if (e.isFile()) {
+        out.push({
+          rel: r,
+          bytes: fs.statSync(p).size,
+          sha256: crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),
+        })
+      }
+    }
+  }
+  walk(dir, '')
+  return out.sort((a, b) => a.rel.localeCompare(b.rel))
 }
 
 /**
@@ -830,10 +871,12 @@ function battery() {
 
 /**
  * 臂状态。
- *   selftest / face ：**建库**（reset + remember，都是真调面）
- *   real            ：只**只读** count（骨架期属实没有真实会话；记忆由将来的真实运行写入）
+ *   selftest / face    ：**建库**（reset + remember，都是真调面）
+ *   face-readonly      ：★★ **只读**：只调 count；读前后对每个 db 目录做逐文件 sha256 做完整性证据
+ *   real               ：只**只读** count（骨架期属实没有真实会话；记忆由将来的真实运行写入）
  */
-function collectArm(data, arm, dbPath, mode) {
+function collectArm(data, arm, dbPaths, mode) {
+  const dbPath = dbPaths[0]
   const role = data.arms?.[arm]?.role ?? arm
   const fi = data.arms?.[arm]?.faceInput ?? null
   const fRaw = fi ? faceOf(fi.system, fi.tools, { normalize: false }) : null
@@ -855,15 +898,56 @@ function collectArm(data, arm, dbPath, mode) {
       }
       counts.push(readCount(dbPath, t.k))
     }
-  } else {
-    const ks = Array.isArray(data.arms?.[arm]?.checkpointsK) ? data.arms[arm].checkpointsK : []
-    counts = ks.map((k) => readCount(dbPath, Number(k)))
+    return {
+      arm,
+      role,
+      db: dbPath,
+      dbList: [dbPath],
+      seeded,
+      seedErr,
+      faceInput: fi,
+      faceRaw: fRaw?.face ?? null,
+      faceNorm: fNorm?.face ?? null,
+      namesHash: fNorm?.namesHash ?? null,
+      toolCount: fRaw ? fRaw.count : null,
+      sysLen: fRaw ? fRaw.sysLen : null,
+      counts,
+      storeIntegrity: null,
+    }
   }
 
+  if (mode === 'face-readonly') {
+    // ★★ 只读：**绝不** reset / remember。只调 count。
+    const ks = Array.isArray(data.arms?.[arm]?.checkpointsK) ? data.arms[arm].checkpointsK : []
+    const integrity = dbPaths.map((p) => ({ db: p, before: dirHashes(p), after: null, unchanged: null }))
+    counts = ks.map((k, i) => readCount(dbPaths[Math.min(i, dbPaths.length - 1)], Number(k)))
+    for (const it of integrity) it.after = dirHashes(it.db)
+    for (const it of integrity) it.unchanged = JSON.stringify(it.before) === JSON.stringify(it.after)
+    return {
+      arm,
+      role,
+      db: dbPath,
+      dbList: dbPaths,
+      seeded: false,
+      seedErr: null,
+      faceInput: fi,
+      faceRaw: fRaw?.face ?? null,
+      faceNorm: fNorm?.face ?? null,
+      namesHash: fNorm?.namesHash ?? null,
+      toolCount: fRaw ? fRaw.count : null,
+      sysLen: fRaw ? fRaw.sysLen : null,
+      counts,
+      storeIntegrity: integrity,
+    }
+  }
+
+  const ks = Array.isArray(data.arms?.[arm]?.checkpointsK) ? data.arms[arm].checkpointsK : []
+  counts = ks.map((k) => readCount(dbPath, Number(k)))
   return {
     arm,
     role,
     db: dbPath,
+    dbList: [dbPath],
     seeded,
     seedErr,
     faceInput: fi,
@@ -873,6 +957,7 @@ function collectArm(data, arm, dbPath, mode) {
     toolCount: fRaw ? fRaw.count : null,
     sysLen: fRaw ? fRaw.sysLen : null,
     counts,
+    storeIntegrity: null,
   }
 }
 
@@ -920,7 +1005,13 @@ function planLines() {
   if (FACE_GIVEN) {
     L.push('')
     L.push(`★ 本次带了 --face：${FACE_DESC}`)
-    L.push('  ⇒ REAL 模式变【面驱动】：真调该面做 reset/remember/count 排练 ⇒ 三条对照断言有真读数；')
+    if (READONLY) {
+      L.push('  ⇒ REAL 模式变【面驱动·只读】：**只调 count**（不 reset / 不 remember）⇒ A1/A2/A3 有真读数，')
+      L.push('    且**目标 store 一字未动**（报告里给「读数前后逐文件 sha256 一致」的完整性证据）；')
+      L.push('    ★ 逐 k 的 count 来自 --arm-a / --arm-b 给的多个 db 路径（各 k 的 store 快照）。')
+    } else {
+      L.push('  ⇒ REAL 模式变【面驱动】：真调该面做 reset/remember/count 排练 ⇒ 三条对照断言有真读数；')
+    }
     L.push('    ★ 任务级读数（' + [...METRICS_SEQ, ...METRICS_ONE].join('/') + '）仍一律 NEEDS-EVIDENCE（要真实会话，本脚本不驱动）；')
     L.push('    ★ 面自身也会被实测一次（四条子命令各一发打在 probe 库上）⇒ A1 的输入不是注入常量。')
     L.push(`  ⇒ 面驱动默认落点（面 = 目录型 store，故意不带 .json）：`)
@@ -943,13 +1034,17 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
         : 'SELFTEST（注入假读数 + 真调 memory-stub）'
       : mode === 'face'
         ? `REAL·面驱动（真调面：${FACE_DESC}；任务级读数仍无）`
-        : 'REAL（骨架态，无真实会话）'
+        : mode === 'face-readonly'
+          ? `REAL·面驱动·只读（只调 count，不 reset/remember；面：${FACE_DESC}；任务级读数仍无）`
+          : 'REAL（骨架态，无真实会话）'
   const buildLabel =
     mode === 'selftest'
       ? `是（reset + remember，全部真调${FACE_GIVEN ? '面' : ' stub'}）`
       : mode === 'face'
         ? '是（reset + remember + 逐 k count，全部真调面）'
-        : '否（只读；真实臂的记忆由真实运行写入）'
+        : mode === 'face-readonly'
+          ? '★ 否 —— 只读模式：**只调 count**，一次 reset / remember 都没发（见下表完整性证据）'
+          : '否（只读；真实臂的记忆由真实运行写入）'
   L.push('='.repeat(100))
   L.push(`${REPORT_NAME} · 记忆效果判据机器骨架报告`)
   L.push(`生成时间 : ${now}`)
@@ -989,14 +1084,22 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
   L.push('[1] 两臂结构（§3.2：同器具、同一张脸，只让【记忆库内容】不同）')
   L.push('='.repeat(100))
   for (const a of [arms.A, arms.B]) {
-    const rel = path.relative(ROOT, a.db).replace(/\\/g, '/')
+    const list = a.dbList ?? [a.db]
     L.push(`  ── 臂 ${a.arm}（${a.role}）`)
     // ★ 不带 --face 时这一行与加 --face 之前逐字相同（'db 文件'）；面驱动时才改称「目录」。
-    L.push(
-      mode === 'face'
-        ? `     db 目录   : ${rel}${fs.existsSync(a.db) ? '' : '  （不存在）'}  ★ 面驱动：这是【数据目录】`
-        : `     db 文件   : ${rel}${fs.existsSync(a.db) ? '' : '  （不存在）'}`,
-    )
+    if (list.length === 1) {
+      const rel = path.relative(ROOT, list[0]).replace(/\\/g, '/')
+      L.push(
+        mode === 'face' || mode === 'face-readonly'
+          ? `     db 目录   : ${rel}${fs.existsSync(list[0]) ? '' : '  （不存在）'}  ★ 面驱动：这是【数据目录】`
+          : `     db 文件   : ${rel}${fs.existsSync(list[0]) ? '' : '  （不存在）'}`,
+      )
+    } else {
+      L.push(`     db 目录   : ★ ${list.length} 个（逐检查点 k 各一个 = store 快照）`)
+      for (let i = 0; i < list.length; i++) {
+        L.push(`       k=${i + 1}  ${path.relative(ROOT, list[i]).replace(/\\/g, '/')}${fs.existsSync(list[i]) ? '' : '  （不存在）'}`)
+      }
+    }
     L.push(`     建库动作   : ${buildLabel}${a.seedErr ? `  ⚠ ${a.seedErr}` : ''}`)
     if (a.faceInput) {
       L.push(`     face raw  : ${a.faceRaw}   （逐字同构 face-audit，可与日志比对）`)
@@ -1009,6 +1112,16 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
       L.push(`     ${CNT_LABEL}: (无检查点) ⇒ NEEDS-EVIDENCE`)
     } else {
       L.push(`     ${CNT_LABEL}: ` + a.counts.map((c) => `k=${c.k}:${c.count === null ? `读失败(${c.err})` : c.count}`).join('  '))
+    }
+    // ★★ 只读模式的完整性证据（第 ⑧ 格前置 A 的判据）：读数前后 store 逐文件 sha256 一致
+    if (a.storeIntegrity) {
+      for (const it of a.storeIntegrity) {
+        const files = it.after.map((f) => `${f.rel}:${f.sha256.slice(0, 12)}(${f.bytes}B)`).join(' , ') || '(空目录)'
+        L.push(
+          `     完整性     : ${path.relative(ROOT, it.db).replace(/\\/g, '/')}  读前=读后(逐文件 sha256) ⇒ ${it.unchanged ? '★ 一致（本次读数没有改动 store）' : '**不一致 ⇒ 读数有副作用！**'}`,
+        )
+        L.push(`                  ${files}`)
+      }
     }
   }
   if (probe) {
@@ -1112,9 +1225,16 @@ function renderReport({ mode, data, arms, batch, control, cells, batteryResult, 
     L.push('    在**没有真实会话**之前，它**不可能**因为「两臂脸不同」变红（要变红需 per-arm 的面或会话快照）。')
     L.push(`  · ★ A2 / A3 的 count 真读数来自面「${FACE_DESC}」，其值随该面背后的存储而定：`)
     L.push('    不同实现（stub 的 JSON 文件 / Go 侧知识库目录）**值可以不同**，这不是分歧，是各自的存储。')
-    L.push('  · ★ 臂 B 的「累积排练」文本取自本脚本的 taskList()（任务 id/标题），**不是**被测 agent 真写进去的记忆；')
-    L.push('    它只用于说明「这条面的写入口会让条目数增长」这件事本身。')
-    L.push(`  · 本轮真调了面的 count / remember / reset${probe ? ' / recall（面实测那一次）' : ''}。`)
+    if (mode === 'face-readonly') {
+      L.push('  · ★★ 只读模式：对**两臂的 db** 只调了 count —— **一次 reset / remember 都没发**（见 [1] 完整性证据）。')
+      L.push('    probe（面实测）仍会跑，但它只打在 scratch 库上（out/memory-judge/face/probe），**不碰两臂的库**。')
+      L.push('  · ★ 只读模式下逐 k 的 count 来自调用方给的**多个 db 路径**（各 k 的 store 快照）；')
+      L.push('    若只给一个路径，则每个检查点读同一个库（A3 不会递增，如实报）—— 这**不是**判据的判语。')
+    } else {
+      L.push('  · ★ 臂 B 的「累积排练」文本取自本脚本的 taskList()（任务 id/标题），**不是**被测 agent 真写进去的记忆；')
+      L.push('    它只用于说明「这条面的写入口会让条目数增长」这件事本身。')
+      L.push(`  · 本轮真调了面的 count / remember / reset${probe ? ' / recall（面实测那一次）' : ''}。`)
+    }
   } else {
     L.push('  · 本骨架不驱动真实会话、不调 memory-stub 的 recall（只用了 count/remember/reset）。')
     L.push('  · 上面这些读数在没有真实会话之前都只是**格子的形状**，不是证据。')
@@ -1157,9 +1277,15 @@ if (FACE !== null) {
   FACE_DESC = FACE
 }
 
-const MODE = PLAN ? 'plan' : SELFTEST ? 'selftest' : FACE_GIVEN ? 'face' : 'real'
+// ── ★★ 第 ⑧ 格新增：`--face-readonly` —— 只调 count，**不 reset / 不 remember**。
+//    它解决的真问题：判据机器原先读不到「外部真实 store」的 count —— 带 --face 会 reset（毁库）、
+//    不带 --face 就用桩。加上本开关后，判据机器可以安全地读真 store，且**证明自己没改动它**。
+const READONLY = flags.has('face-readonly')
+if (READONLY && !FACE_GIVEN) usage('--face-readonly 必须与 --face 一起用（它改的是「怎么调这条面」）')
+
+const MODE = PLAN ? 'plan' : SELFTEST ? 'selftest' : FACE_GIVEN ? (READONLY ? 'face-readonly' : 'face') : 'real'
 /** count 读数的来源标签（只影响叙述；不带 --face 时逐字同以前）。 */
-const CNT_LABEL = FACE_GIVEN ? '面 count' : 'stub count'
+const CNT_LABEL = FACE_GIVEN ? (READONLY ? '面 count（只读）' : '面 count') : 'stub count'
 
 // ── --plan：真正的空操作 ⇒ 直接返回
 if (MODE === 'plan') {
@@ -1167,30 +1293,40 @@ if (MODE === 'plan') {
   process.exit(0)
 }
 
-// ── ★ 面实测（只在面驱动/RLEAL+--face 时做）：量出「这条面暴露了什么」⇒ A1 的输入。
-//    ⚠ 它真调面（打在 FACE_PROBE_DB 上），**不碰两臂的库**。
-const probe = MODE === 'face' ? probeFace() : null
+// ── ★ 面实测（只在面驱动 / 面驱动·只读时做）：量出「这条面暴露了什么」⇒ A1 的输入。
+//    ⚠ 它真调面（打在 FACE_PROBE_DB 上），**不碰两臂的库** —— 只读模式下两臂的库一字未动。
+const probe = (MODE === 'face' || MODE === 'face-readonly') ? probeFace() : null
 
 // ── 数据
 let data
 if (opts.readings) data = loadReadings(opts.readings)
 else if (SELFTEST) data = selftestData()
-else if (MODE === 'face') data = faceData(probe)
+else if (MODE === 'face' || MODE === 'face-readonly') data = faceData(probe)
 else data = realData()
+if (MODE === 'face-readonly') {
+  data.source =
+    `面驱动·只读（${FACE_DESC}）：只调 count 读**已存在的真实 store**（不 reset / 不 remember）⇒ A2/A3 有真读数；` +
+    `逐 k 的 count 来自 --arm-a/--arm-b 给的多个 db（各 k 的 store 快照）；任务级读数仍无（无真实会话）`
+}
 const dataNote = data.source
 if (BREAK) data = applyBreak(data, BREAK)
 
-const resolveDb = (arm) => {
+const resolveDbs = (arm) => {
   const cliKey = arm === 'A' ? 'arm-a' : 'arm-b'
-  if (opts[cliKey]) return path.resolve(ROOT, opts[cliKey])
+  if (opts[cliKey]) {
+    // ★ 只读模式：允许逗号分隔的多个 db（各检查点 k 的 store 快照）。
+    const raw = String(opts[cliKey])
+    const parts = READONLY ? raw.split(',').map((s) => s.trim()).filter(Boolean) : [raw]
+    return parts.map((p) => path.resolve(ROOT, p))
+  }
   const fromData = data.arms?.[arm]?.db
-  if (fromData) return path.resolve(ROOT, fromData)
-  if (SELFTEST) return FACE_GIVEN ? SELFTEST_FACE_ARM_DB[arm] : SELFTEST_ARM_DB[arm]
-  if (MODE === 'face') return FACE_ARM_DB[arm] // ★ 面驱动默认落点（面 = 目录型 store）
-  return DEFAULT_ARM_DB[arm]
+  if (fromData) return [path.resolve(ROOT, fromData)]
+  if (SELFTEST) return [FACE_GIVEN ? SELFTEST_FACE_ARM_DB[arm] : SELFTEST_ARM_DB[arm]]
+  if (MODE === 'face' || MODE === 'face-readonly') return [FACE_ARM_DB[arm]] // ★ 面驱动默认落点
+  return [DEFAULT_ARM_DB[arm]]
 }
-const dbA = resolveDb('A')
-const dbB = resolveDb('B')
+const dbA = resolveDbs('A')
+const dbB = resolveDbs('B')
 
 // ── 采集
 const arms = { A: collectArm(data, 'A', dbA, MODE), B: collectArm(data, 'B', dbB, MODE) }
@@ -1205,7 +1341,7 @@ const batch = assessBatch(
   },
   CNT_LABEL,
   // ★ 面驱动下两臂的脸里不含端口（面命令逐字行 + 实测契约点）⇒ 不印那句端口注释。
-  MODE === 'face' ? '；本条比的是面命令逐字行 + 面实测暴露的契约点，与端口无关' : undefined,
+  MODE === 'face' || MODE === 'face-readonly' ? '；本条比的是面命令逐字行 + 面实测暴露的契约点，与端口无关' : undefined,
 )
 const control = assessPositiveControl(data)
 
