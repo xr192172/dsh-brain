@@ -3162,3 +3162,45 @@ win32 后端 = **`@deepseek-ai/dsh-sandbox-windows-acl`**（**包确实存在**�
 | **O100** | ★★ **`runVerifyGate` 的 spawn bug**：传 `.mjs` 裸路径时会**当可执行文件 spawn** ⇒ 同步抛错 ⇒ **stage 卡 5 分钟、不记录、不回滚、不退役**（**失败路径本身不 fail-safe**） | 换代的健壮性 |
 | **O101** | ★ **用 `/admin/retire` 正式退役 `gen-3131`**（及更早的 `gen-3082`）；**禁止 `kill`**（P2） | 消除"旧代码仍在监听"的风险 |
 | **O102** | **`verify` 闸的白名单语义**（`verifyAllowList` 指向 `…\Temp\verifyout`）应被文档化 —— 否则**第一次换代必然被拒**（我们刚好撞上） | 换代的可用性 |
+
+---
+
+## 55. ★★★★ 回答"为什么换代还留着旧的" —— **代码证实：确实自动退役，但 `retire` 在 `verify` 之后，而那次协程死在了 `verify`**
+
+### 55.1 三条（逐字代码）
+
+| # | 事实 | 出处在哪 |
+|---|---|---|
+| 1 | ★ **退役确实【自动】** | `coordinator.ts:4` 状态机逐字：**`idle→spawn→ready→freeze→promote→flip→verify→retire`**；`:7` 逐字：**"退役由控制面触发（非 agent 强杀）"** |
+| 2 | ★★ **但只退役【紧邻那一代】** | `coordinator.ts:551` `this.record('retire ' + old.inst.gen)`（**单数 `old`**）；★ 而且有"确认停写"那条：`:530` `retire(seal) ' + old.inst.gen + ' — 强杀旧代（未确认停写）pid='`<br>⇒ ★ **用户说的"内部有一个确认的流水线"确实存在** ✓<br>实测：`state.jsonl` 尾部只有 **`retire gen-3133`**（= 第 3 次的紧邻上一代） |
+| 3 | ★★★ **`retire` 在 `verify`【之后】** | 状态机顺序即此 ⇒ **第 2 次换代死在 `verify` 阶段**（`runVerifyGate` 的 spawn bug，**O100**）⇒ **协程永远走不到 `retire`** ⇒ **`gen-3131` 成孤儿** |
+
+⇒ ★★ **⇒ 根因收敛到 O100**：**"失败路径本身不 fail-safe"** 会**生产孤儿代**（这条比"卡 5 分钟"更重要）。
+
+### 55.2 我试了正式原语 —— **但打错了端口**（如实记）
+
+- `index.ts:508-511` 逐字：`retire: async () => { state.mode = 'demoted'; clearInterval(warmTimer) }`
+  ⇒ ★ **`/admin/retire` 的语义是"把【自己】标成 demoted + 停心跳"** ⇒ **要对 `gen-3131` 退役，就该打【它自己的 admin】** ✓
+- 我打 `POST :3131/admin/retire` ⇒ **`HTTP=405`**；`:3131/admin/health` ⇒ **`HTTP=404`**（活跃代 `:3134` 的 `/admin/health` 也是空）
+  ⇒ ★★ **`coordinator.ts:298` 逐字：`const adminPort = cfg.adminBase + slot`**
+  ⇒ **每代有【独立的 admin 端口**（`adminBase + slot`）**，不在服务端口上** ⇒ **我打错端口了**。
+- ✅ **未误伤活跃代**：`:3134` = 200；`lease.json` 仍 `activeGen = gen-3134 / pid 12492`。
+
+### 55.3 ⚠️ ⇒ 诚实结论：**我没有现成手段退役它**，且它属 P2 禁区
+
+- 定位 `gen-3131` 的 admin 端口需要 **`adminBase + slot`**（`adminBase` 来自 profile 配置，grep 未直接命中，需再查一步）；
+- ★★ **而"杀宿主 PID"在 `index.ts:311-316` 的 P2 里明确列为【禁止 agent 就地操作】** ⇒ **应由用户（或控制面）处理**。
+
+### 55.4 ★ 风险有限（**不是紧急**）
+
+- `lease.json` → **`gen-3134`** ⇒ **`gen-3131` 不在前门链路** ⇒ ★ **用户的 `:3080` 打到的是新代**（沙箱 seam 已生效）✓
+- ★ 只有"**直连 `:3131` 的客户端**"会打到**旧代码**（无沙箱 seam 那一版）。
+- ★ 另记一条观察：`netstat` 显示 **pid 12492（活跃代 `gen-3134`）同时听 `:3101`** = **key-pool-proxy**（AGNES 的本地反代）⇒ **代理与代同进程树**（**O103**，只记不动）。
+
+### 55.5 新增/更新未闭合
+
+| # | 项 | 说明 |
+|---|---|---|
+| **O101**（更新） | **退役 `gen-3131` 的正路**：需 **`adminBase + slot`** 定位它的 admin 端口，再 `POST /admin/retire`；**或由用户/控制面处理**（属 P2 禁区，agent 不做） | 消除"旧代码仍在监听" |
+| **O103** | **`key-pool-proxy` 与活跃代同进程树**（pid 12492 同时听 `:3101` 与 `:3134`）⇒ 换代时它怎么被处理？ | 换代的影响面 |
+| **O104** | ★★ **O100 的后果升级**：**"失败路径不 fail-safe"会生产【孤儿代】**（不只是"卡 5 分钟"）⇒ 修它才能防孤儿 | 换代健壮性 |
