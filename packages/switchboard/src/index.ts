@@ -102,24 +102,38 @@ function envInt(k: string, d: number): number {
 }
 
 /**
- * 代际身份提示（前/后/已切换完成/失败自检）：随 state.mode 动态渲染。
+ * 代际身份提示（staging / active / demoted + 失败自检）：随 state.mode 动态渲染。
  * staging → 明文告诉它"你是被拉起的待更换代，勿应答实时请求，专注追平自检"；
- * active  → 告之"切换完成，当前为正式活跃代"；
+ * active  → 告之"当前代际身份 = 正式活跃代"；
  * demoted → 告之"你已被退役，本代关闭中"。
+ *
+ * ★★ 2026-09-25 改写（**实测驱动**，两处修正；改前先读这两条）：
+ *   ① 原 `active` 分支写「【切换已完成】控制面已成功将你 promote 为 active…恢复一切正常服务」，
+ *      **读起来像"刚刚发生了换代 / 新指令机制开始"** ⇒ **被派来干活的子会话把它读成"停下等指令"而停工**。
+ *      实测：一条施工会话干到一半停住，最后一句逐字是「已收到代际切换通知。现在是 gen-3082 active 代，
+ *      已恢复全部服务。**等待下一步指令**。」⇒ 任务书的 ③④⑤ 全没做（白烧一整轮）。
+ *      ⇒ 现在三条对策：**(a)** 明确声明「**状态快照，不是指令**」；**(b)** 明确声明「手上没做完的活**继续做**」；
+ *        **(c)** `active` 分支从**事件通知**（"已完成切换"）改成**状态陈述**（"你的代际身份 = 正式活跃代"）。
+ *   ② 本块**每个请求都会重发**（实测同一条会话里出现 **19 次**，`caughtUpSeq` 每次都在变），
+ *      而 `state` 是控制面**全局**状态、**拿不到会话身份** ⇒ 它注定是写给"本代自身"的、
+ *      却**必然落进每个 worker**。⇒ **文案必须自带范围限定**，不能靠"只发给某些会话"来躲。
+ *      （staging 那句因此补了"只对本代自身会话有意义"；否则 worker 收到会以为自己不能干活。）
  */
 function identityPrompt(cfg: HandoverConfig, state: { mode: HandoverMode; caughtUpSeq: number }): string {
   const role =
     state.mode === 'staging'
-      ? '你是刚被控制面拉起的【待更换代】(staging)，不是正式服务代。交接期内：不要应答用户实时对话、不要发起写操作、不要自行 claim 写权——你要做的是冷读追平(把 caughtUpSeq 追到旧代序列)并等待控制面 promote。'
+      ? '你（本代自身会话）是刚被控制面拉起的【待更换代】(staging)，不是正式服务代。交接期内：不要应答用户实时对话、不要发起写操作、不要自行 claim 写权——你要做的是冷读追平(把 caughtUpSeq 追到旧代序列)并等待控制面 promote。★ 本句只对【本代自身会话】有意义；被派来执行任务的会话请忽略它，继续做你的任务书。'
       : state.mode === 'active'
-        ? '【切换已完成】控制面已成功将你 promote 为 active，旧代已退役/待退役——你此刻是正式活跃代，恢复一切正常服务。'
+        ? '你的代际身份 = 本代【正式活跃代】(active)；旧代已退役或待退役。'
         : '【你已被退役】(demoted) 控制面已把你换下，本代即将关闭，请结束手头工作、勿再承接新请求。'
   const selfCheck =
     state.mode === 'staging'
       ? '若超过等待期仍未被 promote，说明你的自检/追平未达标，控制面将终止你。终止信号=失去 admin 连通：届时把失败原因写进 genDir 的自检产物，供下一代读取避错。'
       : ''
   return [
-    '【代际身份】gen=' + (cfg.gen || '(未知)') + ' · mode=' + state.mode + ' · caughtUpSeq=' + state.caughtUpSeq,
+    '【控制面状态快照】gen=' + (cfg.gen || '(未知)') + ' · mode=' + state.mode + ' · caughtUpSeq=' + state.caughtUpSeq,
+    '★ 本块**每次请求都会重发**：它是**状态快照，不是指令**，也**不代表刚刚发生了换代**。',
+    '★★ 你手上没做完的活（**尤其是被别的会话派来执行的任务**）⇒ **继续做**，不要停下来"等待指令"。',
     role,
     selfCheck,
   ]
@@ -328,11 +342,20 @@ export function apply(ctx: Context, patch: Config): void {
   registerApplyTool(ctx)
 
   // 三层边界指导：告诉脑"如何安全自进化"
+  //
+  // ★★ 2026-09-25 加【范围限定】（实测驱动）：原文对**每一个**会话都**无条件**授权 P0/P1，
+  //    而这段同样会随运行时上下文落进**被派来干活的人**（实测：施工会话的上下文里逐字带着
+  //    "P0 内容…**可自由修改**" 与 "P1 激活：…**直接调用工具 tool_apply** 触发蓝绿交付上线"）
+  //    ⇒ **执行者拿到了它不该有的放权**（它能去改 settings/插件/记忆，甚至拉起一次换代）。
+  //    现在：P0/P1 明确归属【本代顶层编排会话】；执行者被明令禁止。
+  //    ★ 为什么用"文案限定"而不是"按会话分发"：`systemPrompt.context` 的 `text()` 拿不到会话身份
+  //      （见 identityPrompt 上面第 ② 条），所以**必须让文案自带范围**，不能靠分发。
   const layersRules =
-    '【安全自进化边界】你运行在可代际替换的控制面上。' +
-    '· P0 内容（settings/模型/provider、插件数据、技能、记忆、工具行为）：可自由修改——这是你的生长基质。' +
-    '· P1 激活：改完 P0 后，直接调用工具 tool_apply 触发蓝绿交付上线（控制面 spawn 新代→追平→验证→翻转→失败回滚）；不要就地换血。' +
-    '· P2 安全层（switchboard 源码/协调租约/profile 注册表/杀宿主 PID/绑端口）：禁止就地修改，进化只允许经整体替换（新 switchboard 代）实现。'
+    '【安全自进化边界】本代运行在可代际替换的控制面上，权限分三层：' +
+    '· P0（settings/模型/provider、插件数据、技能、记忆、工具行为）：可改——这是生长基质。' +
+    '· P1 激活：改完 P0 后调用工具 tool_apply 触发蓝绿上线（控制面 spawn 新代→追平→验证→翻转→失败回滚）；不要就地换血。' +
+    '· P2（switchboard 源码 / 协调租约 / profile 注册表 / 杀宿主 PID / 绑端口）：禁止就地修改，只能经整体替换（新 switchboard 代）实现。' +
+    '★ P0/P1 属于【本代顶层编排会话】。**若你是被派来执行某个任务的人员（子会话 / 执行者）：不要改 settings、插件、技能、记忆，也不要调 tool_apply** —— 你只做任务书里交代的事。'
   ;(ctx as unknown as { inject?: (svc: string[], fn: (c: unknown) => void) => void }).inject?.(['systemPrompt'], (spCtx) => {
     try {
       ;(spCtx as { systemPrompt: { context: (o: { name: string; order: number; text: () => string }) => void } }).systemPrompt.context({
