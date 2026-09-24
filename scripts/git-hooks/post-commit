@@ -1,0 +1,24 @@
+#!/bin/sh
+# dsh gate-layer · post-commit —— ★★ 本层的**关键点**。
+#
+#   `git commit --no-verify` 的语义就是"跳过 pre-commit 与 commit-msg"，
+#   **post-commit 不在其中** ⇒ 这里是绕法①（--no-verify）的必经之处：
+#   引擎先把这次提交记 `kind=seen`；若是 R0/R1 且台账里没有覆盖它的**封条 approve** ⇒
+#   **记账 kind=bypass + 大字告警 + 挂一张 pending 票**（后续 R0/R1 提交继续被拦）。
+#
+# ★ 退出码（不夸大）：本钩子跑的时候**提交已经创建**，git **不使用**它的退出码 ⇒
+#   "绝不静默"靠的是上面的输出 + 记账，**不是**退出码。仍原样传出 3 是为了让 CI/包装脚本想看就能看到。
+#
+# 安装：node scripts/gate/cli.mjs install
+set -u
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+engine="$top/scripts/gate/cli.mjs"
+
+if [ ! -f "$engine" ]; then
+  echo "[dsh-gate] ⊘ post-commit：引擎不在（$engine）⇒ 无法记账（★ 这次绕过的痕迹缺失）。" >&2
+  exit 3
+fi
+
+node "$engine" hook post-commit --repo "$top"
+exit $?

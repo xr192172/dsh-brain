@@ -1,0 +1,8 @@
+#!/bin/sh
+# dsh gate-layer · post-merge —— 额外的"对账机会"（合并会带进来别人/别的分支造的提交）。
+set -u
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+engine="$top/scripts/gate/cli.mjs"
+[ -f "$engine" ] || exit 0
+node "$engine" hook post-merge --repo "$top"
+exit 0

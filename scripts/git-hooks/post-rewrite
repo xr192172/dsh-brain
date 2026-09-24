@@ -1,0 +1,10 @@
+#!/bin/sh
+# dsh gate-layer · post-rewrite —— 额外的"对账机会"（rebase / amend 会**改写**历史）。
+#   ★ 改写后 sha 变了，"门看见过的提交"会与新历史脱节 ⇒ 必然报"未记账"。这是刻意选的偏严，
+#     不是漏 —— 对账只说"这台提交门没见过"，由外部用 ack-commit 显式确认。
+set -u
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+engine="$top/scripts/gate/cli.mjs"
+[ -f "$engine" ] || exit 0
+node "$engine" hook post-rewrite --repo "$top"
+exit 0

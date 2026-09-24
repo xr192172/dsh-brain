@@ -1,0 +1,9 @@
+#!/bin/sh
+# dsh gate-layer · post-checkout —— 额外的"对账机会"：有人在切分支/切换提交，就顺手对一次账。
+#   ⇒ 补掉 hooksPath 那段绕过，不会等到"下一次提交"才报警。
+set -u
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+engine="$top/scripts/gate/cli.mjs"
+[ -f "$engine" ] || exit 0
+node "$engine" hook post-checkout --repo "$top"
+exit 0

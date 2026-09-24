@@ -1,24 +1,29 @@
 #!/bin/sh
-# dsh-brain · pre-commit —— ★ R0/R1 未批 ⇒ 拦住提交（O115；v2：门自己判层、自己挂票）
+# dsh-brain · pre-commit —— 提交前的条件门（O115 → O110 **叠加**，★ 不是替换）
 #
-# 安装（一次性，仓库本地配置）：
-#     git config core.hooksPath scripts/git-hooks
-#   （或 `node scripts/gate-commit-check.mjs --install`）
-# 复核：`node scripts/gate-commit-check.mjs --status`
+# ★★ 本文件为什么是"叠加"：主仓原本就有一段 pre-commit（找 `scripts/gate-commit-check.mjs`
+#    并把退出码原样传回）。按任务要求**保留主仓原有语义** ⇒ 那段**原样保留为兜底**，
+#    新门层（`scripts/gate/cli.mjs`）优先。
+#      · 为什么优先新层：新层把原来散落的"判层 → 挂票 → gate → 拦截"约定收进**单一入口 + 统一审计模型**，
+#        并补上 post-commit 兜底、对账与封条链（见 scripts/gate/README.md）。
+#      · 为什么留兜底：`scripts/gate-commit-check.mjs` 是主仓既有判据装置，直接删它会改变主仓原语义。
+#      · ★ 残差（如实）：删掉 `scripts/gate/cli.mjs` 会**回落到旧检查器**（仍拦 R1）；
+#        若两样都没有，则按主仓原语义 ⊘ 放行 —— 这一格**没有**堵（B2 的隔离树版本在此处 fail-closed）。
 #
-# ★★ 准确定性（按独立见证者裁决修正措辞）：这是**默认路径上的条件门**，
-#    **不是机器约束**。已知一步绕过路径：`git commit --no-verify`、
-#    `git -c core.hooksPath=<别处> commit`、直接改本文件、改本地 core.hooksPath。
-#    即客户端钩子的固有限制；本地侧无解 —— 见 `scripts/gate-commit-check.mjs` 文件头「诚实边界」。
-#
-# 判据与完整说明见 `scripts/gate-commit-check.mjs` 文件头；本文件只做两件事：
-#   ① 找到判据侧的检查器（本树 → 公共 .git 的父目录，两处依次找）；
-#   ② 把它的退出码原样传回去（非零 ⇒ git 中止这次提交）。
-# ★ 找不到检查器 ⇒ **放行**：隔离工作树（eval-wt-new 建的，scripts/ 被排除）里没有本脚本，
-#   而那里的 `git commit`（被测 agent 的正常动作）不该被堵死。这条是刻意设计，不是漏。
+# ★ 准确定性（沿用 O115 的措辞）：这是**默认路径上的条件门**，不是机器约束。已知一步绕过：
+#   `git commit --no-verify`、`git -c core.hooksPath=<别处> commit`、直接改本文件。
+#   新层的处置：**要么拦、要么必然被记账/被对账追上**（三条绕法见 scripts/gate/README.md §2）。
 set -u
 
 top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+# ── ① 新门层：唯一策略入口 scripts/gate/core/policy.mjs（本文件只做"找到引擎 + 传退出码"）
+engine="$top/scripts/gate/cli.mjs"
+if [ -f "$engine" ]; then
+  exec node "$engine" hook pre-commit --repo "$top"
+fi
+
+# ── ② 兜底：主仓原有逻辑（本树 → 公共 .git 的父目录，两处依次找）
 common=$(git rev-parse --git-common-dir 2>/dev/null) || common=''
 common_root=$(dirname "$common" 2>/dev/null) || common_root=''
 
@@ -31,7 +36,7 @@ for cand in "$top/scripts/gate-commit-check.mjs" "${common_root:-.}/scripts/gate
 done
 
 if [ -z "$check" ]; then
-  echo "[dsh-pre-commit] ⊘ 这棵树里没有判据侧的 gate-commit-check.mjs（隔离树）⇒ 放行" >&2
+  echo "[dsh-pre-commit] ⊘ 本树既无门层引擎、也无判据侧 gate-commit-check.mjs（隔离树形态）⇒ 放行" >&2
   exit 0
 fi
 
