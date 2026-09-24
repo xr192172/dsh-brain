@@ -42,6 +42,11 @@
     ⇒ 长文本一律写**消息文件**再 `-F`；`git add -A` 后**扫一眼到底加了哪些文件**；
     **提交后 `git status` 干净 ≠ 没提交垃圾**；删乱名文件要用 `readdir` 拿到的真名（含私有区字符 U+F02A）。
 18. **★ 真日期看 `date`，不看注入的 `<current_time>`**（实测滞后一天以上）⇒ 写日更前先 `date`。
+19. **★ dev 模式（沙箱放开）怎么开**：启动控制面时带 **`DSH_SWITCHBOARD_DEV=1`**
+    （`relaunch-switchboard.mjs` 会透传 env）⇒ 它派生的**每一代**都是"沙箱全开 + 审批 never"。
+    机制：控制面把 `DSH_PERMISSION_MODE=danger-full-access` 写进子代 env
+    —— **那是上游 `dsh-base/cordis.patch.yml:175/191` 已预留的钩子**，我们只负责传。
+    ★ 副作用：**全开**（能写 `~/.dsh`/别的臂）；"只禁互读互写"**仍未实现**（那要独立于档位的一层策略）。
 
 ## 铁律（违反会立刻坏事）
 
