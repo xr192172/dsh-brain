@@ -51,6 +51,8 @@ import { noSnapshot, type SnapshotProvider } from './snapshot.js'
 import { registerHostGuard } from './guard.js'
 import { registerApplyTool } from './deploy.js'
 import { BRAINS } from './brains.js'
+import { collectInventory, type CommandsLike, type LoaderLike, type ToolsLike } from './inventory.js'
+import { BUILD_STAMP } from './build-stamp.js'
 import type { FreezeReply, HealthReply, HandoverConfig, HandoverMode, PrepareReply, ProbeReply, PromoteRequest } from './protocol.js'
 
 export const name = 'switchboard'
@@ -293,6 +295,23 @@ export function apply(ctx: Context, patch: Config): void {
     sessionsRef.current = (sCtx as { sessions?: SessionsShim }).sessions
   })
 
+  // ── 活实例清点的三个运行时权威引用（预演体检用；全部运行时可选，缺装配不崩） ──
+  // 与 agents/sessions 同款：经 `ctx.inject([...])` 拿，**不**直接读 `ctx.loader` 等
+  //（未声明服务依赖时直接读会抛）。拿不到 ⇒ 清点器在 `unavailable` 里显式标注
+  // "观测不到"，而不是返回空数组冒充"没有"（那是假绿，见 inventory.ts 的说明）。
+  const loaderRef: { current: LoaderLike | undefined } = { current: undefined }
+  ;(ctx as unknown as { inject?: (svc: string[], fn: (c: unknown) => void) => void }).inject?.(['loader'], (lCtx) => {
+    loaderRef.current = (lCtx as { loader?: LoaderLike }).loader
+  })
+  const toolsRef: { current: ToolsLike | undefined } = { current: undefined }
+  ;(ctx as unknown as { inject?: (svc: string[], fn: (c: unknown) => void) => void }).inject?.(['tools'], (tCtx) => {
+    toolsRef.current = (tCtx as { tools?: ToolsLike }).tools
+  })
+  const commandsRef: { current: CommandsLike | undefined } = { current: undefined }
+  ;(ctx as unknown as { inject?: (svc: string[], fn: (c: unknown) => void) => void }).inject?.(['commands'], (cCtx) => {
+    commandsRef.current = (cCtx as { commands?: CommandsLike }).commands
+  })
+
   // 进度读数：**本进程 live 会话已落盘到哪**（不是"暖机到共享投影"）
   // ★ 2026-09-20 换掉旧实现：它依赖 `sessionPersistence.listSessions()`（上游**没有**这个方法）
   //   ⇒ 恒返回 0，171 条 freeze 里的 lastSeq 全是 0，门槛从未量过任何东西（假绿）。
@@ -451,6 +470,23 @@ export function apply(ctx: Context, patch: Config): void {
       return { ok: true }
     },
     probe: async (): Promise<ProbeReply> => ({ ok: true, gen: cfg.gen }),
+    /**
+     * 活实例清点（预演体检的实测读数）。
+     *
+     * ★ 语义边界：它是**只读**的——只从运行时注册表读，不改任何状态、不注册任何东西、
+     *   不发起任何 LLM 请求。因此可以在**任何**一代上安全调用（含现役代）：这一点很重要，
+     *   因为预演体检对"预演代"和"现役代"用**同一个**清点器 ⇒ 两边读数的差异就是装配的差异，
+     *   而不是两套测量方法之间的差异。
+     */
+    inventory: async () =>
+      collectInventory({
+        gen: cfg.gen,
+        mode: state.mode,
+        loader: loaderRef.current,
+        tools: toolsRef.current,
+        commands: commandsRef.current,
+        build: BUILD_STAMP,
+      }),
     /**
      * 延迟切换：控制面在本代真正被换之前，先请其收尾当前回合。
      * 给 live 会话代理注入"即将热重载，请收尾"提示，然后等下一个 turn/end（或 grace 兜底）。

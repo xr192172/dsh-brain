@@ -5,6 +5,7 @@
  */
 import { request as httpRequest } from 'node:http'
 import type { FreezeReply, HealthReply, PrepareReply, ProbeReply } from './handover-protocol.js'
+import type { LiveInventory } from './preflight-contract.js'
 
 function json(url: string, method: string, body?: unknown): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -51,6 +52,17 @@ export class AdminClient {
 
   async probe(timeoutMs = 3000): Promise<ProbeReply> {
     return (await this.withTimeout(json(this.base + '/admin/probe', 'GET'), timeoutMs)) as ProbeReply
+  }
+
+  /**
+   * 活实例清点（`/admin/inventory`）。预演体检用它读"这一代实际装上了什么"。
+   *
+   * 它是**只读**调用，但**不**吞异常：调用方（preflight 引擎）需要在"清点不到"时
+   * 判 `reject` 而不是 `pass`（观测不到 ≠ 没问题）。所以这里不做 `catch → null` 的降级
+   * （`health()` 那种降级只适合"探活"语义）。
+   */
+  async inventory(timeoutMs = 8000): Promise<LiveInventory> {
+    return (await this.withTimeout(json(this.base + '/admin/inventory', 'GET'), timeoutMs)) as LiveInventory
   }
 
   /** 延迟切换：请活跃代收尾当前回合（等其 turn/end 或 grace 兜底）。 */

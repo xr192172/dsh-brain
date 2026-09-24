@@ -29,6 +29,8 @@ import { FrontDoor } from './proxy.js'
 import { Coordinator, allocGenPort, type CoordinatorConfig } from './coordinator.js'
 import { AdminClient } from './adminclient.js'
 import { spawnGen } from './spawner.js'
+import { PreflightRunner, type PreflightConfig, type PreflightState } from './preflight.js'
+import type { PreflightManifest } from './preflight-contract.js'
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
 function envStr(k: string, d: string): string {
@@ -84,6 +86,45 @@ function boot(config: CoordinatorConfig): void {
   }
 
   const coord = new Coordinator(config, front, activeCage)
+
+  // ── 预演体检通道（格⑮）：候选装配的"先验后换"通道 ─────────────────────────────
+  // 它的能力面**只够**spawn 一个临时代并读它 —— 见 preflight.ts 的 INVARIANT（构造参数里
+  // 没有 front/lease/coordinator，类型上就改不了现役）。
+  // 端口段刻意错开：PREFLIGHT_PORT_BASE 默认 = GEN_PORT_BASE + 100 ⇒ 预演代与现役代可并行共存。
+  const preflightCfg: PreflightConfig = {
+    nodeBin: config.nodeBin,
+    dshBin: config.dshBin,
+    portBase: envInt('PREFLIGHT_PORT_BASE', config.portBase + 100),
+    adminBase: envInt('PREFLIGHT_ADMIN_PORT_BASE', config.adminBase + 100),
+    // 预演代的落地目录单独一层：与活跃代的 gen 目录分开，便于取证与清理。
+    workDir: envStr('PREFLIGHT_WORK_DIR', join(config.workDir, 'preflight')),
+    profile: config.profile,
+    envExtra: config.envExtra,
+    bootHealthTimeoutMs: config.bootHealthTimeoutMs,
+    readyTimeoutMs: config.readyTimeoutMs,
+  }
+  const preflightState: PreflightState = { stage: 'idle', last: null }
+  const preflight = new PreflightRunner(preflightCfg, preflightState)
+
+  /**
+   * 解析 `?cmd=preflight` 的声明清单（`plugins=a,b` / `tools=x,y` / `commands=p,q`）。
+   * 空串 ⇒ 该项不声明（**不**等价于"声明为空" —— 见 preflight.ts 的 checkInventory 说明）。
+   */
+  const manifestFrom = (url: URL): PreflightManifest => {
+    const split = (k: string): string[] =>
+      (url.searchParams.get(k) ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    const m: PreflightManifest = {}
+    const p = split('plugins')
+    const t = split('tools')
+    const c = split('commands')
+    if (p.length) m.plugins = p
+    if (t.length) m.tools = t
+    if (c.length) m.commands = c
+    return m
+  }
 
   // 崩溃恢复：仅当 lease 指向的代"进程已死"才清空 lease（新 bootstrap 代 pid 刚 spawn 必然存活，不受影响）。
   // 用 pid 存活判定，而非 admin 端口响应度——避免"刚 grant 的代 admin 尚未起来就误判为 stale"的竞态。
@@ -143,6 +184,36 @@ function boot(config: CoordinatorConfig): void {
     } else if (cmd === 'status') {
       const lease = coord.getLease()
       res.end(JSON.stringify({ ok: true, stage: coord.stageName, result: coord.lastHandoverResult, lease: lease?.current, locked: coord.switchLocked }))
+    } else if (cmd === 'preflight') {
+      // 预演体检（格⑮）：装/拔插件后先在一个**预演代**上验证它能跑，确认了再换代；
+      // 不通过就丢弃，现役不受影响。
+      //   · `&profile=<名>`  预演代要跑的候选装配底座（缺省=控制面缺省 profile）
+      //   · `&patch=<abs>`   候选装配的 overlay 叠加层（**可重复**；= dsh 的 `--patch`）
+      //   · `&plugins=a,b`   声明要装配的 loader 条目 id
+      //   · `&tools=x,y`     声明要出现在模型面工具表里的工具名
+      //   · `&commands=p,q`  声明要注册的 host 命令名
+      // 与 apply 同款：**立即回 started**，后台跑完写结果（预演含 spawn+启动健康+清点，
+      // 秒级，但阻塞调用方没意义），用 `?cmd=preflight-result` 轮询报告。
+      res.end(
+        JSON.stringify({
+          ok: true,
+          cmd: 'preflight',
+          stage: 'started',
+          profile: url.searchParams.get('profile') ?? preflightCfg.profile,
+        }),
+      )
+      const req = {
+        profile: url.searchParams.get('profile') ?? preflightCfg.profile,
+        patches: url.searchParams.getAll('patch').filter(Boolean),
+        manifest: manifestFrom(url),
+        timeoutMs: Number(url.searchParams.get('timeout') ?? 15_000) || 15_000,
+      }
+      void preflight.run(req).catch((e) => {
+        console.error('[switchboard] preflight error:', e instanceof Error ? e.message : String(e))
+        preflightState.stage = 'done'
+      })
+    } else if (cmd === 'preflight-result') {
+      res.end(JSON.stringify({ ok: true, stage: preflightState.stage, report: preflightState.last }))
     } else if (cmd === 'result') {
       res.end(JSON.stringify({ ok: true, result: coord.lastHandoverResult }))
     } else if (cmd === 'flow') {

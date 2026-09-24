@@ -27,6 +27,15 @@ export interface SpawnOptions {
   mode: 'staging' | 'active'
   /** 预留；当前端口走 CLI --port，config 走 env，不再用 --patch。 */
   overlayFile?: string
+  /**
+   * 额外 patch 叠加层（绝对路径，dsh `--patch`，可重复）。
+   *
+   * ★ 2026-09-24 为预演体检（格⑮）新增：预演的候选装配 = 「profile + 若干 overlay」。
+   * 有了它，"装/拔一个插件"可以表达为**一次实验的 overlay**，而不必为每个实验
+   * 在 `$DSH_HOME/profiles/` 下铸造一个永久 profile 目录 —— 实验越轻，越容易被真的跑。
+   * 既有交接路径不传它 ⇒ 行为完全不变（保持向后兼容的默认：不追加任何 `--patch`）。
+   */
+  extraPatches?: string[]
   /** 透传 key 池等宿主环境。 */
   envExtra?: Record<string, string>
   /** per-gen 落地目录（sqlite/cache/live 文件底座 + boot.log）。 */
@@ -84,6 +93,8 @@ export function spawnGen(opts: SpawnOptions): SpawnedGen {
     opts.dshBin,
     '--profile',
     opts.profile,
+    // 可选 overlay 叠加层（预演体检用）：dsh 的 `--patch <path>` 可重复。
+    ...(opts.extraPatches ?? []).flatMap((p) => ['--patch', p]),
     '--port',
     String(opts.port),
     '--no-open',
