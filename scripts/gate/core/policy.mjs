@@ -101,37 +101,58 @@ export function shoutUnaccounted(repo, journal, rec, { quiet = false } = {}) {
 /**
  * 台账两条独立检查：
  *   A. 封条链 + 锚点（git 目录下的 ledger.anchor）⇒ 断链/截断/改写 = 真篡改 ⇒ **fail-closed**
- *   B. 未封条的 approve ⇒ **不构成"已批准"** + 告警（绕法③ 的伪造面）
+ *   B. 未封条的 approve ⇒ **不构成"已批准"**；★ **再分两类**（只改判定与告警，不碰台账数据）：
+ *        · `legacy`（封条时代起点**之前**）= 历史遗留 ⇒ 如实登记，**不报 tamper**、不吓人；
+ *        · `tamper`（封条时代起点**之后**仍无封条）= 真可疑 ⇒ 才报 tamper。
+ *      时代起点 = 台账里**第一条带 `_c` 的记录**的时间（从数据里推，不新增记录；无封条 ⇒ null）。
  */
 export function ledgerHealth(ledger, journal, { quiet = false } = {}) {
   const v = ledger.verify()
   const unsealed = ledger.unsealedApprovals()
+  const era = ledger.sealEraStart()
+  const legacy = ledger.legacyApprovals()
+  const tamper = ledger.tamperApprovals()
   const problems = []
   if (!v.ok) {
     problems.push(...v.breaks.map((b) => `台账第 ${b.line} 行：${b.why}`))
     problems.push(...v.anchorProblems)
     problems.push(...v.corrupt.map((c) => `台账第 ${c.line} 行不是合法 JSON`))
   }
-  if (unsealed.length > 0) problems.push(`台账里有 ${unsealed.length} 条**没有封条**的 approve：${unsealed.map((r) => r.id).join(', ')}（封条缺失 ⇒ 不构成有效批准）`)
-  if (problems.length === 0) return { ok: true, chain: v, unsealed, fatal: false }
+  // ★ 只有【封条时代之后】的无封条 approve 才算可疑 —— 那才是"封条机制已生效还敢手写一行"。
+  if (tamper.length > 0) {
+    problems.push(
+      `台账里有 ${tamper.length} 条**封条时代（${era}）之后**仍无封条的 approve：${tamper.map((r) => r.id).join(', ')}` +
+        `（封条机制已生效 ⇒ 这才判为伪造/篡改；且不构成有效批准）`,
+    )
+  }
+  const info =
+    legacy.length > 0
+      ? `另有 ${legacy.length} 条**封条时代之前**的无封条 approve（历史遗留，不作为放行证据；如实登记，不报 tamper）：${legacy.map((r) => r.id).join(', ')}`
+      : null
+  // ★ 只有 legacy（无真问题）⇒ 干净返回、不记 tamper、**不在提交路径出声**（不吓人）；
+  //   legacy 记在返回值里，由 status/audit 如实报出（见 cli.mjs）。
+  if (problems.length === 0) {
+    return { ok: true, chain: v, unsealed, legacy, tamper, era, info, fatal: false, problems }
+  }
 
   const fatal = !v.ok
   const dedupeKey = problems.join('|')
   const last = [...journal.entries()].reverse().find((e) => e.kind === 'tamper')
   if (!(last && last.dedupeKey === dedupeKey)) {
-    journal.append({ kind: 'tamper', fatal, where: 'ledger', dedupeKey, problems })
+    journal.append({ kind: 'tamper', fatal, where: 'ledger', dedupeKey, problems, ...(info ? { legacyIds: legacy.map((r) => r.id) } : {}) })
   }
   if (!quiet) {
     banner([
-      `门层告警（台账 ${fatal ? '被封条链判为【被改过】' : '里有未封条的 approve'}）：`,
+      `门层告警（台账 ${fatal ? '被封条链判为【被改过】' : '里有【封条时代之后】的无封条 approve'}）：`,
       ...problems.slice(0, 5).map((p) => `  · ${p}`),
+      ...(info ? [`  · （另：${info}）`] : []),
       fatal
         ? '★ 封条链/锚点不一致 ⇒ 视为"台账被改过" ⇒ 本次提交**一律拦住**（fail-closed，不无声放行）。'
-        : '★ 未封条的 approve **不作为放行证据**（伪造者少做了一步：没写链）。',
+        : '★ 封条机制已生效还写无封条 approve ⇒ 视为伪造 ⇒ **不作为放行证据**（伪造者少做了一步：没写链）。',
       '★ 已记账（kind=tamper）。复核：node scripts/gate/cli.mjs status',
     ])
   }
-  return { ok: false, chain: v, unsealed, fatal, problems }
+  return { ok: false, chain: v, unsealed, legacy, tamper, era, info, fatal, problems }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

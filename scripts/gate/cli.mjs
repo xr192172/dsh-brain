@@ -131,6 +131,9 @@ function cmdStatus(ctx) {
   const lv = ledger.verify()
   const rec = P.reconcile(repo, journal)
   const unsealed = ledger.unsealedApprovals()
+  const era = ledger.sealEraStart()
+  const legacy = ledger.legacyApprovals()
+  const tamper = ledger.tamperApprovals()
   R.say(`${NAME} status`)
   R.say('── wiring ──────────────────────────────────────────────────────────────')
   R.say(`  目标仓库            : ${R.toPosix(repo)}`)
@@ -142,6 +145,9 @@ function cmdStatus(ctx) {
   const fold = ledger.fold()
   R.say(`  文件                : ${R.toPosix(ledger.file)}`)
   R.say(`  记录                : 全部 ${fold.length} ／ 待批 ${fold.filter((r) => r.status === 'pending').length} ／ 有效批准 ${ledger.approvals().length} ／ ★未封条批准 ${unsealed.length}`)
+  R.say(`  未封条批准分类      : legacy（封条时代之前·历史遗留，不作为放行证据）${legacy.length} 条${legacy.length ? `  ${legacy.map((r) => r.id).join(', ')}` : ''}`)
+  R.say(`                        ★ tamper（封条时代之后仍无封条=可疑）${tamper.length} 条${tamper.length ? `  ★ ${tamper.map((r) => r.id).join(', ')}` : '  ✓'}`)
+  R.say(`  封条时代起点        : ${era === null ? '（尚无封条时代 ⇒ 全部未封条批准均按 legacy 处理）' : `${era}（台账里第一条带 _c 的记录）`}`)
   R.say(`  封条链              : ${lv.ok ? `一致 ✓（${lv.sealedCount} 条封条行）` : `**不一致 ✗** ${[...lv.breaks.map((b) => `第${b.line}行${b.why}`), ...lv.anchorProblems].slice(0, 3).join('；')}`}`)
   for (const r of fold.slice(-6)) {
     R.say(`    [${r.status.padEnd(8)}${r.sealed ? ' sealed' : '       '}] ${r.id}  ${String(r.level).padEnd(3)} ${r.note.slice(0, 64)}`)
@@ -166,10 +172,12 @@ function cmdAudit(ctx) {
   R.say(`  仓库             : ${R.toPosix(repo)}`)
   R.say(`  hooksPath        : ${watch.ok ? `正确 ✓（${watch.got}）` : `**异常 ✗**: ${watch.why}`}`)
   R.say(`  台账封条链       : ${health.chain.ok ? `一致 ✓（${health.chain.sealedCount} 条封条）` : `**不一致 ✗**`}`)
-  R.say(`  台账未封条批准   : ${health.unsealed.length} 条${health.unsealed.length ? `  ★ ${health.unsealed.map((r) => r.id).join(', ')}` : ' ✓'}`)
+  R.say(`  台账未封条批准   : ${health.unsealed.length} 条（legacy ${health.legacy.length} ／ ★tamper ${health.tamper.length}）`)
+  R.say(`  台账·legacy      : ${health.legacy.length} 条${health.legacy.length ? `（封条时代${health.era === null ? '：尚无' : `起点 ${health.era}`} 之前的历史遗留，不作为放行证据，非告警）` : ' ✓'}`)
+  R.say(`  台账·tamper      : ${health.tamper.length} 条${health.tamper.length ? `  ★ ${health.tamper.map((r) => r.id).join(', ')}` : ' ✓'}`)
   R.say(`  日志封条链       : ${journal.verify().ok ? '一致 ✓' : '**不一致 ✗**'}`)
   R.say(`  未记账提交       : ${audit.unaccounted.length} 条${audit.unaccounted.length ? `  ★ ${audit.unaccounted.map((s) => s.slice(0, 8)).join(', ')}` : ' ✓'}`)
-  const bad = !watch.ok || !health.chain.ok || !journal.verify().ok || audit.unaccounted.length > 0 || health.unsealed.length > 0
+  const bad = !watch.ok || !health.chain.ok || !journal.verify().ok || audit.unaccounted.length > 0 || health.tamper.length > 0
   R.say(`  ⇒ ${bad ? '**对账发现问题**（见上）' : '干净（无告警）'}  exit=${bad ? 3 : 0}`)
   return bad ? 3 : 0
 }

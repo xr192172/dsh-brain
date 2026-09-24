@@ -66,7 +66,7 @@
 |---|---|---|---|---|
 | ① | `git commit --no-verify` | 不能（该选项的语义就是跳过钩子） | **在提交当时就发现**：`--no-verify` **不跳过 `post-commit`**（实测）⇒ 引擎发现"R0/R1 落地但无已批准记录" ⇒ **记账(kind=bypass) + 告警 + 挂 pending 票** | `out/gate/journal.jsonl` 出现 `kind=bypass`；stderr 出现绕过横幅 |
 | ② | `git -c core.hooksPath=<别处> commit` | 不能（钩子目录是本地配置） | **必然被对账追上**：该提交不会被记 `seen`；`reconcile()` 在**下一次任何钩子触发**或 `cli audit` 时把"门没看见过的提交"列出来 ⇒ 告警(kind=audit)；另加 `watchdog` 对 hooksPath 本身告警(kind=hooks-drift) | `cli audit` 退出码 3；`journal` 出现 `kind=audit` 且 `unaccounted` 非空 |
-| ③ | 直接往台账 append 一行 `approve` | 不能（文件本地可写，且无本地可信身份源） | **伪造留下无法自洽的痕**：只有**带封条**的 approve 才构成"已批准"；手写行缺封条 ⇒ 门**不认** + 告警(kind=tamper)；连封条一起伪造 ⇒ 还要同步改 `<git-dir>/dsh-gate/ledger.anchor`，否则封条链判"被改过"⇒ **fail-closed 拦住** | 伪造后 `cli gate --level R1` 仍**拦住**；`journal` 出现 `kind=tamper` |
+| ③ | 直接往台账 append 一行 `approve` | 不能（文件本地可写，且无本地可信身份源） | **伪造留下无法自洽的痕**：只有**带封条**的 approve 才构成"已批准"；手写行缺封条 ⇒ 门**不认** + 告警(kind=tamper)；连封条一起伪造 ⇒ 还要同步改 `<git-dir>/dsh-gate/ledger.anchor`，否则封条链判"被改过"⇒ **fail-closed 拦住**。★ 缺封条**再分两档**（见 §8）：**封条时代之前**的手工票 = `legacy`（历史遗留，**不报 tamper**）；**封条时代之后**仍缺封条 = `tamper`（真可疑） | 伪造后 `cli gate --level R1` 仍**拦住**；`journal` 出现 `kind=tamper` |
 
 ★ **三条都在**；① 是"提交当时当场抓住"，②③ 是"必然被记账/告警 + fail-closed"。
 
@@ -145,3 +145,26 @@ node scripts/gate/cli.mjs status
 node scripts/gate/cli.mjs audit          # 有问题 ⇒ exit 3
 node scripts/change-classify.mjs --paths scripts/gate/core/policy.mjs   # ⇒ R1（自指环）
 ```
+
+---
+
+## 8. ★ 台账里"未封条 approve"的两分：`legacy` / `tamper`（时代起点 `sealEraStart`）
+
+**问题**：台账是 append-only 的，**封条机制引入之前**就存在一批合法的手工 `approve` 行
+（字段 `{approvedBy,at,id,kind,level,note,schema,status}`，**无 `_c`**）。它们**不是**伪造，
+但旧口径把"未封条"一律当 `tamper` 报 ⇒ **把历史遗留与篡改混为一类、告警过重**。
+
+**修法**（**只改判定与告警文案，不碰任何台账数据**；`chain.mjs:15` 的 append-only 原则照旧
+⇒ **不许补封条、不许改写/删除历史行**）：
+
+* **时代起点 `sealEraStart`** := 台账里**第一条带 `_c` 的记录**的时间
+  （`ledger.mjs:sealEraStart()`，**从数据里推、不新增任何记录**；
+  **一条封条都没有 ⇒ `null` = "尚无封条时代"**）。
+* **`legacy`** := `approved && !sealed && at < sealEraStart`（或无封条时代）
+  ⇒ **历史遗留（封条机制之前），不作为放行证据** ⇒ 如实登记，**不报 tamper**、不吓人。
+* **`tamper`** := `approved && !sealed && at >= sealEraStart`
+  ⇒ **封条机制生效后还敢写无封条 approve = 真可疑** ⇒ 才报 tamper（记账 + fail-closed 的链判据照旧）。
+
+★ **判据强度不降**：`approvals()`（"有效批准"）**仍只认 `approved && sealed`**
+（`ledger.mjs:approvals()`）—— `legacy` 老老实实**不算放行证据**，只是不再被称作"篡改"。
+

@@ -7,6 +7,13 @@
  *   · 本模块**只读**它 + 通过 ChainLog **追加封条行**；不改写、不删除任何历史行。
  *   · 主仓既有的 `pending-approval.mjs` **一字未改**，它写的行**没有封条** ⇒ 本模块把它们登记为
  *     `unsealed`。**未封条的 approve 不构成"已批准"**（见下）。
+ *     ★★ 未封条 approve **再分两类**（只改判定，不动任何历史行）：以**封条时代起点** `sealEraStart`
+ *     （= 台账里**第一条带 `_c` 的记录**的时间，**从数据里推、不新增记录**；一条封条都没有 ⇒ `null`
+ *     = "尚无封条时代"）为界：
+ *       · `legacyApprovals()` —— 时代**之前**的未封条 approve = 历史遗留（不是"已批准"证据，但**不报 tamper**）；
+ *       · `tamperApprovals()` —— 时代**之后**仍写无封条 approve = **才可疑**（真伪造）。
+ *     ★ 为什么不分一个"更软的告警"就完事：append-only 的历史**不允许被"修好"**（chain.mjs:15）
+ *       ⇒ 不许补封条、不许改写/删除历史行；能做且该做的只是**把判定说准**。
  *     这样做的理由：绕法③ 的病根就是"台账是本地可写文件 ⇒ 门判不了是谁批的"。
  *     本地无法给出可信身份（见 README「边界」），但可以让**伪造留下一道无法自洽的痕**：
  *     手写一行 approve ⇒ 缺封条 ⇒ 门**不认**并告警；连封条一起伪造 ⇒ 还要同步改 git 目录里的锚点。
@@ -103,9 +110,45 @@ export class Ledger {
     return this.fold().filter((r) => r.status === 'approved' && r.sealed)
   }
 
-  /** 没封条的"已批准"——不是证据，是**告警对象**。 */
+  /** 没封条的"已批准"——都不是证据；但**成因不同**（见下两个分类器）。 */
   unsealedApprovals() {
     return this.fold().filter((r) => r.status === 'approved' && !r.sealed)
+  }
+
+  /**
+   * ★★ 封条时代起点 `sealEraStart` —— **从数据里推，不新增任何记录**：
+   *   台账里**第一条带 `_c` 的记录**的 `at`（append-only ⇒ 文件顺序即时间顺序）。
+   *   · 有 ⇒ 该时刻**起**，再写"无封条 approve"才可疑。
+   *   · **一条封条都没有 ⇒ 返回 `null`** = "尚无封条时代" ⇒ 全部未封条 approve 都是 legacy。
+   */
+  sealEraStart() {
+    for (const e of this.log.entries()) {
+      if (Object.prototype.hasOwnProperty.call(e, '_c')) return typeof e.at === 'string' ? e.at : null
+    }
+    return null
+  }
+
+  /**
+   * ★ `legacy`：封条时代**之前**的未封条 approve ⇒ **历史遗留**（封条机制引入前的合法票）。
+   *   如实登记，但**不是**"已批准"证据、也**不是**篡改 ⇒ 由消费侧如实报出、不报 tamper。
+   */
+  legacyApprovals() {
+    const era = this.sealEraStart()
+    return this.fold().filter(
+      (r) => r.status === 'approved' && !r.sealed && (era === null || String(r.approvedAt ?? '') < era),
+    )
+  }
+
+  /**
+   * ★★ `tamper`：封条时代**之后**仍写"无封条 approve" ⇒ **这才可疑**（真伪造/篡改）。
+   *   ★ 尚无封条时代（era === null）时**没有"时代之后"这回事** ⇒ 返回空（不冤枉历史）。
+   */
+  tamperApprovals() {
+    const era = this.sealEraStart()
+    if (era === null) return []
+    return this.fold().filter(
+      (r) => r.status === 'approved' && !r.sealed && String(r.approvedAt ?? '') >= era,
+    )
   }
 
   pendings(levels = null) {
