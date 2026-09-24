@@ -21,9 +21,11 @@
  *     ⇒ 本脚本**只看变更的实际路径**（`git status` / `--paths`），
  *       **不看提交信息、不看 `--level` 之类的自述、不看谁发起的**。
  *   ★ 写死条文②：**控制面自身属于 R1，agent 不可写它** —— 即"决定能不能自动批准的那段代码，
- *     不能被被批准的东西改写"。⇒ 本轮的机制刻意做在**控制面之外**（`scripts/` 下的约定脚本 +
- *     一个约定目录 `out/pending-approval/`），使**本轮改动自身落在 R2**（可自动）。
- *     代价与自指风险见报告 `out/w39-o106-o107.md`「不确定/未验证」——★ 不许把这件事说成已闭环。
+ *     不能被被批准的东西改写"。⇒ 本机制刻意做在**控制面之外**（`scripts/` + `out/`），
+ *     但**"在控制面之外"不等于"可以自动改"** —— O106/O107 那一版把这句读成了"落在 R2（可自动）"，
+ *     于是留下一个自指环：*决定什么算 R1 的脚本本身，被判成 R2*。
+ *     ★ O110 已修正：层级推断器、待批记录器、门层（`scripts/gate/**`）、钩子目录全部**显式列入 R1**
+ *     （见规则表 `R1-APPROVAL-*` / `R1-GATE-LAYER-SELF` / `R1-GATE-HOOKS`）⇒ 它们要外部见证才能改。
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * 判定口径（三条，全部写死；**多重命中取最严** R0 > R1 > R2）
@@ -138,6 +140,36 @@ export const RULES = [
     level: 'R1',
     match: { kind: 'glob', pattern: 'scripts/gate-*.mjs' },
     why: '门本体：向量 runner / 契约校验器 / 参考实现与坏实现。★ `gate-impl-broken.mjs` 的存在就是为了证明"向量有分辨力"——门的松紧全在这里 ⇒ R1',
+  },
+
+  // ── ★ O110 补的规则：把"审批逻辑本身"划进 R1（补 §6.2 条文② 的自指环） ──────
+  //    原规则下 `scripts/change-classify.mjs` / `scripts/pending-approval.mjs` / `scripts/gate/**`
+  //    都落进 `R2-SCRIPTS-OTHER`（= R2，可自动）⇒ 也就是"决定能不能自动批准的那段代码"
+  //    可以被自动改写 —— 正是 §6.2 条文② 要防的那个环。以下四条按【路径】把它补上。
+  //    ★ 补这条规则**本身是一次 R1 改动**（须外部见证），不是"顺手"。
+  {
+    id: 'R1-GATE-LAYER-SELF',
+    level: 'R1',
+    match: { kind: 'glob', pattern: 'scripts/gate/**' },
+    why: 'O110 门层本体（统一入口 cli.mjs + 策略 policy.mjs + 封条链 chain.mjs + 台账 ledger.mjs + 观察日志 journal.mjs + 钩子触发点）。★ §6.2 条文②：「决定能不能自动批准的那段代码，不能被被批准的东西改写」⇒ 它必须比被它判定的东西更严 ⇒ R1',
+  },
+  {
+    id: 'R1-APPROVAL-CLASSIFIER',
+    level: 'R1',
+    match: { kind: 'exact', pattern: 'scripts/change-classify.mjs' },
+    why: '**层级推断器自己**：改它 = 改"什么算 R1" ⇒ 能把任意改动判成 R2 从而自证放行。这是最典型的自指环（原规则把它判 R2，本批修正）⇒ R1',
+  },
+  {
+    id: 'R1-APPROVAL-LEDGER',
+    level: 'R1',
+    match: { kind: 'exact', pattern: 'scripts/pending-approval.mjs' },
+    why: '**待批记录器/闸门自己**（O107）：改它 = 改"什么算未批" ⇒ 能让自己的改动自动放行 ⇒ R1',
+  },
+  {
+    id: 'R1-GATE-HOOKS',
+    level: 'R1',
+    match: { kind: 'glob', pattern: 'scripts/git-hooks/**' },
+    why: '**提交路径上的触发点**：改一个 `exit 0` 就等于把门拆了（这正是三种绕法里最简单的"直接改本文件"）。判据来自"它能否让某个判据变松而不用改被测物？"能 ⇒ R1。（`legacy/` 下留档的判据侧原件同样落这条）',
   },
   {
     id: 'R1-CAPABILITY-FAMILY',
@@ -356,14 +388,16 @@ export function classifyPaths(rawPaths, opts = {}) {
     reasons.push(`⚠ 有 ${outsideCount} 条路径在本仓库树外 ⇒ 已按保守 R1 处理（不自动放行）`)
   }
 
-  // ★ 自指提示（诚实记录，不改变级别）：本机制自己的两个脚本属"审批逻辑"语义，
-  //   但它们在控制面之外、且未被控制面引用 ⇒ 按【路径口径】落 R2。见报告「不确定/未验证」。
+  // ★ 自指提示（O110 后**已自升为 R1**，不再靠"诚实记录"兜着）：本机制自己的脚本是
+  //   §6.2 的"审批逻辑"，本来就该比被它判定的东西更严 ⇒ 规则表里已显式列入 R1。
   const SELF_FILES = ['scripts/change-classify.mjs', 'scripts/pending-approval.mjs']
-  const selfReference = paths.some((p) => SELF_FILES.includes(p))
+  const selfReference = paths.some((p) => SELF_FILES.includes(p)) || paths.some((p) => p.startsWith('scripts/gate/'))
   if (selfReference) {
     reasons.push(
-      '★ 自指：变更包含层级推断器/待批记录器自身。按【路径口径】它们在控制面之外、不被控制面引用 ⇒ R2；' +
-        '但语义上它们是 §6.2 的"审批逻辑"（属 R1）⇒ 本轮**不自升**，且这正说明本机制目前只是"约定 + 可执行门"，不是机器约束（见报告）',
+      '★ 自指：变更包含层级推断器/待批记录器/门层自身。O110 已把它们显式列入 R1' +
+        '（`R1-APPROVAL-CLASSIFIER` / `R1-APPROVAL-LEDGER` / `R1-GATE-LAYER-SELF` / `R1-GATE-HOOKS`）' +
+        ' ⇒ 按 §6.2 条文②「决定能不能自动批准的那段代码，不能被被批准的东西改写」，' +
+        '它们现在需要**外部见证**才能提交（补这条规则本身也是一次 R1 改动）',
     )
   }
 
