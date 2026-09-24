@@ -437,6 +437,21 @@ export function projectAssembly(opts: { file?: string; ctrlProfile: string; prob
 }
 
 /**
+ * ★★ dev 模式的**启动参数名**（控制面级）与它写入子代的**目标档位**。
+ *
+ * 为什么是这两个名字：`DSH_PERMISSION_MODE` 是**上游 bundle 已经预留**的 env 钩子
+ * （`dsh-base/cordis.patch.yml:175/191`），不是我们发明的；`DSH_SWITCHBOARD_DEV` 是**我们的**开关，
+ * 由控制面读、再翻译成前者传给子代。这样"谁决定的"与"DSH 怎么读"两件事分得开。
+ */
+export const DEV_MODE_ENV = 'DSH_SWITCHBOARD_DEV'
+export const DEV_PERMISSION_MODE = 'danger-full-access'
+
+/** `DSH_SWITCHBOARD_DEV` 是否打开（`1` / `true` / `yes` / `on` 都算）。 */
+export function isDevModeEnv(): boolean {
+  return /^(1|true|yes|on)$/i.test((process.env[DEV_MODE_ENV] ?? '').trim())
+}
+
+/**
  * ★ 本模块的主入口：**在 spawn 那一刻**把清单解析成一份 spawn 规格。
  *
  * @param opts.file        清单路径（`GEN_ASSEMBLY`；空 ⇒ 最小集）。
@@ -444,6 +459,9 @@ export function projectAssembly(opts: { file?: string; ctrlProfile: string; prob
  * @param opts.genDir      本代落地目录（渲染出的 overlay 写这里）。
  * @param opts.defaultProfile 清单没写 `profile` 时的缺省 = **控制剖面**。
  * @param opts.baseEnv     调用方已有的额外 env（如实验内核目录）；清单 env 覆盖它。
+ * @param opts.devMode     ★★ **dev 模式（控制面级启动参数）**：本代沙箱放开。
+ *                          缺省从环境变量 `DSH_SWITCHBOARD_DEV` 读（**这样所有 spawn 路径都自动覆盖**，
+ *                          调用方忘了传也不会漏）。语义见下方 `applyDevMode`。
  * @returns spawn 规格 + 清单来源（写进日志用）。
  * @throws 清单存在但坏 ⇒ 抛错（INV-C：调用方必须 abort，不得降级）。
  */
@@ -453,6 +471,7 @@ export function resolveGenSpawnSpec(opts: {
   genDir: string
   defaultProfile: string
   baseEnv?: Record<string, string>
+  devMode?: boolean
 }): GenSpawnSpec {
   const loaded = loadGenAssembly(opts.file)
   const a = loaded.assembly
@@ -467,6 +486,41 @@ export function resolveGenSpawnSpec(opts: {
     Object.assign(envExtra, parseEnvFile(readFileSync(abs, 'utf8')))
   }
   Object.assign(envExtra, a.env ?? {})
+
+  // ── ★★ dev 模式：控制面级的"启动参数" ⇒ 本代沙箱放开 ─────────────────────────
+  //
+  // ## 为什么用"启动参数"而不是"运行期审批拦截器"（2026-09-25 定；用户选的 A 方案）
+  // 上游 bundle（`dsh-base/cordis.patch.yml:175 / :191`）里，**同一个** `DSH_PERMISSION_MODE`
+  // 同时驱动两件事：
+  //     mode:   !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'     // 沙箱档位
+  //     policy: !!js (…) === 'danger-full-access' ? 'never' : 'ask'          // 审批策略
+  // ⇒ 控制面把这个 env 递给子代 ⇒ **整代就是"开发模式"**。
+  //   对比"审批拦截器"：审批**每次提权都要判、判不出就挂**（实测：提权后 `approval/asked` 等不到
+  //   `decided` ⇒ 整轮卡死，白烧 20 分钟）；而**档位是出生时定的** ⇒ **根本不存在审批动作 ⇒ 永不挂**。
+  //
+  // ## 优先级与诚实
+  // dev 模式**压过**清单里的 `a.env`（它是"整次运行"的启动决定，不是单次实验的变量），
+  // 但**不静默**：清单若写了别的值就**打警告** —— 不许悄悄改掉别人的实验设置。
+  // ★★ 副作用必须说清：`danger-full-access` = 沙箱**全开**（能写 `~/.dsh`、能写别的臂、能改别的树）。
+  //   ★ 用户同时要的"**只禁止互读互写**"**在档位里表达不了**（本项目早前已实测到这个结论：
+  //     `danger-full-access` 是全开，做不到"只禁那两处"）⇒ 那是**独立于档位的一层策略**，
+  //     **尚未建** —— 不许把它写成"已实现"。
+  const devMode = opts.devMode ?? isDevModeEnv()
+  if (devMode) {
+    const prev = envExtra['DSH_PERMISSION_MODE']
+    if (prev !== undefined && prev !== DEV_PERMISSION_MODE) {
+      console.log(
+        `[switchboard:dev] ⚠️ 清单里已把 DSH_PERMISSION_MODE 设为 ${prev}，` +
+          `但 dev 模式是"整次运行"的启动决定 ⇒ **覆写为 ${DEV_PERMISSION_MODE}**（如实记账，不静默）`,
+      )
+    }
+    envExtra['DSH_PERMISSION_MODE'] = DEV_PERMISSION_MODE
+    console.log(
+      `[switchboard:dev] ★★ 本代以 dev 模式启动：DSH_PERMISSION_MODE=${DEV_PERMISSION_MODE}` +
+        ` ⇒ 沙箱全开 + 审批 never（此后不会再有审批挂起）。` +
+        `★ 提醒：互读互写禁令【未实现】（那是独立于档位的一层策略）。`,
+    )
+  }
 
   const overlay = writeAssemblyOverlay(opts.genDir, a, opts.genPort)
   const declared = (a.patches ?? []).map((p) => (isAbsolute(p) ? p : resolve(p)))
