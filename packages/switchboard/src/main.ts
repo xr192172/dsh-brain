@@ -15,10 +15,16 @@
  *   HANDOVER_ADMIN_PORT_BASE 代内 handover-agent admin 基址，默认 31810
  *   DSH_HOME           （默认 %USERPROFILE%/.dsh）
  *   WORK_DIR            工作目录（协调+gen 底座），默认 {DSH_HOME}/switchboard
- *   WEB_PROFILE         dsh profile，默认 web
+ *   WEB_PROFILE         ★ **控制剖面**：控制面自己的最小集所钉的那个 dsh profile（默认 web）。
+ *                       ★ 它**不再**是"代的装配"：代跑哪个剖面由「代装配清单」的 `profile` 声明
+ *                       （清单没声明才回落到这里）。见 `gen-assembly.ts` / `docs/gen-assembly.md`。
+ *   GEN_ASSEMBLY        ★ 「代装配清单」JSON 的路径（默认 {WORK_DIR}/gen-assembly.json）。
+ *                       **模型接入 / key 池住在这里**——控制面每次 spawn 一个代都重读它。
+ *                       ⇒ 改模型/key/provider/pool 只需**换代**，不需要重启控制面。
+ *                       未配置/文件不存在 ⇒ 控制面最小集：能启动、能换代，但没有模型接入。
  *   DSH_BIN             dsh lib/bin.js
  *   NODE_BIN            node 可执行
- *   GEN_ENV_EXTRA       透传到 gens 的 JSON 对象（含 key 池等）
+ *   （已移除）GEN_ENV_EXTRA —— 曾经把 key 池装进**控制面进程的 env**；现在归装配清单。
  */
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
@@ -31,7 +37,23 @@ import { AdminClient } from './adminclient.js'
 import { spawnGen } from './spawner.js'
 import { PreflightRunner, type PreflightConfig, type PreflightState } from './preflight.js'
 import type { PreflightManifest } from './preflight-contract.js'
+import { resolveGenSpawnSpec, projectAssembly } from './gen-assembly.js'
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+/**
+ * `?cmd=assembly` 里探的"模型接入相关环境变量名"。
+ * 控制面**应当一个都不命中**：key 池/凭据归「代装配清单」（`GEN_ASSEMBLY`）声明的 env 文件，
+ * 由每个代自己去读。命中任何一个 ⇒ 模型接入又漏回控制面了。
+ * 含 `GEN_ENV_EXTRA`：它是旧装配路径的入口，留着探是为了让"回退"当场可见（而不是静默复活）。
+ */
+const MODEL_ENV_PROBES = [
+  'GEN_ENV_EXTRA',
+  'AGENTSHELL_MAIN_LLM_API_KEYS',
+  'AGENTSHELL_MAIN_LLM_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'DEEPSEEK_API_KEY',
+]
 
 function envStr(k: string, d: string): string {
   return process.env[k] || d
@@ -56,17 +78,31 @@ function boot(config: CoordinatorConfig): void {
   const adminPort = config.adminBase + 1
   const genDir = join(config.workDir, genId)
   const nodeBin = config.nodeBin
+  // ★ bootstrap 代与换代代走**同一条**装配路径：都从「代装配清单」读。
+  //   否则"控制面启动时装配什么"又会对清单免疫 —— 那正是本层要拆掉的东西（gen-assembly INV-B）。
+  const bootSpec = resolveGenSpawnSpec({
+    file: config.genAssembly,
+    genPort: port,
+    genDir,
+    defaultProfile: config.profile,
+    baseEnv: {},
+  })
+  console.log(
+    `[switchboard] gen assembly: source=${bootSpec.source} profile=${bootSpec.profile} poolPort=${bootSpec.poolPort ?? 'none'} ` +
+      `patches=${bootSpec.extraPatches.length} envKeys=${Object.keys(bootSpec.envExtra).length}`,
+  )
   const spawnedA = spawnGen({
     nodeBin,
     dshBin: config.dshBin,
-    profile: config.profile,
+    profile: bootSpec.profile,
     port,
     adminPort,
     gen: genId,
     leaseToken: '', // A 启动即 active，token 在首次 grant 时定
     mode: 'active',
     genDir,
-    envExtra: config.envExtra,
+    extraPatches: bootSpec.extraPatches,
+    envExtra: bootSpec.envExtra,
     inspectPort: config.inspectPortBase ? config.inspectPortBase + (port - config.portBase) : undefined,
   })
   const activeCage = {
@@ -99,7 +135,8 @@ function boot(config: CoordinatorConfig): void {
     // 预演代的落地目录单独一层：与活跃代的 gen 目录分开，便于取证与清理。
     workDir: envStr('PREFLIGHT_WORK_DIR', join(config.workDir, 'preflight')),
     profile: config.profile,
-    envExtra: config.envExtra,
+    // ★ 预演的就是「代装配清单」——与换代共用同一份清单与同一个渲染器（"改装配前先验"）。
+    genAssembly: config.genAssembly,
     bootHealthTimeoutMs: config.bootHealthTimeoutMs,
     readyTimeoutMs: config.readyTimeoutMs,
   }
@@ -177,10 +214,46 @@ function boot(config: CoordinatorConfig): void {
       // 立即确认：handover 可能含 defer（等活跃代收尾，秒级~20s+），阻塞到这个结果会拖爆调用方（如 tool_apply 15s 超时）。
       // → 先回 stage=started，后台异步执行，最终结果落 state.jsonl / ?cmd=result 供轮询。
       const fast = cmd === 'restart' || url.searchParams.get('fast') === '1'
-      res.end(JSON.stringify({ ok: true, cmd, stage: 'started', fast, profile: url.searchParams.get('profile') ?? 'web' }))
+      // ★ 不再报"profile: web"这种硬编码缺省（它已经不代表实际装配）：
+      //   实际生效的剖面由「代装配清单」决定 —— 要读确切值请查 `?cmd=assembly`。
+      res.end(
+        JSON.stringify({
+          ok: true,
+          cmd,
+          stage: 'started',
+          fast,
+          profileOverride: url.searchParams.get('profile') ?? null,
+          ctrlProfile: config.profile,
+        }),
+      )
       void coord.handover(url.searchParams.get('fail') ?? undefined, url.searchParams.get('profile') ?? undefined, url.searchParams.get('kernel') ?? undefined, url.searchParams.get('verify') ?? undefined, fast).catch((e) =>
         console.error('[switchboard] handover error:', e instanceof Error ? e.message : String(e)),
       )
+    } else if (cmd === 'assembly') {
+      // ★ 只读投影：「控制面自己装了什么」+「下一代会被装成什么」。
+      // 这条命令存在的理由：判据"控制面的 profile 不再装配 key-pool-proxy"必须能被**执行**出来核对，
+      // 而不是靠人读配置文件。它本身不 spawn / 不写盘 / 不改状态。
+      //   · ctrlProfile          = 控制面启动最小集里钉的那个 profile
+      //   · assemblyPresent=false = 控制面此刻以**最小集**运行（没有模型接入也照样活着）
+      //   · probeGenPort/probePoolPort = 下一代将拿到的端口与池口
+      //   · overlayPreview       = 下一代会被叠加的 `--patch` 内容（模型/provider/池都在这）
+      try {
+        const probeGenPort = allocGenPort(config.portBase, coord.nextSlot)
+        const proj = projectAssembly({ file: config.genAssembly, ctrlProfile: config.profile, probeGenPort })
+        // ★ 运行时事实（不是读配置文件）：**控制面自己的进程 env 里有没有模型接入的名字**。
+        //   空数组 = 控制面启动所需的最小集里不含 key/池（判据 1 的运行时那一半）。
+        //   只报**变量名**，不报任何值。
+        res.end(
+          JSON.stringify({
+            ok: true,
+            ...proj,
+            controlPlaneEnvHit: MODEL_ENV_PROBES.filter((k) => !!process.env[k]),
+          }),
+        )
+      } catch (e) {
+        res.statusCode = 500
+        res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }))
+      }
     } else if (cmd === 'status') {
       const lease = coord.getLease()
       res.end(JSON.stringify({ ok: true, stage: coord.stageName, result: coord.lastHandoverResult, lease: lease?.current, locked: coord.switchLocked }))
@@ -261,13 +334,6 @@ if (isMain) {
   const home = envStr('DSH_HOME', join(homedir(), '.dsh'))
   const nodeBin = envStr('NODE_BIN', join(process.cwd(), '.tools', 'node', 'node.exe'))
   const dshBin = envStr('DSH_BIN', join(process.cwd(), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
-  const envExtraRaw = envStr('GEN_ENV_EXTRA', '{}')
-  let envExtra: Record<string, string> = {}
-  try {
-    envExtra = JSON.parse(envExtraRaw) as Record<string, string>
-  } catch {
-    envExtra = {}
-  }
   // 控制面必须存活：单个坏请求/上游错误不得击穿 3080（此处记录并继续）
   process.on('uncaughtException', (e) => console.error('[switchboard] uncaughtException:', e?.message))
   process.on('unhandledRejection', (e) => console.error('[switchboard] unhandledRejection:', String((e as Error)?.message ?? e)))
@@ -281,7 +347,8 @@ if (isMain) {
     inspectPortBase: envInt('SWITCH_INSPECT_PORT_BASE', 32810),
     coordDir: envStr('WORK_DIR', join(home, 'switchboard')),
     workDir: envStr('WORK_DIR', join(home, 'switchboard')),
-    envExtra,
+    // ★ 模型接入/key 池的**唯一入口**：一份清单文件。控制面自己不持有它。
+    genAssembly: envStr('GEN_ASSEMBLY', join(envStr('WORK_DIR', join(home, 'switchboard')), 'gen-assembly.json')),
     ttlMs: envInt('SWITCH_LEASE_TTL_MS', 10_000),
     readyTimeoutMs: envInt('SWITCH_READY_TIMEOUT_MS', 40_000),
     freezeTimeoutMs: envInt('SWITCH_FREEZE_TIMEOUT_MS', 20_000),

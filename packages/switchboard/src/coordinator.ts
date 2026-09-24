@@ -18,6 +18,7 @@ import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
 import { verifyBootHealth, lastBootSegment } from './boot-health.js'
 import { AdminClient } from './adminclient.js'
 import { writeOverlay } from './overlay.js'
+import { resolveGenSpawnSpec } from './gen-assembly.js'
 import type { GenInstance, HandoverStage, StateRecord, FreezeReply } from './handover-protocol.js'
 
 export interface CoordinatorConfig {
@@ -30,7 +31,12 @@ export interface CoordinatorConfig {
   inspectPortBase: number
   coordDir: string
   workDir: string
-  envExtra?: Record<string, string>
+  /**
+   * ★ 「代装配清单」路径（`GEN_ASSEMBLY`）。**模型接入 / key 池住在这里，不住在控制面里**：
+   * 控制面每次 spawn 一个代（含 bootstrap）都重读它 —— 见 `gen-assembly.ts` 的 INV-A/B。
+   * 缺省/文件不存在 ⇒ 控制面最小集（无模型接入；控制面照样能启动、能换代）。
+   */
+  genAssembly?: string
   ttlMs: number
   readyTimeoutMs: number
   freezeTimeoutMs: number
@@ -157,6 +163,11 @@ export class Coordinator {
     return this.front.isLocked
   }
 
+  /** 下一次换代将使用的 slot（1 = bootstrap 代，换代从 2 起）——供 `?cmd=assembly` 预测下一代端口。 */
+  get nextSlot(): number {
+    return this.genCounter + 2
+  }
+
   /** 记录一次交接结果：落盘 handover-status.jsonl + 控制台可读横幅。 */
   private recordResult(r: HandoverResult): void {
     this.lastResult = r
@@ -243,8 +254,8 @@ export class Coordinator {
     this.front.setLocked(true)
     try {
     const cfg = this.cfg
-    // 覆盖 profile：允许 apply 指定 staging 代运行某个脑 profile（接入 three-brain/sandbox 代际）
-    const profile = profileOverride && profileOverride.trim() ? profileOverride.trim() : cfg.profile
+    // ★ 剖面从哪来（优先级）：`?profile=`（运维显式指令）> 代装配清单 `profile` > 控制剖面 `cfg.profile`。
+    // 清单那一档在下面 spawn 处解析（因为要按本代端口渲染 overlay），此处只保留 URL 指令。
     if (fast) {
       this.record('fast 模式：跳过 defer / verify-gate / 稳定观察窗（仍保留 probe + 启动健康检查 + 失败回滚）')
     }
@@ -303,10 +314,27 @@ export class Coordinator {
       querySqlitePath: join(genDir, 'query.sqlite'),
     })
     const token = randomUUID()
+    // ★★ 「代装配清单」在**此刻**读盘（spawn 那一刻），**不是**控制面 boot 那一刻：
+    //   这就是"改模型/key/provider/pool ⇒ 只需换代 ⇒ 不需要重启控制面"的落点。
+    //   清单坏 ⇒ 抛错逃出本方法（由 main 的 .catch 记录）——绝不在换代里静默降级（gen-assembly INV-C）。
+    //   baseEnv 只放"本次换代"额外要注入的（实验内核目录），清单 env 在 resolve 内部覆盖其上。
+    const spec = resolveGenSpawnSpec({
+      file: cfg.genAssembly,
+      genPort: port,
+      genDir,
+      defaultProfile: cfg.profile,
+      baseEnv: experimentKernelDir ? { DESIGN_CANVAS_KERNEL_DIR: experimentKernelDir } : {},
+    })
+    // `?profile=` 是运维显式指令，优先级最高；否则用清单声明的脑剖面；再否则控制剖面。
+    const effectiveProfile = profileOverride && profileOverride.trim() ? profileOverride.trim() : spec.profile
+    this.record(
+      'assembly: ' + spec.source + ' profile=' + effectiveProfile + ' poolPort=' + (spec.poolPort ?? 'none') +
+        ' patches=' + spec.extraPatches.length + ' envKeys=' + Object.keys(spec.envExtra).length,
+    )
     const spawned = spawnGen({
       nodeBin: cfg.nodeBin,
       dshBin: cfg.dshBin,
-      profile,
+      profile: effectiveProfile,
       port,
       adminPort,
       gen: genId,
@@ -314,11 +342,8 @@ export class Coordinator {
       mode: 'staging',
       overlayFile,
       genDir,
-      envExtra: {
-        ...cfg.envExtra,
-        // 自进化·实验脑：本次 staging 单独加载实验内核产物（P0-2），生产 gen 不受影响。
-        ...(experimentKernelDir ? { DESIGN_CANVAS_KERNEL_DIR: experimentKernelDir } : {}),
-      },
+      extraPatches: spec.extraPatches,
+      envExtra: spec.envExtra,
       inspectPort: cfg.inspectPortBase ? cfg.inspectPortBase + (port - cfg.portBase) : undefined,
     } satisfies SpawnOptions)
     const b: Cage = {

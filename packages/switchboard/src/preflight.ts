@@ -30,6 +30,7 @@ import { AdminClient } from './adminclient.js'
 import { spawnGen, type SpawnedGen } from './spawner.js'
 import { verifyBootHealth, lastBootSegment } from './boot-health.js'
 import { allocGenPort } from './coordinator.js'
+import { resolveGenSpawnSpec } from './gen-assembly.js'
 import { BUILD_STAMP } from './build-stamp.js'
 import type {
   CheckResult,
@@ -52,7 +53,13 @@ export interface PreflightConfig {
   workDir: string
   /** 请求未指定 profile 时的缺省（通常 = 控制面缺省 profile）。 */
   profile: string
-  /** 透传宿主环境（key 池等）。预演 profile 应当把 LLM 上游指向**死端口**，见 REPORT。 */
+  /**
+   * ★ 「代装配清单」路径。**预演的就是它**：预演代按"下一代将会被装成的样子"起，
+   * 于是"改装配前先验"验的是**真的候选装配**（同一份清单、同一个渲染器），
+   * 而不是一套预演专用的近似。清单缺省 ⇒ 控制面最小集。
+   */
+  genAssembly?: string
+  /** 透传宿主环境（**仅**清单之外的兜底项；key 池应当由清单的 envFiles 提供）。 */
   envExtra?: Record<string, string>
   /** 启动健康检查窗口（复用既有默认 6000）。 */
   bootHealthTimeoutMs?: number
@@ -106,7 +113,6 @@ export class PreflightRunner {
     const startedAt = Date.now()
     this.state.stage = 'rehearsing'
 
-    const profile = (req.profile || this.cfg.profile).trim()
     const slot = this.counter + 1
     this.counter += 1
     const port = allocGenPort(this.cfg.portBase, slot)
@@ -114,6 +120,17 @@ export class PreflightRunner {
     const adminPort = this.cfg.adminBase + slot
     const genDir = join(this.cfg.workDir, gen)
     mkdirSync(genDir, { recursive: true })
+
+    // ★ 预演 = 用**当前代装配清单**起一个代（同一份清单、同一个渲染器 ⇒ 预演与换代同形）。
+    //   与 coordinator 一样，读盘发生在此刻（不是控制面 boot）；清单坏 ⇒ 抛错，报告落 error，绝不当通过。
+    const spec = resolveGenSpawnSpec({
+      file: this.cfg.genAssembly,
+      genPort: port,
+      genDir,
+      defaultProfile: this.cfg.profile,
+      baseEnv: this.cfg.envExtra ?? {},
+    })
+    const profile = (req.profile || spec.profile).trim()
 
     const identity: RehearsalIdentity = { gen, port, adminPort, pid: 0, profile, genDir }
     let spawned: SpawnedGen | undefined
@@ -133,10 +150,13 @@ export class PreflightRunner {
         leaseToken: '',
         mode: 'staging',
         genDir,
-        ...(req.patches && req.patches.length > 0 ? { extraPatches: req.patches } : {}),
-        envExtra: this.cfg.envExtra,
+        ...(spec.extraPatches.length + (req.patches?.length ?? 0) > 0
+          ? { extraPatches: [...spec.extraPatches, ...(req.patches ?? [])] }
+          : {}),
+        envExtra: spec.envExtra,
       })
       identity.pid = spawned.pid
+      console.log(`[switchboard:preflight] ${gen} assembly=${spec.source} profile=${profile} poolPort=${spec.poolPort ?? 'none'}`)
 
       const client = new AdminClient(`http://127.0.0.1:${adminPort}`)
 

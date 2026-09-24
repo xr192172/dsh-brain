@@ -54,7 +54,7 @@ const stamp = readFileSync(join(outId, 'build-stamp.js'), 'utf8')
 const sha = createHash('sha256').update(stamp).digest('hex').slice(0, 16)
 console.log(`[build-flip] compiled -> out/${buildId}; lib -> out/${buildId}`)
 console.log(`[build-flip] build-stamp.js sha256[0:16] = ${sha}`)
-for (const f of ['preflight.js', 'inventory.js', 'preflight-contract.js', 'main.js']) {
+for (const f of ['preflight.js', 'inventory.js', 'preflight-contract.js', 'main.js', 'gen-assembly.js']) {
   const p = join(outId, f)
   const h = createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16)
   console.log(`[build-flip] ${f} sha256[0:16] = ${h}`)
