@@ -111,3 +111,66 @@ existsSync = false
   ⇒ **声明了却解析不到**，而**启动期没有明确报错**（boot.log 里没有对应 error）
   ⇒ **假绿同族**：以为装好了，其实那个 bundle 没加载。
 - ★ 待修（一行：重建正确链接）；**它在用户的个人目录下（`~/.dsh`），本文件作者没有擅自改动**。
+
+---
+
+## 6. ★★★ 接缝①：字段映射表（`skill` → `agent` 配置）—— **照实物写，不发明**
+
+用户问："我们的子 Agent 现在是配置驱动的吗？" ⇒ **先答系统侧**（实测，见 `docs/skill-as-agent-spec.md`）：
+
+| 问题 | 实测答案（规格里的**已定裁决**） |
+|---|---|
+| **配置驱动？提供什么工具** | ✅ 是。能力项 = 四个旋钮：**`toolFilter`（裁工具面）/ `persona` / `outputSchema` / `depthLimit`**。规格逐字："**spawn 版可以从出生就带窄脸：`toolFilter` 裁到所需子集 + 出生时把脸定死**" |
+| **同一 agent 能否既有分身又有不分身** | ✅ **是**。D10 逐字：**"spawn 与 fork 走同一条装配路径，只差一个 `seed`"** ⇒ 两个**接口**，不是两种 agent |
+| **能否叠加子 agent** | ✅ 能，**硬上限 `maxDepth = 3`**（**绝对深度、无递减**，depth 4 运行时被拒）；★ **不许混用 `provider-managed`**（会让深度失去单一权威）。关键性质："**层层都是同一张 preset 脸，深度增加不带来任何工具累积**" |
+| **子 agent 有多会话吗** | ✅ **各是独立 session + 独立 UUID，不会互相覆盖**；成员里有 `prepareContinuable` ⇒ **可继续**。★ 真并发雷只有一处：**"按 preset 各挂一份"的注册会重复**（D9） |
+| `outputSchema` | ★ 规格**倾向默认不用**（改固定小标题的文本回执）；切换依据 = 解析失败率 / 因回执约束返工 / 字段缺失率 |
+
+### 映射表（字段取自实物：`packages/skill-tree/src/index.ts` 的 `SkillNode`）
+
+★★ **决定性证据**（`:160-161` 逐字）：
+```ts
+  // ── ch22 §6：工具声明（有 Script/Tools ⇒ 可升格 sub agent）──
+  Tools: ToolDef[]
+```
+⇒ **代码里早就埋了"skill → sub agent"这个钩子** —— 用户的裁决不是新发明，是**把既有钩子接上**。
+
+| `SkillNode` 字段（实物） | → agent 配置 | 依据 |
+|---|---|---|
+| `Principle` / `Fix` | **`persona`**（方法论文本） | 两字段就是"原理 / 怎么修" |
+| **`Tools: ToolDef[]`** | **`toolFilter`**（工具面） | ★ 注释逐字"**有 Script/Tools ⇒ 可升格 sub agent**" |
+| `Script` / `ScriptLang` / `Archive` | 工具的**落地执行物**（python/shell/js/go） | 字段注释 |
+| `Triggers: string[]` | **路由依据**（何时用这个 agent） | 注释逐字"路由依据" |
+| `Extends` / `Requires` | **继承 / 组合**（"子继承父的 body+triggers+script"；`Requires` **一层深、不递归**） | 字段注释 |
+| `Score` / `UseCount` / `SuccessRate` / **`Level`** | ★★ **筛的判据**（"挑好的"的可执行定义） | `Level` 注释逐字：**`3=L3（score≥0.7 ∧ use_count≥10）`** |
+| `Status` / `AbsorbedBy` / `MergedFrom` / `isAbsorbed()` | **退役 / 吸收**（生命周期的终点，**已有实现**） | `isAbsorbed` 已在 `skill-tree` 里 |
+| `Source` / `SourceFile` / `SourceHash` / `ImportVersion` | **"从外面获取"** + 上游变更探测（`update_pending`） | 字段注释 |
+| `ValidationScore` / `LastValidated` / `RejectedAttempts` | **质量门的历史**（可作筛的输入） | 字段存在 |
+| `Brain` / `Parent` / `ID` | 归属脑 / 谱系 | 字段注释 |
+
+### ★ 映射表里**缺的两格**（这才是真正要补的）
+1. ~~`toolFilter` 有没有实物支撑~~ ✅ **查清了**：`ToolDef`（`skill-tree/src/index.ts:21`）**就是"工具声明"的完整形状**：
+   ```ts
+   Name        // 工具名（全局唯一，建议前缀如 scout_）
+   Description // 给 LLM 看的描述
+   Kind        // "python" | "shell" | "subprocess"
+   Entry       // 脚本入口（相对 skill 目录）
+   Fn          // 调用的函数名（python）或子命令（shell）
+   Schema      // JSON Schema（注册到 ToolRegistry）
+   ReadOnly    // true = 纯计算/查询，不修改文件系统（跳过权限审批）
+   ```
+   ⇒ **可直接落成 `toolFilter`**（`Schema` 注册进 ToolRegistry；`ReadOnly=true` 跳过审批）
+   ⇒ **"skill 升格成 agent"这条路在数据层是通的，不缺零件。**
+2. ★ **`outputSchema`** —— `SkillNode` 里**没有**对应字段（规格又倾向默认不用）⇒ 要么不加，要么只在需要时补。
+3. ★ **`depthLimit`** —— `SkillNode` 里**没有**；而系统侧有硬上限 3。
+   ⇒ **必须明确**：skill 升格出的 agent **允许自己再委派几层**（0 层 / 1 层 / 跟随全局上限），
+   ★ 且**不许混用 `provider-managed`**（否则深度失去单一权威）。
+
+### 接缝①的**下一步**（前两条已被本次查清）
+1. ~~读 `ToolDef` 的真实形状、确认能否直接落成 `toolFilter`~~ ⇒ ✅ **已完成，见上**；
+2. 定 **`Level` 的筛口径**是否直接复用（`score≥0.7 ∧ use_count≥10`），还是另立
+   （★ 别让"筛"和"能力库的判据阶梯"两套口径打架）；
+3. 定 **升格动作落在哪**（谁读 skill ⇒ 生成 agent 配置 ⇒ 交给哪个 provider：**`spawn` + `toolFilter`，不是 fork**）；
+4. 定 **退役的记账**：★ 实测 `SkillStatus` 有**四级**：`active / demoted / archived / absorbed`
+   （`demoted` = 降级，是被忽略的中间态）⇒ 与 `capability-registry` 的 `supersededBy` 对齐时**要处理降级**，
+   不能只对齐"退役/吸收"两态。
