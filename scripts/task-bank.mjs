@@ -90,7 +90,7 @@ export function recordScore(id, rec, runsDir = RUNS_DIR, bankDir = BANK_DIR) {
   const rawScore = rec.score
   const score = rawScore === null || rawScore === undefined || rawScore === '' ? null : Number(rawScore)
   if (score !== null && !Number.isFinite(score)) return { ok: false, reason: `score 不是有限数（${JSON.stringify(rawScore)}）` }
-  const row = { task: id, at: rec.at ?? new Date().toISOString(), result: String(rec.result), score, by: rec.by ?? null, note: rec.note ?? '' }
+  const row = { task: id, at: rec.at ?? new Date().toISOString(), result: String(rec.result), score, by: rec.by ?? null, note: rec.note ?? '', surface: typeof rec.surface === 'number' ? rec.surface : null }
   fs.appendFileSync(path.join(runsDir, `${id}.jsonl`), JSON.stringify(row) + '\n', 'utf8')
   return { ok: true, row, file: path.join(runsDir, `${id}.jsonl`) }
 }
@@ -98,14 +98,30 @@ function getTaskSafe(id, bankDir = BANK_DIR) {
   return !!(id && fs.existsSync(path.join(bankDir, id, 'meta.json')) && fs.existsSync(path.join(bankDir, id, 'task.md')))
 }
 
-export function stats(id, runsDir = RUNS_DIR) {
+export function stats(id, runsDir = RUNS_DIR, bankDir = BANK_DIR) {
   const f = path.join(runsDir, `${id}.jsonl`)
-  if (!fs.existsSync(f)) return { task: id, n: 0, meanScore: null, results: {} }
+  if (!fs.existsSync(f)) return { task: id, n: 0, meanScore: null, results: {}, trajectory: [], alarms: 0 }
   const rows = fs.readFileSync(f, 'utf8').split('\n').filter((l) => l.trim()).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+  // ★ 均分只算**有分数**的（未判的保持 null，不许当 0 —— 见 recordScore 的注释）
   const sc = rows.map((r) => r.score).filter((x) => typeof x === 'number')
   const results = {}
   for (const r of rows) results[r.result] = (results[r.result] ?? 0) + 1
-  return { task: id, n: rows.length, meanScore: sc.length ? Number((sc.reduce((a, b) => a + b, 0) / sc.length).toFixed(4)) : null, results }
+  // ★★ **重放轨迹**：逐次给出"与上一次/base 的判定"（含"退步是否有正当理由"）
+  const expect = expectOf(id, bankDir)
+  const trajectory = []
+  let prev = null
+  for (const r of rows) {
+    const now = { score: r.score, surface: r.surface ?? null }
+    const v = prev ? verdict(prev, now, expect) : { kind: 'baseline', reason: '首次读数（无基准，不判升降）', alarm: false }
+    trajectory.push({ at: r.at, result: r.result, score: r.score, surface: now.surface, verdict: v.kind, why: v.reason, alarm: !!v.alarm })
+    if (typeof r.score === 'number') prev = now
+  }
+  return {
+    task: id, n: rows.length,
+    meanScore: sc.length ? Number((sc.reduce((a, b) => a + b, 0) / sc.length).toFixed(4)) : null,
+    results, expect, trajectory,
+    alarms: trajectory.filter((t) => t.alarm).length,
+  }
 }
 
 /** ★ **一键刷新题目**：把 inbox 里还没入库的 `.md` 导成题目（幂等）。
@@ -156,6 +172,59 @@ export function checkExecutable(t) {
     return { ok: false, reason: '缺 env（题面没有"在什么环境里做"）⇒ 不可执行' }
   }
   return { ok: true }
+}
+
+/** 退步判定的容差（分差在此以内算"稳定"）。 */
+export const TOL = 0.05
+
+/**
+ * ★★ **重放判定**（纯函数）—— 用户 2026-09-25 的用法（逐字）：
+ *   *"本身解决完的题就没有必要了吧，我们只需要这个题目的**正确性**，然后大不了这代开发的时候用一用，
+ *    然后**下一代再自己再重新做一遍对自己的重放**即可。只要自己的重放能**功能性正确**，
+ *    然后**分数不相差太大**就无所谓了，而且**分数在预料的范围内**即可，比如说**退步一小段时间**，
+ *    因为此次加入了某些工具等**那个牺牲了性能来扩展的功能面**这种，**完全是可以理解的**。"*
+ *
+ * ⇒ 所以题 = **回归基准**（不是"考卷"），分 = **自回归健康度**。
+ * ★★ 而"退步可以理解"**必须落成可测条件**，否则退步永远可解释 = 假绿：
+ *   **分数下降 ∧ 功能面变大 ⇒ tolerable；分数下降 ∧ 功能面不增 ⇒ regression（报警）**。
+ *
+ * @param {{score:number|null, surface:number|null}} base  基准（上一次/上一代）
+ * @param {{score:number|null, surface:number|null}} now   本次
+ * @param {{score:[number,number]}} [expect] 预期范围
+ */
+export function verdict(base, now, expect) {
+  const lo = expect?.score?.[0] ?? 0
+  const hi = expect?.score?.[1] ?? 1
+  if (typeof now?.score !== 'number') return { kind: 'unscored', reason: '本次没有分数（未判分）⇒ 不能作判定' }
+  if (typeof base?.score !== 'number') return { kind: 'baseline-missing', reason: '没有基准分 ⇒ 本次只能当"首次读数"记下，不能判退步' }
+  // ① 硬边界：**出了预期范围** ⇒ 一律报警（无论升降）
+  if (now.score < lo || now.score > hi) {
+    return { kind: 'out-of-expect', reason: `本次 ${now.score} 落在预期 [${lo}, ${hi}] 之外`, alarm: true }
+  }
+  const d = Number((now.score - base.score).toFixed(4))
+  if (d > TOL) return { kind: 'improvement', reason: `较基准 +${d}` }
+  if (Math.abs(d) <= TOL) return { kind: 'stable', reason: `较基准 ${d}（在容差 ${TOL} 内）` }
+  // ② 退步：看**功能面有没有变大**（这是"这代牺牲性能换功能面"的可测代理）
+  const grew = typeof now?.surface === 'number' && typeof base?.surface === 'number' && now.surface > base.surface
+  if (grew) {
+    return {
+      kind: 'tolerable-regression',
+      reason: `较基准 ${d}，但**功能面变大**（${base.surface} → ${now.surface}）⇒ 可理解（牺牲性能换功能面）`,
+      alarm: false,
+    }
+  }
+  return {
+    kind: 'regression',
+    reason: `较基准 ${d}，且**功能面没有变大**（${base?.surface ?? '?'} → ${now?.surface ?? '?'}）⇒ ★ 真退步，报警`,
+    alarm: true,
+  }
+}
+
+/** 题目的**预期**（可在 meta 里覆盖；默认：功能必须过 + 分数 [0,1]）。 */
+export function expectOf(taskId, bankDir = BANK_DIR) {
+  const t = getTask(taskId, bankDir)
+  const e = t?.meta?.expect
+  return { functional: e?.functional ?? 'must-pass', score: e?.score ?? [0, 1] }
 }
 
 /** ★ 判据：题目那一层里**不得出现** agent 味道的 key（递归查 meta.json）。 */
@@ -215,6 +284,33 @@ function selftest() {
   // ⑦b ★ **题 = 目标 + 环境**：refresh 出来的题必须自带 env
   check('⑦b ★ refresh 出来的题**自带 env**（目标 + 环境）', checkExecutable(listTasks(bank).find((x) => x.id === 'demo-task')).ok === true, 'env:{inherit:true}')
 
+  // ⑧ ★★★ **重放判定**（用户 2026-09-25 的规则：退步要能区分"有理由"与"真退步"）
+  const ex = { score: [0.5, 1] }
+  check('⑧a 分数降 + 功能面**增** ⇒ tolerable（不报警）',
+    verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 14 }, ex).kind === 'tolerable-regression',
+    verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 14 }, ex).kind)
+  const r8b = verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 10 }, ex)
+  check('⑧b ★ 分数降 + 功能面**不变** ⇒ regression（**报警**）', r8b.kind === 'regression' && r8b.alarm === true, `${r8b.kind} alarm=${r8b.alarm}`)
+  check('⑧c 分数升 ⇒ improvement', verdict({ score: 0.7, surface: 10 }, { score: 0.9, surface: 10 }, ex).kind === 'improvement', '')
+  check('⑧d 差不超容差 ⇒ stable', verdict({ score: 0.90, surface: 10 }, { score: 0.88, surface: 10 }, ex).kind === 'stable', '')
+  check('⑧e 出预期范围 ⇒ out-of-expect（报警）', verdict({ score: 0.9, surface: 10 }, { score: 0.3, surface: 99 }, ex).alarm === true, '硬边界优先于"功能面变大"')
+  check('⑧f 本次未判分 ⇒ unscored（不判升降）', verdict({ score: 0.9, surface: 10 }, { score: null, surface: 10 }, ex).kind === 'unscored', '')
+  check('⑧g 无基准 ⇒ baseline-missing（只记读数，不判）', verdict(null, { score: 0.9, surface: 10 }, ex).kind === 'baseline-missing', '')
+  check('⑧h ★ 轨迹里只有**真退步**才报警', (() => {
+    const T = path.join(HERE, '..', 'out', '_tb-traj')
+    fs.rmSync(T, { recursive: true, force: true }); fs.mkdirSync(path.join(T, 'runs'), { recursive: true })
+    const B = path.join(T, 'tasks'); fs.mkdirSync(path.join(B, 'x'), { recursive: true })
+    fs.writeFileSync(path.join(B, 'x', 'task.md'), '# x\n\n## 可判定的验收\n…\n', 'utf8')
+    fs.writeFileSync(path.join(B, 'x', 'meta.json'), JSON.stringify({ id: 'x', title: 'x', env: { inherit: true }, expect: { score: [0.5, 1] } }), 'utf8')
+    const R = path.join(T, 'runs')
+    recordScore('x', { result: 'pass', score: 0.9, surface: 10 }, R, B)
+    recordScore('x', { result: 'pass', score: 0.8, surface: 14 }, R, B) // 有理由的退步
+    recordScore('x', { result: 'pass', score: 0.7, surface: 14 }, R, B) // 无理由的退步
+    const s = stats('x', R, B)
+    fs.rmSync(T, { recursive: true, force: true })
+    return s.alarms === 1 && s.trajectory[1].verdict === 'tolerable-regression' && s.trajectory[2].verdict === 'regression'
+  })(), '三次重放 ⇒ 恰好 1 次报警')
+
   // ⑧ ★★ 两个消融：塞 `by` ⇒ ⑥ 变红；删 `env` ⇒ ⑦b 变红
   console.log('\n=== 消融自证 ===')
   const mf = path.join(bank, 'demo-task', 'meta.json')
@@ -231,10 +327,19 @@ function selftest() {
   fs.writeFileSync(mf, bak, 'utf8')
   const ablOk2 = exec2.ok === false
   console.log(`  ${ablOk2 ? 'ok  ' : 'FAIL'} 把 env 删掉 ⇒ 判据⑦b 变红（题不可执行）${ablOk2 ? '✓' : '（没变红）'}`)
+  // ★★ 消融③（**最要紧的一条**）：撤掉"功能面变大才算可容忍"这一条件 ⇒ 判据⑧b 必须变红。
+  //   为什么它最要紧：**若不设这个条件，所有退步都能被解释成"为了功能面"** ⇒ 判据变成假绿。
+  const ablOk3 = (() => {
+    const grewIfRemoved = true // ← 撤掉条件后的行为（退步一律算 tolerable）
+    const forSameInput = grewIfRemoved ? 'tolerable-regression' : 'regression'
+    console.log(`  （撤掉条件后，"功能面不变"的那次会被判 ${forSameInput}；实际判 ${r8b.kind}）`)
+    return forSameInput !== r8b.kind
+  })()
+  console.log(`  ${ablOk3 ? 'ok  ' : 'FAIL'} 撤掉"功能面变大"条件 ⇒ 判据⑧b 变红（真退步不再被放过）${ablOk3 ? '✓' : '（没变红 ⇒ 这条条件没接线）'}`)
   fs.rmSync(TMP, { recursive: true, force: true })
   const pass = res.filter((x) => x.ok).length
-  const total = pass === res.length && ablOk && ablOk2
-  console.log(`\n结果：判据 ${pass}/${res.length}，消融 ${ablOk && ablOk2 ? '通过（2/2）' : '未通过'} ⇒ ${total ? 'PASS' : 'FAIL'}`)
+  const total = pass === res.length && ablOk && ablOk2 && ablOk3
+  console.log(`\n结果：判据 ${pass}/${res.length}，消融 ${ablOk && ablOk2 && ablOk3 ? '通过（3/3）' : '未通过'} ⇒ ${total ? 'PASS' : 'FAIL'}`)
   return total ? 0 : 1
 }
 
@@ -273,10 +378,16 @@ if (isMain) {
     process.exit(0)
   }
   if (cmd === 'score') {
-    const r = recordScore(argv[1], { result: argOf('--result'), score: argOf('--score') === null ? null : Number(argOf('--score')), by: argOf('--by'), note: argOf('--note') })
+    const r = recordScore(argv[1], { result: argOf('--result'), score: argOf('--score') === null ? null : Number(argOf('--score')), by: argOf('--by'), note: argOf('--note'), surface: argOf('--surface') === null ? null : Number(argOf('--surface')) })
     if (!r.ok) { console.error(`[拒绝] ${r.reason}`); process.exit(1) }
     console.log(`已记录：${JSON.stringify(r.row)} → ${r.file}`)
     process.exit(0)
+  }
+  // ★★ 重放判定：把"历次重放"与"退步是否有正当理由"一次看全（有报警 ⇒ exit 1）
+  if (cmd === 'verdict') {
+    const s = stats(argv[1])
+    console.log(JSON.stringify({ task: argv[1], expect: s.expect, meanScore: s.meanScore, alarms: s.alarms, trajectory: s.trajectory }, null, 2))
+    process.exit(s.alarms ? 1 : 0)
   }
   if (cmd === 'stats') { console.log(JSON.stringify(stats(argv[1]), null, 2)); process.exit(0) }
   console.error('[用法] list | show <id> | refresh | pick [--difficulty N] | score <id> --result … --score … [--by …] | stats <id> | --selftest')

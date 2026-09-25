@@ -35,6 +35,22 @@ const WT = path.resolve(HERE, '..')
 const NODE = process.execPath
 
 /**
+ * ★★ **功能面**的读数（用户 2026-09-25 的规则要用它）：
+ *   *"退步一小段时间，因为此次加入了某些工具等**那个牺牲了性能来扩展的功能面**这种，完全是可以理解的"*
+ * ⇒ 可测代理：该臂 DSH_HOME 下**能力库的条目数**（能力库就是"这一代多了什么能力"的账本）。
+ * ★ 读不到就返回 **null**（不是 0 ——"看不到 ≠ 没有"）。
+ */
+export function featureSurface(dshHome) {
+  const f = path.join(dshHome, 'capabilities', 'registry.json')
+  if (!fs.existsSync(f)) return null
+  try {
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'))
+    const c = j?.capabilities
+    return Array.isArray(c) ? c.length : (c && typeof c === 'object' ? Object.keys(c).length : null)
+  } catch { return null }
+}
+
+/**
  * ★ 纯函数：由【题 + 参数】算出"这一场实验的规格"。**不产生副作用**（便于判据）。
  * @returns {{ok:true, spec}|{ok:false, reason}}
  */
