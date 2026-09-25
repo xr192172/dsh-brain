@@ -138,6 +138,16 @@
 不变量 I1–I4 / 裁决 D1–D10 / 计划 S0–S7 与验收门 / 未闭合 O1–O31 / 反模式清单）。
 它是**结论固化**；`docs/skill-as-agent-feasibility.md` 是讨论过程（只在追溯"为什么这么定"时读）。
 
+★★ **训练场 + Agent 工厂（2026-09-25 用户裁决）：`docs/training-ground-and-skill-sieve-2026-09-25.md`**
+- ★ **「臂」的语义改为「训练场」** = ① 隔离的数据（`DSH_HOME`）② **记录整条流程的消耗+结果** ③ **锚定参与者是谁**。
+  ⇒ **取消了"臂=自变量容器 ⇒ 每臂要有不同 profile"的假设** ⇒ **没有"profile 上要变什么"这回事**。
+  ⇒ 由此 `arm-isolation` 的 `self` = **训练场身份**（`--arm`/台账注入），**不需要 profile 差异，现在可做**。
+- ★ **`node_modules` 共享不是隔离问题**（实测：那层是指向仓库 `packages/*` 的符号链接 ⇒ 共享的是**同一份代码**；
+  要隔离的**状态**在 `DSH_HOME`，那层是独立的）⇒ **"不是完全隔离"那条已撤销**。
+- ★★ **O30 裁决**：`skill` = **配方/工艺清单**（`skill-tree` 数据层：类型+生命周期+Absorb 账本，**不含执行器**）；
+  **它是【筛网】** ⇒ 链路 = **外部/自生长 skill → 筛 → Agent 工厂（按配置实例化）→ 新子 agent → skill 退役**。
+  **不是二选一，是两段**。待定义的是**接缝**（谁读字段/谁判"好"/谁实例化/退役怎么记）。
+
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
   = 能力库 **P2 数据层 + P3 注册门**。核心论断（`:7` 逐字）：**「sub agent 就是它的能力；这比自己给自己改好得多。」**
