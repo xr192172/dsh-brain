@@ -79,6 +79,67 @@ function r(tier, key, why, missing) {
   return { tier, key, why, missing }
 }
 
+/**
+ * ★★ 融合候选（纯函数，成对）：找出"**同功能**且**都有 `Script`**"的节点对，
+ * 并给出"**谁更优**"的**排序依据**（不是"自动择优"）。
+ *
+ * 依据：`docs/training-ground-and-skill-sieve-2026-09-25.md` §10.4。
+ * 用户口径：*"脚本本身也是可更改的，如果有相同功能的脚本的更优实现——更合理、更科学、更兼容的实现，
+ * 也可以把两个脚本融合，或者说就是把它的设计融合在一起。"*
+ *
+ * ★ **"同功能"的口径是【我提的】，不是用户说的** ⇒ 做成 `minTriggerOverlap` 可调：
+ *   默认 = **`Triggers` 交叠 ≥ 1** **或** 同一个 `Parent`。
+ *   （用 `Triggers` 是因为它是现成的机器可判字段，注释逐字"路由依据"= 什么时候用它。）
+ * ★★ **只输出候选 + 依据，绝不自动融合**（融合是**设计决定**，要人判）。
+ *
+ * @param {object[]} nodes
+ * @param {{minTriggerOverlap?:number, seenHashes?:Set<string>|string[]}} [opts]
+ * @returns {{a:string,b:string,why:string,better:{id:string,by:string}|null,scores:object}[]}
+ */
+export function suggestMerges(nodes, opts = {}) {
+  const minOverlap = Number(opts.minTriggerOverlap ?? 1)
+  // 只对"还在用、且有脚本"的节点提候选（被跳过的节点按纪律不再碰）
+  const usable = (nodes ?? []).filter((n) => hasText(n?.Script) && classifySkill(n, opts).tier !== 'skip')
+  const out = []
+  for (let i = 0; i < usable.length; i++) {
+    for (let j = i + 1; j < usable.length; j++) {
+      const a = usable[i]
+      const b = usable[j]
+      const ta = new Set((a.Triggers ?? []).map((x) => String(x).trim().toLowerCase()).filter(Boolean))
+      const tb = new Set((b.Triggers ?? []).map((x) => String(x).trim().toLowerCase()).filter(Boolean))
+      const overlap = [...ta].filter((x) => tb.has(x))
+      const sameParent = hasText(a.Parent) && String(a.Parent) === String(b.Parent)
+      if (overlap.length < minOverlap && !sameParent) continue
+      out.push({
+        a: a.ID ?? '(无ID)',
+        b: b.ID ?? '(无ID)',
+        why: sameParent ? `同一个 Parent（${a.Parent}）` : `Triggers 交叠 ${overlap.length}：${overlap.join('、')}`,
+        better: pickBetter(a, b),
+        scores: {
+          [a.ID ?? 'a']: { SuccessRate: n(a.SuccessRate), Score: n(a.Score), UseCount: n(a.UseCount) },
+          [b.ID ?? 'b']: { SuccessRate: n(b.SuccessRate), Score: n(b.Score), UseCount: n(b.UseCount) },
+        },
+      })
+    }
+  }
+  return out
+}
+
+/** 谁更优：先 `SuccessRate`，再 `Score`，再 `UseCount` —— 全是**现成战绩字段**。★ 只是排序依据。 */
+function pickBetter(a, b) {
+  const rows = [
+    ['SuccessRate', Number(a.SuccessRate ?? 0), Number(b.SuccessRate ?? 0)],
+    ['Score', Number(a.Score ?? 0), Number(b.Score ?? 0)],
+    ['UseCount', Number(a.UseCount ?? 0), Number(b.UseCount ?? 0)],
+  ]
+  for (const [by, va, vb] of rows) {
+    if (va === vb) continue
+    return { id: va > vb ? (a.ID ?? 'a') : (b.ID ?? 'b'), by }
+  }
+  return null // 三项全平 ⇒ 不裁，"谁更优"交给人
+}
+const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  以下：IO / CLI / 自测
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +186,31 @@ function selftest() {
     if (ok) pass++
     console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name} ⇒ ${TIER_LABEL[got.tier]}（${got.key}）${ok ? '' : ` ★ 期望 ${TIER_LABEL[want]}`}`)
   }
+  // ── 融合候选自测（§10.4）───────────────────────────────────────────────────
+  console.log('\n=== 融合候选自测 ===')
+  const mk = (id, triggers, extra = {}) => ({
+    ID: id, Principle: 'g', Script: 'x', Tools: [{}], Triggers: triggers,
+    SuccessRate: 0.5, Score: 0.5, UseCount: 0, ...extra,
+  })
+  const mergeCases = [
+    ['Triggers 交叠 1 ⇒ 出候选', [mk('m1', ['refactor']), mk('m2', ['refactor'])], 1],
+    ['交叠 0 且不同 Parent ⇒ 无候选', [mk('m3', ['a']), mk('m4', ['b'], { Parent: 'p2' })], 0],
+    ['同 Parent（triggers 不交叠）⇒ 出候选', [mk('m5', ['a'], { Parent: 'P' }), mk('m6', ['b'], { Parent: 'P' })], 1],
+    ['被跳过的节点不参与（用过了）', [mk('m7', ['x'], { UseCount: 1 }), mk('m8', ['x'])], 0],
+    ['没有 Script 的节点不参与', [{ ID: 'm9', Principle: 'g', Triggers: ['y'] }, mk('m10', ['y'])], 0],
+  ]
+  let mpass = 0
+  for (const [name, nodes, want] of mergeCases) {
+    const got = suggestMerges(nodes, { seenHashes: new Set() }).length
+    const ok = got === want
+    if (ok) mpass++
+    console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name} ⇒ ${got} 对${ok ? '' : ` ★ 期望 ${want}`}`)
+  }
+  const pair = suggestMerges([mk('b1', ['t'], { SuccessRate: 0.9 }), mk('b2', ['t'], { SuccessRate: 0.1 })], {})
+  const bok = pair[0]?.better?.id === 'b1' && pair[0]?.better?.by === 'SuccessRate'
+  if (bok) mpass++
+  console.log(`  ${bok ? 'ok  ' : 'FAIL'} 谁更优 ⇒ ${pair[0]?.better ? `${pair[0].better.id}（按 ${pair[0].better.by}）` : '(未裁)'}${bok ? '' : ' ★ 期望 b1/按 SuccessRate'}`)
+
   // ★ 消融自证：撤掉"内嵌片段也要有"这一格 ⇒ "二等（缺片段）"那条必须变红
   console.log('\n=== 消融自证 ===')
   const src = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8')
@@ -141,25 +227,43 @@ function selftest() {
   const ablOk = /FAIL 二等：缺内嵌片段/.test(out) // 消融后那条**必须**变红
   console.log(`  ${ablOk ? 'ok  ' : 'FAIL'} 撤掉"内嵌片段"判定 ⇒ "二等：缺内嵌片段"变红 ${ablOk ? '✓' : '（没变红 ⇒ 那条判据没接线）'}`)
   fs.unlinkSync(tmp)
-  const total = pass === cases.length && ablOk
-  console.log(`\n结果：自测 ${pass}/${cases.length}，消融 ${ablOk ? '通过' : '未通过'} ⇒ ${total ? 'PASS' : 'FAIL'}`)
+  // ★ 消融②：撤掉"同功能"那条过滤 ⇒ "交叠 0 ⇒ 0 对" 必须变红
+  const ANCHOR2 = 'if (overlap.length < minOverlap && !sameParent) continue'
+  const ABLATED2 = 'if (false) continue // ABLATED'
+  let abl2Ok = false
+  if (!src.includes(ANCHOR2)) {
+    console.log('  ★ 消融②锚点失配 —— 必须重写')
+  } else {
+    fs.writeFileSync(tmp, src.replace(ANCHOR2, ABLATED2), 'utf8')
+    const r2 = spawnSync(process.execPath, [tmp, '--selftest-only'], { encoding: 'utf8', timeout: 60000 })
+    const o2 = (r2.stdout ?? '') + (r2.stderr ?? '')
+    abl2Ok = /FAIL 融合：交叠0/.test(o2)
+    console.log(`  ${abl2Ok ? 'ok  ' : 'FAIL'} 撤掉"同功能"过滤 ⇒ "交叠0 ⇒ 0 对"变红 ${abl2Ok ? '✓' : '（没变红 ⇒ 那条判据没接线）'}`)
+    fs.unlinkSync(tmp)
+  }
+  const total = pass === cases.length && mpass === mergeCases.length + 1 && ablOk && abl2Ok
+  console.log(`\n结果：分级 ${pass}/${cases.length}，融合 ${mpass}/${mergeCases.length + 1}，消融 ${ablOk && abl2Ok ? '通过' : '未通过'} ⇒ ${total ? 'PASS' : 'FAIL'}`)
   return total ? 0 : 1
 }
 
 const argv = process.argv.slice(2)
 if (argv.includes('--selftest-only')) {
-  // 消融版自调用：只跑 10 例，不再递归消融
+  // 消融版自调用：只跑最小集（分级 2 例 + 融合 1 例），不再递归消融。
+  // ★ 两个消融各自断言自己那一行 FAIL，所以这里要把两行都打出来。
   const cases = [
     ['一等：三样齐', { ID: 'a', Principle: 'g', Script: 'x', Tools: [{}] }, 'first'],
     ['二等：缺内嵌片段', { ID: 'b', Principle: 'g', Script: 'x', Tools: [] }, 'second'],
   ]
-  let bad = 0
   for (const [nm, node, want] of cases) {
     const got = classifySkill(node).tier
-    if (got !== want) { bad++; console.log(`  FAIL ${nm}（得 ${got}，期望 ${want}）`) }
+    if (got !== want) console.log(`  FAIL ${nm}（得 ${got}，期望 ${want}）`)
     else console.log(`  ok  ${nm}`)
   }
-  process.exit(bad ? 0 : 0) // 消融版**故意**跑出 FAIL 供父进程断言
+  const mk2 = (id, tr, ex = {}) => ({ ID: id, Principle: 'g', Script: 'x', Tools: [{}], Triggers: tr, SuccessRate: 0.5, Score: 0.5, UseCount: 0, ...ex })
+  const pairs = suggestMerges([mk2('m3', ['a']), mk2('m4', ['b'], { Parent: 'p2' })], { seenHashes: new Set() }).length
+  if (pairs !== 0) console.log(`  FAIL 融合：交叠0 应为0对（得 ${pairs}）`)
+  else console.log('  ok  融合：交叠0 ⇒ 0 对')
+  process.exit(0) // 消融版**故意**跑出 FAIL 供父进程断言；退出码本身不表态
 }
 if (argv.includes('--selftest') || argv.length === 0) process.exit(selftest())
 
@@ -173,8 +277,16 @@ const seen = seenFile && fs.existsSync(seenFile) ? new Set(JSON.parse(fs.readFil
 const nodes = loadNodes(inFile)
 const results = nodes.map((n) => ({ id: n.ID ?? '(无ID)', ...classifySkill(n, { seenHashes: seen }) }))
 
+// ★ 融合候选（§10.4）：**只在 `--suggest-merge` 时算**（成对比较是 O(n²)，大集别默认跑）
+const merges = argv.includes('--suggest-merge')
+  ? suggestMerges(nodes, {
+      seenHashes: seen,
+      minTriggerOverlap: Number(argOf(argv, '--min-trigger-overlap') ?? 1),
+    })
+  : null
+
 if (argv.includes('--json')) {
-  console.log(JSON.stringify(results, null, 2))
+  console.log(JSON.stringify(merges ? { skills: results, mergeCandidates: merges } : results, null, 2))
 } else {
   const byTier = {}
   for (const x of results) (byTier[x.tier] ??= []).push(x)
@@ -184,6 +296,16 @@ if (argv.includes('--json')) {
     console.log(`  ${TIER_LABEL[t]}：${xs.length}`)
     for (const x of xs.slice(0, 8)) console.log(`     · ${x.id} —— ${x.why}`)
     if (xs.length > 8) console.log(`     …（还有 ${xs.length - 8} 个）`)
+  }
+  if (merges) {
+    console.log(`\n融合候选（"同功能"口径 = Triggers 交叠 ≥ ${argOf(argv, '--min-trigger-overlap') ?? 1} 或同 Parent；` +
+      `★ **这是我提的口径**，可调）：${merges.length} 对`)
+    for (const m of merges.slice(0, 12)) {
+      const b = m.better ? `更优：${m.better.id}（按 ${m.better.by}）` : '三项全平 ⇒ 不裁，交给人'
+      console.log(`   · ${m.a} ⟷ ${m.b} —— ${m.why} ⇒ ${b}`)
+    }
+    if (merges.length > 12) console.log(`   …（还有 ${merges.length - 12} 对）`)
+    console.log('   ★★ 这只是**候选**：融合是**设计决定**（且融合后必须通过**原先两者**的全部用例，见 §10.3）。')
   }
 }
 const emit = argOf(argv, '--emit-seen')
