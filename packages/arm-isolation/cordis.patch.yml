@@ -1,0 +1,9 @@
+# arm-isolation bundle patch
+# profile 合成顺序：bundles -> cordis.patch.yml -> --patch overlays
+- insert:
+    - id: arm-isolation
+      name: '@dsh-brain/arm-isolation'
+      config:
+        self: ''
+        arms: {}
+        extraDeny: []

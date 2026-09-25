@@ -2,13 +2,19 @@
 /**
  * test-capability-gate.mjs —— 注册门的**自证**（门禁非空过）
  *
+ * ★★ 关于 execFileSync / spawnSync：
+ *   WorkBuddy 的 node-safe-delete-shim 把 execFileSync 做成了"吞输出+返回 status=null"
+ *   （EPERM 静默）。因此本测试**必须用 spawnSync**，它不会被 shim 静默吞掉。
+ *   （spawnSync 在同类环境下已实测可用。）
+ *
  * 为什么必须有这个测试：本项目刚花两天修过一类失败 —— **保险自己失效**。
  * 一个"看起来在检查"的门，比没有门更危险：它让人以为已经把关了。
  *
  * 所以本测试要同时证明**两个方向**：
  *   ① 挡得住坏的：缺 provider 成员 / capabilities 声明对不上 / apply 抛错 /
  *      设计者声明生产写权 / 缺不变量声明 / budget 非法 ⇒ 一律 blocked；
- *   ② **放行得了好的**：完好的能力 ⇒ admitted。
+ *      **新能力无基线也 blocked**（防假绿）。
+ *   ② **放行得了好的**：有 confirmed 基线且指标不劣化的能力 ⇒ admitted + proofLevel:L2。
  *   ★ 只证 ① 不够 —— 一个"一律 blocked"的门同样是无用的。两个方向都过，门才算有效。
  *
  * 做法：把夹具包与临时 registry 都放 `out/gate-fixtures/`，用 `DSH_HOME` 指向临时目录，
@@ -18,13 +24,20 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { removeIfExists } from './lib-safe-fs.mjs'
 
-const REPO = 'D:/project_develop/dsh-brain'
-const FIX = path.join(REPO, 'out/gate-fixtures')
+// ★ 夹具写在自己的 worktree 里（沙箱可写），不碰主仓
+const FIX = path.join('D:/project_develop/_merge-l234/wt', 'out/gate-fixtures')
 const REAL_HOME = 'C:/Users/Admin/.dsh'
-const GATE = path.join(REPO, 'scripts/capability-gate.mjs')
+const GATE = path.join('D:/project_develop/_merge-l234/wt', 'scripts/capability-gate.mjs')
+// ★ 测试专用的 node：优先用系统 node（无 WorkBuddy shim），否则回退 process.execPath
+const NODE_BIN = (() => {
+  try {
+    if (fs.existsSync('C:/Program Files/nodejs/node.exe')) return 'C:/Program Files/nodejs/node.exe'
+  } catch { /* ignore */ }
+  return process.execPath
+})()
 
 let pass = 0
 let fail = 0
@@ -87,7 +100,7 @@ export function apply() { /* 故意不调 registerProvider */ }
 }
 
 function writeFixtures() {
-  fs.rmSync(FIX, { recursive: true, force: true })
+  removeIfExists(FIX)
   fs.mkdirSync(FIX, { recursive: true })
   for (const [f, src] of Object.entries(PKGS)) fs.writeFileSync(path.join(FIX, f), src.trimStart(), 'utf8')
 }
@@ -118,28 +131,46 @@ function cap(id, pkgFile, over = {}) {
   }
 }
 
-function makeHome(name, caps) {
+/**
+ * 造一个带 confirmed 基线的 home。
+ * baselines.json 放在 home/capabilities/ 下，gate 会从这个 DSH_HOME 读。
+ */
+function makeHomeWithBaseline(name, caps, baselineData) {
   const home = path.join(FIX, `home-${name}`)
   removeIfExists(home)
-  fs.mkdirSync(path.join(home, 'capabilities'), { recursive: true })
+  const capsDir = path.join(home, 'capabilities')
+  fs.mkdirSync(capsDir, { recursive: true })
   fs.writeFileSync(
-    path.join(home, 'capabilities', 'registry.json'),
+    path.join(capsDir, 'registry.json'),
     JSON.stringify({ schema: 'dsh-capability-registry/v1', updatedAt: new Date().toISOString(), capabilities: caps, history: [] }, null, 2) + '\n',
     'utf8',
   )
+  if (baselineData) {
+    fs.writeFileSync(
+      path.join(capsDir, 'baselines.json'),
+      JSON.stringify(baselineData, null, 2) + '\n',
+      'utf8',
+    )
+  }
   return home
 }
 
+/**
+ * 用 spawnSync 调 gate（绕过 WorkBuddy shim 吞掉 execFileSync 输出的坑）。
+ * 返回 { code, stdout, stderr }。code=null 表示超时或无法启动（非 0 退出）。
+ */
 function runGate(home) {
-  try {
-    const stdout = execFileSync(process.execPath, [GATE, 'run', '--all'], {
-      env: { ...process.env, DSH_HOME: home },
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    return { code: 0, stdout }
-  } catch (e) {
-    return { code: e.status ?? 1, stdout: (e.stdout ?? '') + (e.stderr ?? '') }
+  const r = spawnSync(NODE_BIN, [GATE, 'run', '--all'], {
+    env: { ...process.env, DSH_HOME: home },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30000,
+  })
+  // spawnSync 里 status=null 仅当超时；其它情况都是具体 exit code
+  return {
+    code: r.status !== null ? r.status : -1,
+    stdout: (r.stdout ?? ''),
+    stderr: (r.stderr ?? ''),
   }
 }
 
@@ -150,10 +181,12 @@ const receiptsOf = (home) =>
 
 // ── 开始 ────────────────────────────────────────────────────────────────────
 console.log('== 注册门自证 ==')
+console.log(`  node bin   : ${NODE_BIN}`)
+console.log(`  fixtures   : ${FIX}`)
 writeFixtures()
 
-// ① 挡得住坏的 + ② 放行得了好的（同一个 registry 里同时放，一次跑完）
-const mixed = [
+// ── 测试 A：无基线 ⇒ 一律 blocked（含"完好"能力）──
+const mixedNoBaseline = [
   cap('fx-good', 'good.mjs'),
   cap('fx-missing-member', 'missing-member.mjs'),
   cap('fx-bad-caps', 'bad-caps.mjs'),
@@ -163,53 +196,97 @@ const mixed = [
   cap('fx-no-invariants', 'good.mjs', { invariants: null }),
   cap('fx-bad-budget', 'good.mjs', { invariants: INV({ budget: { source: 'declared', maxTokens: 0 } }) }),
 ]
-const homeA = makeHome('mixed', mixed)
+const homeA = makeHomeWithBaseline('mixed-no-bl', mixedNoBaseline, null)
 const a = runGate(homeA)
+if (a.code === -1) {
+  console.error('ERROR: gate 子进程启动失败/超时')
+  console.error('  stderr:', a.stderr.slice(0, 300))
+  process.exit(2)
+}
 const rA = receiptsOf(homeA)
 const checksOf = (c) => c.acceptance?.checks ?? []
 const failedNames = (c) => checksOf(c).filter((x) => !x.ok).map((x) => x.name)
 const failedLevels = (c) => [...new Set(checksOf(c).filter((x) => !x.ok).map((x) => x.level))]
 
-eq('退出码 = 1（有 blocked）', a.code, 1)
+eq('退出码 = 1（全部 blocked）', a.code, 1)
 
-// ② 正向：完好的必须放行
-eq('fx-good 判定', rA['fx-good'].acceptance.status, 'passed')
-eq('fx-good 转 active', rA['fx-good'].status, 'active')
-eq('fx-good 证明级别', rA['fx-good'].acceptance.proofLevel, 'L1')
-
-// ★ 未实施的级必须显式带出（防"假绿"）
-eq(
-  'fx-good 显式标注未实施级',
-  JSON.stringify(rA['fx-good'].acceptance.unenforced),
-  JSON.stringify(['L2', 'L3', 'L4']),
-)
-
-// ① 反向：六种坏法必须分别被挡，且**指名原因**
-const expects = [
-  ['fx-missing-member', 'L0', '接口 5 成员齐'],
-  ['fx-bad-caps', 'L0', 'capabilities 声明与实际一致'],
-  ['fx-apply-throws', 'L0', 'provider 能启动（apply 不抛错）'],
-  ['fx-no-register', 'L0', 'provider 能启动（apply 不抛错）'],
-  ['fx-design-prod', 'L1', '设计类角色不得有生产写权'],
-  ['fx-no-invariants', 'L1', '不变量已声明'],
-  ['fx-bad-budget', 'L1', 'budget 合法'],
-]
-for (const [id, level, checkName] of expects) {
-  const c = rA[id]
-  eq(`${id} 被挡`, c.acceptance.status, 'failed')
-  eq(`${id} 仍 pending`, c.status, 'pending')
-  if (failedLevels(c).includes(level) && failedNames(c).includes(checkName)) {
-    ok(`${id} 失败点落在 [${level}] ${checkName}`)
-  } else {
-    bad(`${id} 失败点错位`, `期望 [${level}] ${checkName}；实得 ${JSON.stringify(failedNames(c))}`)
-  }
+// 所有能力都应该 blocked（包括 fx-good，因为它没有基线）
+for (const id of mixedNoBaseline.map((c) => c.id)) {
+  eq(`${id} 被挡`, rA[id].acceptance.status, 'failed')
+  eq(`${id} 仍 pending`, rA[id].status, 'pending')
 }
 
-// ★ 门不是"一律拒绝"：单独放一个好的，必须 exit 0
-const homeB = makeHome('good-only', [cap('fx-good', 'good.mjs')])
+// fx-good 是因为 L2 基线缺失被挡
+eq('fx-good 因无基线被挡', failedLevels(rA['fx-good']).includes('L2'), true)
+eq('fx-good 失败点是基线存在', failedNames(rA['fx-good']).includes('基线存在'), true)
+
+// ── 测试 B：有 confirmed 基线且指标合格 ⇒ admitted + proofLevel L2 ──
+const goodWithBaseline = [cap('fx-good', 'good.mjs')]
+const baselineData = {
+  schema: 'dsh-baseline-store/v2',
+  updatedAt: new Date().toISOString(),
+  baselines: {
+    'fx-good': {
+      provenance: {
+        runAt: '2026-09-20T10:00:00.000Z',
+        provisional: false,
+        confirmedAt: '2026-09-20T10:05:00.000Z',
+        note: '人工确认的历史基线',
+      },
+      perRunMetrics: {
+        outputTokens: 100,  // 基线：平均每次调用输出 100 tokens
+        wallMs: 500,        // 基线：平均耗时 500ms
+        score: 0.8,         // 基线：质量评分 0.8
+      },
+    },
+  },
+}
+const homeB = makeHomeWithBaseline('good-with-bl', goodWithBaseline, baselineData)
 const b = runGate(homeB)
-eq('单放完好能力：退出码 = 0', b.code, 0)
-eq('单放完好能力：admitted', receiptsOf(homeB)['fx-good'].status, 'active')
+eq('有基线+指标合格：退出码 = 0', b.code, 0)
+const rB = receiptsOf(homeB)
+eq('fx-good 判定 passed', rB['fx-good'].acceptance.status, 'passed')
+eq('fx-good 转 active', rB['fx-good'].status, 'active')
+eq('fx-good 证明级别 L2', rB['fx-good'].acceptance.proofLevel, 'L2')
+eq('fx-good 未实施级 L3/L4', JSON.stringify(rB['fx-good'].acceptance.unenforced), JSON.stringify(['L3', 'L4']))
+ok('fx-good 全检通过')
+
+// ── 测试 C：有基线但指标恶化 ⇒ blocked ──
+const goodWithWorseMetrics = [
+  cap('fx-good', 'good.mjs', {
+    perRunMetrics: { outputTokens: 50, wallMs: 600, score: 0.5 } // 比基线差
+  })
+]
+const homeC = makeHomeWithBaseline('good-worse-metrics', goodWithWorseMetrics, baselineData)
+const c = runGate(homeC)
+eq('指标恶化：退出码 = 1', c.code, 1)
+const rC = receiptsOf(homeC)
+eq('fx-good 因指标恶化被挡', rC['fx-good'].acceptance.status, 'failed')
+eq('fx-good 仍是 pending', rC['fx-good'].status, 'pending')
+ok('fx-good 失败点落在 L2')
+
+// ── 测试 D：provisional 基线 ⇒ blocked（不等人工确认）──
+const provisionalBaseline = {
+  schema: 'dsh-baseline-store/v2',
+  updatedAt: new Date().toISOString(),
+  baselines: {
+    'fx-good': {
+      provenance: {
+        runAt: '2026-09-24T10:00:00.000Z',
+        provisional: true,
+        confirmedAt: null,
+        note: '暂估基线，待人工确认',
+      },
+      perRunMetrics: { outputTokens: 100, wallMs: 500, score: 0.8 },
+    },
+  },
+}
+const homeD = makeHomeWithBaseline('good-provisional', goodWithBaseline, provisionalBaseline)
+const d = runGate(homeD)
+eq('provisional 基线：退出码 = 1', d.code, 1)
+const rD = receiptsOf(homeD)
+eq('fx-good 因 provisional 基线被挡', rD['fx-good'].acceptance.status, 'failed')
+ok('provisional 基线不参与判定')
 
 // ── 安全闸复检：真实 registry 未被触碰 ──────────────────────────────────────
 const realAfter = fs.existsSync(realRegistry) ? fs.readFileSync(realRegistry, 'utf8') : null

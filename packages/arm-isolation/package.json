@@ -1,0 +1,32 @@
+{
+  "name": "@dsh-brain/arm-isolation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "description": "臂间隔离层：只禁止互读互写，独立于沙箱档位的策略插件。沙箱放开时（danger-full-access）作为安全配套，保证两臂互不可见。",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
