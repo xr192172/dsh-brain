@@ -190,6 +190,19 @@
   `classifySkill`（分级 10/10）+ `suggestMerges`（融合候选 6/6）+ **两个消融都通过**；
   CLI：`--in` / `--json` / `--emit-seen` / `--suggest-merge [--min-trigger-overlap N]` / `--selftest`。
   ★★★ **只判定 + 记账，绝不自动融合/删除**。
+- ★★★ **三脑流水线 + 工具商城（§11）—— 用户问"有没有做"，实测答复：**
+  · **设计早就在**：`docs/revised-architecture-2026-09-20.md` §7 = **进化脑发现 → 评审团把关 →
+    开发脑动手（含融合与测试）→ 回传 → 按数据再迭代**；别名 **"开发脑"="生产脑"**、**"评审团"="专家团"**；
+    ★ §7.0 已订正：**"融合"是开发脑的活**（⇒ 与 §10 对齐：筛只出候选，融合的执行者是开发脑）；
+    ★ §218 防串供：**产变更方不能与审批方同源**（这是两脑必须分开的理由）。
+  · ★★ **实现几乎为零**：council 席位表只有 `{architect:'council-architect'}`（自述"首期只有架构师一席"）；
+    `评审团/专家团/生产脑` 在 packages+scripts+evals **零命中**；`进化脑` **只在 switchboard 的
+    `deploy.ts`/`coordinator.js` 注释里**（= 控制面 `tool_apply` 验证闸**代行**它，不是独立子 agent）；
+    能力库 active 仅 4 个（spawn/fork/council-architect/design-canvas）。
+  · ★★ **工具商城 = 三处零命中（连文档都没有）** ⇒ §11.3 是它的**第一份落档**；闭环 =
+    **开发脑编排(原工具+目标任务)→产出回值→写回商城→两脑按回值迭代工具链**。
+    ★ **链路工具就是这两个脑【编排】出来的产物**（不是人手写）。
+  · 三条待定（我不自己发明）：商城存储形状 / 回值字段 / 迭代触发。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
