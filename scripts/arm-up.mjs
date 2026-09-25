@@ -27,7 +27,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -70,6 +70,27 @@ export function portsForArm(armName, allArms) {
  */
 export const rootForArm = (armName) => path.join('D:/project_develop/_arms', armName.toLowerCase())
 
+/**
+ * ★★ 2026-09-25 加：**现役模式**（`--live`）。
+ *
+ * 用户的要求（逐字）：*"能不能借鉴这个桌面应用的启动思路，把这启动的脚本全都统合成那种程度，
+ * 就是说**点击一下桌面图标我们直接启动后端服务**那种。我不要求你把它打包成 Electron 因为它很重，
+ * 但是你至少要像它一样**很简单的触发一条就直接启动**吧。你像这样各种调参数，而且还每回都不一致，
+ * 这显得我们**非常的管理混乱**。"*
+ *
+ * ⇒ **不新增第二个启动器**（那正是"不一致"的来源）：本脚本**只留一个入口**，`--live` 只是它的另一个模式 ——
+ *   · **不需要任何参数**（它自己知道现役的 DSH_HOME 与端口）；
+ *   · 与臂模式**共用同一套自检**（臂专属那几条对现役不适用 ⇒ 见 judgeSelfCheck 的 mode 参数）。
+ */
+export const LIVE_SPEC = {
+  arm: '(现役)',
+  dshHome: 'C:\\Users\\Admin\\.dsh',
+  switchboardDir: 'C:\\Users\\Admin\\.dsh\\switchboard',
+  ports: { base: 3080, genBase: 3081, pool: 3101, admin: 31800, handover: 31810, env: {} },
+  front: 'http://127.0.0.1:3080',
+  admin: 'http://127.0.0.1:31800',
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 自检（★ 把今天踩的坑逐条固化）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,8 +123,8 @@ const get = async (url) => {
  *    而真正的现行代是 33085）⇒ 我据此报了一次**假红**（说池端口不对，其实读的是旧代的日志）。
  * ⇒ 正解：**问控制面要 `activeGen`**（唯一权威），拿不到再退化成"按 boot.log 文件 mtime"。
  */
-export function latestBootLog(root, activeGenName) {
-  const dir = path.join(root, 'dshhome', 'switchboard')
+export function latestBootLog(sbDir, activeGenName) {
+  const dir = sbDir
   if (!fs.existsSync(dir)) return null
   const gens = fs.readdirSync(dir).filter((n) => n.startsWith('gen-'))
   let pick = activeGenName && gens.includes(activeGenName) ? activeGenName : null
@@ -128,9 +149,18 @@ export function latestBootLog(root, activeGenName) {
 /**
  * 自检（纯函数化的核心）：给定"读数"，判 6 条。★ 读数取自真实探测，**不读注释、不读意图**。
  */
-export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, seatsLogOk, isolationLogOk, denyCount, liveOk }) {
+export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, seatsLogOk, isolationLogOk, denyCount, liveOk, mode = 'arm', htmlOk = null }) {
   const rows = []
   const add = (name, ok, detail) => rows.push({ name, ok, detail })
+  if (mode === 'live') {
+    // ★ 现役模式：**只判"服务可用"** —— 臂专属那几条（隔离层/两席/池在本段内）对现役**不适用**
+    //   （现役不是训练场：没有 DSH_ARM_SELF/DENY、池就在 3101）。**不许把不适用的判据硬套**（那会造假红）。
+    add('① 前门应答', front.http === 200 && front.ok, `HTTP ${front.http}`)
+    add('② 控制面应答', admin.http === 200, `HTTP ${admin.http}`)
+    add('③ 池端口在听（现役的 3101）', poolLogOk !== false, poolLogOk === true ? '在听' : '★ 池没起 ⇒ LLM 路由会退化')
+    add('④ 前端可取（点了就有界面）', htmlOk === true, htmlOk === true ? 'HTML 200' : `★ 取不到（${htmlOk}）`)
+    return rows
+  }
   // ① 端口段不许落进现役
   const clash = Object.values(ports.env)
     .map((v) => Number(String(v).replace(/\D/g, '')))
@@ -181,56 +211,80 @@ const selftest = async () => {
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 if (hasFlag('--selftest')) process.exit(await selftest())
 
-const armName = argv.find((a) => !a.startsWith('--'))
-if (!armName) {
-  console.error('[用法] node scripts/arm-up.mjs <臂名> [--port-base <n>] [--no-start] [--json]')
+/**
+ * ★★ 2026-09-25：**两个模式、一个入口**（用户要求"点一下图标就直接起、别每回参数都不一样"）。
+ *   · `--live`   ⇒ 起**现役**（**不需要任何参数**）
+ *   · ` <臂名>`  ⇒ 起一个**训练场**
+ * ⇒ **不再有第二个启动器**（那正是"管理混乱"的来源）。
+ */
+const LIVE_MODE = hasFlag('--live')
+const armName = LIVE_MODE ? LIVE_SPEC.arm : argv.find((a) => !a.startsWith('--'))
+if (!LIVE_MODE && !armName) {
+  console.error(
+    '[用法]\n' +
+      '  node scripts/arm-up.mjs --live                 # 起现役（无参，最常用）\n' +
+      '  node scripts/arm-up.mjs <臂名>                 # 起某个训练场（如 A / B）\n' +
+      '  可选：[--port-base <n>] [--no-start] [--open] [--json]\n' +
+      '  ★ 双击 `scripts\\dsh-up.cmd` 等价于 `--live --open`（桌面图标的做法见该文件注释）。',
+  )
   process.exit(2)
 }
 
 // ── 臂清单：**必须来自注册表，读不到就拒跑**（★ 我第一版这里静默退化 ⇒ 臂 B 拿到臂 A 的端口段）──
 //    为什么不能退化：`indexOf` 失败会返回 -1 ⇒ `Math.max(0,-1)=0` ⇒ **base 永远是 33080**
 //    ⇒ 与臂 A **撞段**，还会把 A 的前门当成自己的（"已在跑"⇒跳过启动）⇒ **自检去看空气**。
+//    ★ 现役模式**不需要**注册表（它没有臂身份）⇒ 整块跳过。
 let allArms = null
-try {
-  const { createRequire } = await import('node:module')
-  const req = createRequire(path.join(WT, 'scripts', 'arms-registry.mjs'))
-  const { loadArmsRegistry } = req(path.join(WT, 'scripts', 'arms-registry.mjs'))
-  allArms = (loadArmsRegistry('evals/arms.json', { base: WT }).arms ?? []).map((a) => a.name)
-} catch (e) {
-  console.error(`[失败] 读不到臂注册表（evals/arms.json）⇒ **拒绝猜臂序号**：${e?.message ?? e}`)
-  process.exit(2)
-}
-if (!allArms.includes(armName)) {
-  console.error(`[失败] 臂 "${armName}" 不在注册表里 ⇒ 拒绝猜它的序号（猜错会撞别的臂的端口段）。\n  可用的臂：${allArms.join(', ')}\n  ⇒ 要么用现成的臂名，要么先把它加进 evals/arms.json。`)
-  process.exit(2)
+if (!LIVE_MODE) {
+  try {
+    const { createRequire } = await import('node:module')
+    const req = createRequire(path.join(WT, 'scripts', 'arms-registry.mjs'))
+    const { loadArmsRegistry } = req(path.join(WT, 'scripts', 'arms-registry.mjs'))
+    allArms = (loadArmsRegistry('evals/arms.json', { base: WT }).arms ?? []).map((a) => a.name)
+  } catch (e) {
+    console.error(`[失败] 读不到臂注册表（evals/arms.json）⇒ **拒绝猜臂序号**：${e?.message ?? e}`)
+    process.exit(2)
+  }
+  if (!allArms.includes(armName)) {
+    console.error(`[失败] 臂 "${armName}" 不在注册表里 ⇒ 拒绝猜它的序号（猜错会撞别的臂的端口段）。\n  可用的臂：${allArms.join(', ')}\n  ⇒ 要么用现成的臂名，要么先把它加进 evals/arms.json。`)
+    process.exit(2)
+  }
 }
 
-const ports = portsForArm(armName, allArms)
-const root = rootForArm(armName)
-console.log(`\n===== arm-up · 臂 ${armName} =====`)
-console.log(`  ★ 唯一自变量 = 臂名；端口段由臂序号派生（不再手抄）`)
-console.log(`  臂序号   : ${allArms.indexOf(armName)}（注册表 ${allArms.join(', ')}）`)
-console.log(`  根目录   : ${root}`)
-console.log(`  端口段   : switch=${ports.base}  gen=${ports.genBase}+  pool=${ports.pool}  admin=${ports.base + 100}  handover=${ports.base + 110}`)
-console.log(`  现役占用 : ${[...LIVE_PORTS].join(', ')}（派生结果不许落进来）`)
+// ── ★ 两种模式只在这一处分叉（**其余全部共用**，避免"两套算法"漂移）──────────────
+const ports = LIVE_MODE ? LIVE_SPEC.ports : portsForArm(armName, allArms)
+const root = LIVE_MODE ? LIVE_SPEC.dshHome : rootForArm(armName)
+const sbDir = LIVE_MODE ? LIVE_SPEC.switchboardDir : path.join(root, 'dshhome', 'switchboard')
+const frontUrl = LIVE_MODE ? LIVE_SPEC.front : ports.front
+const adminUrl = LIVE_MODE ? LIVE_SPEC.admin : ports.admin
+console.log(`\n===== arm-up · ${LIVE_MODE ? '现役（--live）' : '臂 ' + armName} =====`)
+if (LIVE_MODE) {
+  console.log('  ★ 现役模式：**不需要任何参数**（端口固定 3080 / 池 3101 / 控制面 31800）')
+  console.log(`  前端     : ${frontUrl}`)
+} else {
+  console.log(`  ★ 唯一自变量 = 臂名；端口段由臂序号派生（不再手抄）`)
+  console.log(`  臂序号   : ${allArms.indexOf(armName)}（注册表 ${allArms.join(', ')}）`)
+  console.log(`  根目录   : ${root}`)
+  console.log(`  端口段   : switch=${ports.base}  gen=${ports.genBase}+  pool=${ports.pool}  admin=${ports.base + 100}  handover=${ports.base + 110}`)
+  console.log(`  现役占用 : ${[...LIVE_PORTS].join(', ')}（派生结果不许落进来）`)
+}
 
-// ── ★★ 段位归属前置断言：那一段若有人在应答，**必须证明是本实例的**（看本 root 有没有 lease）──
+// ── ★★ 段位归属前置断言（**仅臂模式**）：那一段若有人在应答，**必须证明是本实例的**（看 lease）──
 //    否则就是"别人占着这段"（我第一版正是把臂 A 的前门当成了臂 B 的）⇒ **拒跑**。
+//    ★ 现役模式不适用：现役就是 3080，不存在"段位归属"这个问题。
 const rootHasLease = (() => {
   // ★ 2026-09-25 修：lease 在 **`<root>/dshhome/switchboard/lease.json`**（**不在** `<gen>/lease.json`）。
   //   我第一版找 `<gen>/lease.json` ⇒ 恒 false ⇒ **把自己的实例误判成"别人占着"⇒ 误拒**。
-  //   （误拒比误放好，但仍是错的 —— 读数路径没核对就拿来判，正是今天反复踩的那类。）
-  const f = path.join(root, 'dshhome', 'switchboard', 'lease.json')
+  const f = path.join(sbDir, 'lease.json')
   if (!fs.existsSync(f)) return false
   try {
-    const j = JSON.parse(fs.readFileSync(f, 'utf8'))
-    return !!j?.activeGen?.gen
+    return !!JSON.parse(fs.readFileSync(f, 'utf8'))?.activeGen?.gen
   } catch { return false }
 })()
-const preFront = await rpc(ports.front, 'session.list')
-const preAdmin = await get(`${ports.admin}/?cmd=status`)
+const preFront = await rpc(frontUrl, 'session.list')
+const preAdmin = await get(`${adminUrl}/?cmd=status`)
 const someoneThere = preFront.http === 200 || preAdmin.http === 200
-if (someoneThere && !rootHasLease) {
+if (!LIVE_MODE && someoneThere && !rootHasLease) {
   console.error(
     `[失败] 端口段 ${ports.base} 已经**有人在应答**，但 ${path.join(root, 'dshhome')} 里没有 lease ⇒\n` +
       `  那一段**不是本实例的**（很可能是别的臂占着）⇒ 拒跑。\n` +
@@ -238,10 +292,21 @@ if (someoneThere && !rootHasLease) {
   )
   process.exit(2)
 }
-if (someoneThere) console.log(`  （前置：本段已在应答，且本 root 有 lease ⇒ 确认是**本实例**，将继续）`)
+if (someoneThere) console.log(`  （前置：已在应答${LIVE_MODE ? '' : '，且本 root 有 lease'} ⇒ 确认是**本实例**，将继续；② 会跳过启动）`)
 
-// ① 准备（复用 isolated-instance，端口只传 base）
-if (!hasFlag('--no-start')) {
+// ── 现役：不需要"准备"（不复制 profile、不带臂身份）⇒ 已在跑就跳过，否则 relaunch ──
+if (LIVE_MODE && !hasFlag('--no-start')) {
+  if (someoneThere) {
+    console.log('\n-- 起 —— **跳过**：现役已在应答（只做自检）--')
+  } else {
+    console.log('\n-- 起（现役：relaunch，不带臂身份）--')
+    const l = spawnSync('cmd', ['/c', path.join(WT, 'scripts', 'relaunch-switchboard.cmd')], { encoding: 'utf8', timeout: 120000 })
+    console.log(`  relaunch exit=${l.status}（它自己返回后服务在后台起）`)
+  }
+}
+
+// ① 准备（复用 isolated-instance，端口只传 base）—— **仅臂模式**
+if (!hasFlag('--no-start') && !LIVE_MODE) {
   console.log('\n-- ① 准备（复用 isolated-instance --port-base）--')
   const r = spawnSync(NODE, [path.join(HERE, 'delegation', 'isolated-instance.mjs'), '--arm', armName, '--root', root, '--port-base', String(ports.base), '--force'], { encoding: 'utf8', timeout: 600000 })
   const tail = (r.stdout ?? '').split('\n').filter((l) => /自建 preset|端口覆盖|自进化两席|arm-isolation:|准备完成/.test(l))
@@ -301,31 +366,51 @@ console.log('\n-- ③ 等前门应答（最多 90s）--')
 let front = { http: 0, ok: false }
 for (let i = 0; i < 18; i++) {
   await new Promise((r) => setTimeout(r, 5000))
-  front = await rpc(ports.front, 'session.list')
+  front = await rpc(frontUrl, 'session.list')
   if (front.http === 200 && front.ok) break
   process.stdout.write('.')
 }
 console.log('')
 
 // ④ 自检（★ "起来了"的定义）
-const admin = await get(`${ports.admin}/?cmd=status`)
+const admin = await get(`${adminUrl}/?cmd=status`)
 // ★ 问控制面要现行代（权威）—— 不靠猜 mtime（见 latestBootLog 的注释）
 let activeGenName = null
 try { activeGenName = JSON.parse(admin.text)?.lease?.activeGen?.gen ?? null } catch { /* 控制面没答 */ }
-const boot = latestBootLog(root, activeGenName)
+const boot = latestBootLog(sbDir, activeGenName)
 console.log(`  现行代（控制面权威）= ${activeGenName ?? '(拿不到，退化为按 boot.log mtime)'}`)
 const t = boot?.text ?? ''
 const isolationLogOk = /\[arm-isolation\] apply running/.test(t)
 const denyCount = Number((t.match(/denyRoots=(\d+) 条/) ?? [])[1] ?? 0)
 const seatsLogOk = /provider="evo-dev"/.test(t) && /provider="evo-review"/.test(t)
 const poolLogOk = new RegExp(`\\[key-pool-proxy\\] listening 127\\.0\\.0\\.1:${ports.pool}\\b`).test(t)
+// 现役模式还要判"前端可取"（点了就有界面）—— 臂模式不判这条
+let htmlOk = null
+if (LIVE_MODE) {
+  const h = await get(`${frontUrl}/`)
+  htmlOk = h.http === 200 && /<html|<!doctype/i.test(h.text)
+}
 const live = await rpc('http://127.0.0.1:3080', 'session.list')
-const rows = judgeSelfCheck({ ports, front, admin, isolationLogOk, denyCount, seatsLogOk, poolLogOk, liveOk: live.http === 200 && live.ok })
+const rows = judgeSelfCheck({
+  ports, front, admin, isolationLogOk, denyCount, seatsLogOk, poolLogOk,
+  liveOk: live.http === 200 && live.ok, mode: LIVE_MODE ? 'live' : 'arm', htmlOk,
+})
 
 console.log('-- ④ 自检（"起来了" = 这些全过）--')
 for (const r of rows) console.log(`  ${r.ok ? '✅' : '❌'} ${r.name} — ${r.detail}`)
 console.log(`\n  boot.log = ${boot?.file ?? '(没找到)'}`)
 const allOk = rows.every((r) => r.ok)
 console.log(`\n===== ${allOk ? '✅ 起来了（自检全过）' : '❌ 没起来（照上面 ❌ 那条查）'} =====`)
-if (hasFlag('--json')) console.log(JSON.stringify({ arm: armName, ports, root, rows, gen: boot?.gen }, null, 2))
+
+// ★★ `--open`：起完**直接把界面打开** —— 这就是"像桌面应用那样，点了就有界面"
+//    （`dsh-up.cmd` 默认带这个开关 ⇒ 双击桌面图标 = 起服务 + 开界面，不需要任何参数）
+if (hasFlag('--open') && allOk) {
+  try {
+    spawn('cmd', ['/c', 'start', '""', frontUrl], { detached: true, stdio: 'ignore', shell: false }).unref()
+    console.log(`  🌐 已打开界面：${frontUrl}`)
+  } catch (e) {
+    console.log(`  （自动开界面失败，请手动打开 ${frontUrl}：${e?.message ?? e}）`)
+  }
+}
+if (hasFlag('--json')) console.log(JSON.stringify({ mode: LIVE_MODE ? 'live' : 'arm', arm: armName, ports, root, rows, gen: boot?.gen }, null, 2))
 process.exit(allOk ? 0 : 1)
