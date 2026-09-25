@@ -261,6 +261,25 @@ function prepareNodeModules(profileSrc, profileDst) {
     return { ok: true, built: [], skipped: ['source-node-modules-missing'] }
   }
 
+  // 目标 node_modules 已存在 ⇒ 分两种：
+  // ★★ 2026-09-25 修：如果它是【符号链接/目录联接】——那是**旧版形状**（旧实现把整个 node_modules 联接指现役）
+  //    ⇒ **必须拒跑**，不能"幂等跳过"：跳过会产出"**旧联接 + 新脚本**"的混合体（看起来成功，
+  //      实际仍共享现役那层，违反本脚本"自己的真目录 + 逐项 symlink"的设计）。
+  //    ★ 这里**故意不写任何删除代码**：递归删一个联接会**顺着链接删掉现役那层**（灾难）。
+  //      要让操作者自己摘，且**只摘链接本身**（不是递归）。
+  if (fs.existsSync(dstNm)) {
+    try {
+      if (fs.lstatSync(dstNm).isSymbolicLink()) {
+        return {
+          ok: false,
+          reason:
+            'existing-node-modules-is-a-symlink：目标 node_modules 是【符号链接/目录联接】（旧版形状）⇒ 拒绝继续。\n' +
+            '  ★ 请先**手动摘掉那个链接**（只摘链接本身，**绝不要递归删** —— 递归会顺着链接删掉现役那层），\n' +
+            '    再重跑本脚本；它会按新形状重建「自己的真目录 + 逐项符号链接」。',
+        }
+      }
+    } catch { /* lstat 失败 ⇒ 交给下面的常规幂等检查 */ }
+  }
   // 目标 node_modules 已存在且非空 ⇒ 幂等跳过
   if (fs.existsSync(dstNm)) {
     try {
@@ -643,6 +662,11 @@ ensureDir(verifyOut)
 // 2. 复制 profile 骨架 + node_modules（真实目录 + 符号链接）
 const nmResult = prepareProfile(profileSrc, path.join(dshHome, 'profiles', profile))
 if (!nmResult.ok) {
+  // ★★ 这一类是**致命的**（会产出"旧联接 + 新脚本"的混合体）⇒ **fail-closed 退出**，不是 warn 后继续
+  if (String(nmResult.reason).startsWith('existing-node-modules-is-a-symlink')) {
+    console.error(`[失败] ${nmResult.reason}`)
+    process.exit(1)
+  }
   console.warn(`[警告] node_modules 准备失败：${nmResult.reason}`)
 }
 
