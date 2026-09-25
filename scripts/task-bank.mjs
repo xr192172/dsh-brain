@@ -139,8 +139,14 @@ export function refresh({ bankDir = BANK_DIR, inbox = INBOX_DIR } = {}) {
  */
 export function checkExecutable(t) {
   if (!t) return { ok: false, reason: '题不存在' }
-  if (!t.title) return { ok: false, reason: '缺 title（题面没有目标）' }
-  if (!t.env || typeof t.env !== 'object' || Object.keys(t.env).length === 0) {
+  // ★ 修：本函数被**两种形状**喂过 —— `listTasks()` 返回的是"摊平的"（含 title/env），
+  //   `getTask()` 返回的是"嵌套的" `{id, meta, body}` ⇒ 只认前者就会误报"缺 title"。
+  //   （同类毛病今天第三次：**同一个东西两种形状** ⇒ 让它两种都收，从根上防。）
+  const m = t.meta ?? t
+  const title = m.title ?? t.title
+  const env = m.env ?? t.env
+  if (!title) return { ok: false, reason: '缺 title（题面没有目标）' }
+  if (!env || typeof env !== 'object' || Object.keys(env).length === 0) {
     return { ok: false, reason: '缺 env（题面没有"在什么环境里做"）⇒ 不可执行' }
   }
   return { ok: true }
