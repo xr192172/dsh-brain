@@ -228,6 +228,15 @@
   `FriendConfig` 持久化在 `.agent/friends/{id}/`、`FriendRegistry` CRUD+落盘、`FriendService` REST `/api/v1/friends/*`、
   **C 方案 Remote Brain 通过 `POST /api/v1/friends` 动态加入**，transport = ws/a2a/mcp）
   ⇒ **这就是"上架/货架"**；**但只有骨架**：`FriendConfig` **无任何"回值/评分"字段**，且 **`.agent/friends/` 是空的**。
+- ★★★ **更正（§11.8，**取代**上面那条的方向）**：**DSH 侧不做商城、不做检索** ——
+  ai-base 的 `hub/v2/friends/` 是**旧 AI Base 方向的产物，不移植**。
+  ★★ **只做两件**：一个**工具池** + 对池里的工具做**回值（= 评分 + 反馈）**；
+  **回值作者 = 用它的那个子 agent 自己**（自评；工具面本就是它自己的 `toolFilter` 那层，**无需检索**）；
+  **读者 = 开发脑 + 进化脑**。
+  ★ 已落地 `scripts/tool-pool.mjs`（append-only JSONL + **幂等** + **fail-closed 校验** + **读不写盘**；
+  `aggregate` **均分低的排前面**；默认 `~/.dsh/tool-pool/pool.jsonl`，`--file` 可覆盖）——判据 **8/8 + 消融**。
+  ★ **整条链现在纸面齐了**：筛 ✅ → 工厂 ✅ → 两脑 ✅（隔离实例已挂）→ 工具池/回值 ✅；
+  缺的只有**真跑一次**（起隔离实例**只能用户终端**）。
   · ★★ **已挂进隔离实例**（commit `401108f`）：`isolated-instance` 给隔离 profile 追加**两条 insert**
     （`evo-dev`/`evo-review`，id 互异、可各给路由）；`--no-evo-seats` 可关；幂等。
     判据 `scripts/delegation/test-evo-seats-mount.mjs`：**9/9 + 消融**（含"现役 sha+mtime 一字未动"）。
