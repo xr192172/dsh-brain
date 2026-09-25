@@ -109,14 +109,27 @@ if (!src.includes(ANCHOR)) {
 
 // ⑨ ★★ 端口覆盖（**实测事故**：隔离实例抢了现役的 `:3101` 池端口 ⇒ **现役前门整个掉**）
 //    根因：key-pool-proxy 包自带的 patch 硬编码 port=3101，而池端口只在"清单声明 pool"时才派生。
+// ⑨ ★★ 端口覆盖必须【重述完整 config】—— 实测：部分 `config:` 是【整体替换】不是深合并！
+//    只给 `port:` 会把 bundle 的 poolEnv/fallbackEnvs/upstreamBase 冲掉 ⇒ 插件报
+//    `empty key pool: poolEnv=AGNES_KEY_POOL` ⇒ **整树装配失败**（实测踩过，前门 502）。
 const c9 = fs.readFileSync(p1, 'utf8')
-const hasPoolOverride = /- id: key-pool-proxy[\s\S]{0,160}?port:\s*33101/.test(c9)
-check('⑨ ★ 覆盖 key-pool-proxy.port = 33101（避开现役的 3101）', hasPoolOverride, hasPoolOverride ? '已覆盖' : '★ 没覆盖 ⇒ 会抢现役的 3101')
-// ★ ⑨b 改成**断言"覆盖存在且指向本段端口"** —— 不能用"不得出现 3101"：
-//   因为 profile 是从现役**复制**来的，那个 `mcp-client.env.AGNES_UPSTREAM_BASE: …:3101` 的**原文仍在**，
-//   我们只是**在后面追加了覆盖**（生效值以覆盖为准）⇒ "文本里没有 3101" 是**做不到**的要求（我第一版写成那样 = 假判据）。
-const hasUpstreamOverride = /- id: mcp-client[\s\S]{0,200}?AGNES_UPSTREAM_BASE:\s*http:\/\/127\.0\.0\.1:33101/.test(c9)
-check('⑨b ★ 覆盖 mcp-client.env.AGNES_UPSTREAM_BASE → 本段池端口', hasUpstreamOverride, hasUpstreamOverride ? '已覆盖为 33101' : '★ 没覆盖 ⇒ 隔离实例会用现役的池')
+const POOL_KEYS = ['poolEnv: AGENTSHELL_MAIN_LLM_API_KEYS', 'fallbackEnvs:', '- AGENTSHELL_MAIN_LLM_API_KEY',
+  'upstreamBase: https://apihub.agnes-ai.com', 'cooldownMs: 15000', 'maxRetries: 3', 'retryStatuses: [429, 500, 502, 503, 504]']
+const block = c9.slice(Math.max(0, c9.indexOf('- id: key-pool-proxy')))
+const missKeys = POOL_KEYS.filter((k) => !block.includes(k))
+const hasPort = /- id: key-pool-proxy[\s\S]{0,400}?port:\s*33101/.test(block)
+check('⑨ ★ 覆盖 key-pool-proxy：port=33101 **且重述完整 config**（防整体替换）',
+  hasPort && missKeys.length === 0,
+  (hasPort ? 'port ✓' : '★ 缺 port=33101') + (missKeys.length ? ` ★ 缺配置项：${missKeys.join(' | ')}` : '；7 项配置齐'))
+
+// ★★ ⑨b 反向：**不得**出现 `- id: mcp-client` 的覆盖块（那会把它的 command/args/cwd 整体冲掉）
+//    mcp-client 的上游改法是【在拷贝里就地改那一行】，所以文本里 `…:3101` 必须**已经变成** `…:33101`。
+const hasMcpOverride = /^- id: mcp-client/m.test(c9)
+const upstreamFixed = /AGNES_UPSTREAM_BASE:\s*http:\/\/127\.0\.0\.1:33101/.test(c9)
+const staleGone = !/AGNES_UPSTREAM_BASE:\s*http:\/\/127\.0\.0\.1:3101/.test(c9)
+check('⑨b ★ 无 mcp-client 覆盖块 + 就地改生效（33101 在、3101 已消失）',
+  !hasMcpOverride && upstreamFixed && staleGone,
+  `覆盖块=${hasMcpOverride}（要 false）／33101 在=${upstreamFixed}／3101 已消失=${staleGone}`)
 
 const pass = results.filter((r) => r.ok).length
 const total = pass === results.length && ablOk

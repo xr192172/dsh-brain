@@ -542,31 +542,55 @@ function prepareEvolutionSeats(profileDst, { routeDev, routeReview } = {}) {
 function prepareIsoPorts(profileDst) {
   const patch = path.join(profileDst, 'cordis.patch.yml')
   if (!fs.existsSync(patch)) return { isoPorts: 'skipped（profile 里没有 cordis.patch.yml）' }
-  const cur = fs.readFileSync(patch, 'utf8')
-  if (cur.includes('# [iso-ports]')) return { isoPorts: '已存在（幂等跳过）' }
   const poolPort = Number(DEFAULT_PORTS.POOL_PORT)
+  const NEW_POOL = `http://127.0.0.1:${poolPort}`
+  let cur = fs.readFileSync(patch, 'utf8')
+
+  // ── ① 就地改【拷贝里的那一行】（design-canvas MCP 的 LLM 上游）——**不加 override 块** ──
+  //   ★★ 为什么不加 override 块：**实测"部分 config 是整体替换、不是深合并"** ——
+  //      加 `- id: mcp-client` + 只给 env ⇒ 会把它的 command/args/cwd 全冲掉 ⇒ design-canvas 直接坏。
+  //      ⇒ 改的是**我们自己那份拷贝**，就地替换值即可（也就没有替换语义的风险）。
+  let touched = 0
+  cur = cur.replace(/AGNES_UPSTREAM_BASE:\s*http:\/\/127\.0\.0\.1:3101/g, () => {
+    touched++
+    return `AGNES_UPSTREAM_BASE: ${NEW_POOL}`
+  })
+
+  // ── ② 自愈式重写 [iso-ports] 段（去掉旧版那段坏掉的，再追加新的）──
+  const lines = cur.split('\n')
+  const start = lines.findIndex((l) => l.includes('# [iso-ports]'))
+  if (start >= 0) {
+    const from = start > 0 && lines[start - 1].trim() === '' ? start - 1 : start
+    lines.splice(from)
+    cur = lines.join('\n')
+  }
+
   const out = [
     '',
     '# [iso-ports] 本隔离实例的端口覆盖 —— 由 isolated-instance 注入（**只写隔离实例**）',
     '#   ★ 为什么必须覆盖：key-pool-proxy 包自带的 patch 硬编码 port=3101（**现役的池端口**）⇒',
-    '#     不覆盖就会抢现役的端口（实测 2026-09-25：现役前门一度整个掉）。',
+    '#     不覆盖会抢现役的端口（实测 2026-09-25：现役前门一度整个掉）。',
     '#   ★ 形状是【覆盖 config】不是 insert（写成 insert 会 duplicate loader entry id ⇒ 整树装配失败）。',
+    '#   ★★ **必须"重述完整 config"** —— 实测：部分 `config:` 是【**整体替换**】、**不是深合并**！',
+    '#      只给 `port:` 会把 bundle 的 poolEnv/fallbackEnvs/upstreamBase 全冲掉 ⇒ 插件报',
+    '#      `empty key pool: poolEnv=AGNES_KEY_POOL` ⇒ **整树装配失败**（实测踩过，前门 502）。',
+    '#      ⇒ 下面几行是**照 packages/key-pool-proxy/cordis.patch.yml 逐字抄**，只改 port；',
+    '#        并由判据断言"与包内逐字一致（除 port）"来防漂移。',
     '- id: key-pool-proxy',
     '  config:',
+    '    poolEnv: AGENTSHELL_MAIN_LLM_API_KEYS',
+    '    fallbackEnvs:',
+    '      - AGENTSHELL_MAIN_LLM_API_KEY',
+    '    upstreamBase: https://apihub.agnes-ai.com',
     `    port: ${poolPort}`,
-    '',
-    '# ★ 第二处：design-canvas MCP 的 LLM 上游也指向池端口（profile 里逐字写着「指向 dsh key-pool-proxy(3101)」）。',
-    '#   不覆盖 ⇒ 隔离实例的 design-canvas 会去用**现役的池**（跨实例串用）。',
-    '#   ★ 只给 env 子映射（不重述 command/args/cwd）—— 依赖"部分 config 深合并"这一语义（现役的 spill-policy',
-    '#     覆盖就是只给一个键）。**待重启后验证**：若 design-canvas 的 MCP 工具消失 ⇒ 说明是"整体替换"语义 ⇒',
-    '#     那时改成重述完整 config。',
-    '- id: mcp-client',
-    '  config:',
-    '    env:',
-    `      AGNES_UPSTREAM_BASE: http://127.0.0.1:${poolPort}`,
+    '    cooldownMs: 15000',
+    '    maxRetries: 3',
+    '    retryStatuses: [429, 500, 502, 503, 504]',
   ]
-  fs.appendFileSync(patch, out.join('\n') + '\n', 'utf8')
-  return { isoPorts: `已把 key-pool-proxy.port 覆盖为 ${poolPort}（避开现役的 3101）` }
+  fs.writeFileSync(patch, cur + out.join('\n') + '\n', 'utf8')
+  return {
+    isoPorts: `key-pool-proxy.port=${poolPort}（**重述完整 config**）；并就地把 ${touched} 处 AGNES_UPSTREAM_BASE 改成 ${NEW_POOL}`,
+  }
 }
 
 function prepareProfile(profileSrc, profileDst) {
