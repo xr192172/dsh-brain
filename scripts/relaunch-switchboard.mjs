@@ -80,8 +80,16 @@ if (dryRun) {
   process.exit(0)
 }
 
-const outLog = path.join(root, 'out', 'switchboard-run.log')
-const errLog = path.join(root, 'out', 'switchboard-run.err.log')
+// ★★ 2026-09-25 修：日志**按 DSH_HOME 分家**。
+//   原来硬编码到**仓库**的 `out/` ⇒ 现役与隔离实例**共用同一份日志**（实测混杂：
+//   两套实例的启动 banner 与换代记录挤在一个文件里 ⇒ 我今天据此**误判了两次**）。
+//   ⇒ 现役（DSH_HOME 默认那个）仍写 `out/`；**其它实例写自己 DSH_HOME 下的 `logs/`**。
+const LIVE_HOME = 'C:\\Users\\Admin\\.dsh'
+const isLiveHome = !process.env.DSH_HOME || path.resolve(process.env.DSH_HOME) === path.resolve(LIVE_HOME)
+const logDir = isLiveHome ? path.join(root, 'out') : path.join(process.env.DSH_HOME, 'logs')
+fs.mkdirSync(logDir, { recursive: true })
+const outLog = path.join(logDir, 'switchboard-run.log')
+const errLog = path.join(logDir, 'switchboard-run.err.log')
 const fdOut = fs.openSync(outLog, 'a')
 const fdErr = fs.openSync(errLog, 'a')
 

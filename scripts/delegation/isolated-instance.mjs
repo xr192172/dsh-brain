@@ -145,20 +145,24 @@ if (!profile || !knownProfiles.includes(profile)) {
 }
 
 // ── 端口段（固定，不与现役 3080/3081/31800/31810 冲突）────────────────────────
+/**
+ * ★★ 2026-09-25 改：**端口不再手写**，改为**由「一个 base」派生**。
+ *
+ * 为什么要改（用户 2026-09-25 的质疑，逐字）：
+ *   *"为什么我们没有一个统一的启动脚本？每一次都会出现不同样的 bug，而且按理来说不管怎么改，
+ *    启动脚本是不会变的呀，为什么还要这回又多出了这种各种各样的变量？那不是应该在 Switchboard 内部吗？"*
+ * ⇒ 他的诊断是对的：**变量不该由外部一件件给**。**臂名 → 端口段**是纯推导，
+ *   所以只留一个自变量（`--port-base`，默认 33080；`arm-up.mjs` 会按臂序号算）。
+ * ★ `POOL_PORT` **必须在同一段内**（+21）—— 实测它曾因为"没被算进段里"而**抢了现役的 3101**。
+ */
+const PORT_BASE = Number(argOf('--port-base') ?? 33080)
 const DEFAULT_PORTS = {
-  SWITCH_PORT: '33080',
-  GEN_PORT_BASE: '33081',
-  SWITCH_ADMIN_PORT: '33180',
-  HANDOVER_ADMIN_PORT_BASE: '33190',
-  DSH_PUBLIC_WEB_URL: 'http://127.0.0.1:33080',
-  /**
-   * ★★ 2026-09-25 补：**key-pool-proxy 的端口**。
-   *   为什么必须显式给：`packages/key-pool-proxy/cordis.patch.yml`（包自带的 patch）**硬编码 `port: 3101`**，
-   *   而池端口**只有在「代装配清单」声明了 `pool.enabled` 时才由 gen 端口派生**（`poolPortOf`）。
-   *   ⇒ 本实例**没有清单** ⇒ 插件就用它自带的 **3101** ⇒ ★ **实测直接撞现役的池端口**（现役前门一度整个掉）。
-   *   ⇒ 处置：在本实例的 profile 里**覆盖这个 config**（同 arm-isolation 那一招，也同 §铁律 2 的教训）。
-   */
-  POOL_PORT: '33101',
+  SWITCH_PORT: String(PORT_BASE),
+  GEN_PORT_BASE: String(PORT_BASE + 1),
+  POOL_PORT: String(PORT_BASE + 21),
+  SWITCH_ADMIN_PORT: String(PORT_BASE + 100),
+  HANDOVER_ADMIN_PORT_BASE: String(PORT_BASE + 110),
+  DSH_PUBLIC_WEB_URL: `http://127.0.0.1:${PORT_BASE}`,
 }
 
 // ★ 端口冲突检查：若任一端口命中现役端口段，拒绝（防止误起在现役上）
