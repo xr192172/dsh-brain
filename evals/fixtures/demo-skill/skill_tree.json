@@ -1,0 +1,31 @@
+{
+  "_comment": "端到端演练用的【最小「一等」skill】样本。三样齐：Principle(指导) ∧ Script(脚本) ∧ Tools[](内嵌工具片段)。",
+  "nodes": [
+    {
+      "ID": "demo-first-line",
+      "Principle": "当你要知道一个文本文件的『第一行』时，不要整份读进来 —— 先取首行，减少噪声与 token。",
+      "Fix": "若首行为空，继续取下一个非空行；若整份为空，明确回答『空文件』，不要编内容。",
+      "Script": "first_line.sh",
+      "ScriptLang": "shell",
+      "Triggers": ["读文件首行", "只看标题行", "只要开头一行"],
+      "SuccessRate": 0,
+      "Score": 0,
+      "UseCount": 0,
+      "Tools": [
+        {
+          "Name": "demo_first_line",
+          "Description": "返回一个文本文件的第一行非空内容（只读）",
+          "Kind": "shell",
+          "Entry": "first_line.sh",
+          "Fn": "first_line",
+          "Schema": {
+            "type": "object",
+            "properties": { "path": { "type": "string", "description": "文本文件的绝对路径" } },
+            "required": ["path"]
+          },
+          "ReadOnly": true
+        }
+      ]
+    }
+  ]
+}
