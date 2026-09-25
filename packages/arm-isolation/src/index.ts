@@ -21,7 +21,11 @@ function normalizePath(p: string): string {
 
 function pathDenyCheck(pathStr: string, denyRoots: string[]): boolean {
   if (typeof pathStr !== 'string' || pathStr.length === 0) return false
-  const np = normalizePath(pathStr)
+  // ★★ 2026-09-25 修：**先去掉结尾的引号/成对符号**再比 —— 兜住"路径被引号包着"这一类。
+  //   实测洞（见下 `extractPathsFromCmd`）：`'C:\...\store'` 提取出来带尾巴单引号 ⇒ 比不中 ⇒ 放行。
+  const cleaned = pathStr.replace(/["'`)\],;]+$/, '')
+  if (cleaned.length === 0) return false
+  const np = normalizePath(cleaned)
   for (const root of denyRoots) {
     const nr = normalizePath(root)
     if (np === nr || np.startsWith(nr + '/')) return true
@@ -47,10 +51,15 @@ function resolveAbs(p: string): string {
 /** 从 shell 命令文本中提取绝对路径（Windows/Linux） */
 function extractPathsFromCmd(cmd: string): string[] {
   const paths: string[] = []
-  // Windows: X:\... 或 X:/...
-  const winRe = /[A-Za-z]:[/\\][^\s;|&<>"]+/g
+  // ★★ 2026-09-25 修：**必须排除引号**（`'` `"` 反引号）。
+  //   实测洞（**臂 A 的 agent 真的把臂 B 的 store 列出来了**）：
+  //     `Get-ChildItem -Path 'C:\_abB-experiment-root\store' -ErrorAction Stop`
+  //   旧正则 `[^\s;|&<>"]+` 不排除单引号 ⇒ 提取出的路径**带着结尾单引号**
+  //   ⇒ `pathDenyCheck` 只做 `===` 或 `startsWith(root + '/')` ⇒ **两个都不匹配 ⇒ 放行**。
+  //   ⇒ 即"**给路径加个引号就能绕过隔离层**"。这里把引号排除掉，`pathDenyCheck` 里也再兜一层。
+  const winRe = /[A-Za-z]:[/\\][^\s;|&<>"'`]+/g
   // POSIX: /...  (至少1段)
-  const posixRe = /\/[^\s;|&<>"]+/g
+  const posixRe = /\/[^\s;|&<>"'`]+/g
   let m
   while ((m = winRe.exec(cmd)) !== null) paths.push(m[0])
   while ((m = posixRe.exec(cmd)) !== null) paths.push(m[0])
