@@ -147,6 +147,16 @@
 - ★★ **O30 裁决**：`skill` = **配方/工艺清单**（`skill-tree` 数据层：类型+生命周期+Absorb 账本，**不含执行器**）；
   **它是【筛网】** ⇒ 链路 = **外部/自生长 skill → 筛 → Agent 工厂（按配置实例化）→ 新子 agent → skill 退役**。
   **不是二选一，是两段**。待定义的是**接缝**（谁读字段/谁判"好"/谁实例化/退役怎么记）。
+- ★★ **筛的口径（§7，用户口述逐字固化）**：**三级公民** ——
+  **一等**（所有字段齐全／或「有工具+有指引」）⇒ **构建子 agent**；
+  **二等**（内置代码片段+描述，无 `Tools`）⇒ **也能建 agent**（★"代码片段**我们也可以自己手动将其做成工具**" ⇒ 升格 = 人工包成 `ToolDef`）；
+  **三等**（只有指导）⇒ **不建 agent**，用来**优化同类型【已有】agent 的提示词**。
+  · 纪律① **"有副作用就不优化"** ⇒ 复用 `SuccessRate` + **`skill-tree.ts:623` 的 `Demoted` 规则**；
+  · 纪律② **"用过的打标记、后续不再碰"** ⇒ 复用现成 **`UseCount`/`LastUsedAt`**（不新增字段）。
+  · ★ 四个待用户拍：合格线字段 / 与 `Level` 是否同轴 / 优化落在 `persona` 还是 `Principle` / 触发时机。
+- ★★ **接线现状**：(a1) `gen-assembly.ts` 按 **`DSH_ARM_SELF`+`DSH_ARM_DENY`** 插 `arm-isolation` overlay（R0 已进主仓）；
+  (a2) `isolated-instance.mjs` 给身份 + **自己的 `node_modules`（真目录+逐项符号链接）**让插件能解析（已进主仓）。
+  ⇒ **接线层闭环；端到端（真起一代看 guard 拦跨训练场）未做** —— 起服务**只能用户终端**。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
