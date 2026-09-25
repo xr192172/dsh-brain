@@ -6,7 +6,12 @@
 #   即 `tool-subagent` 的 config.provider 指向本包注册的名字（如 council-architect）。
 #   参见 node_modules/@deepseek-ai/dsh-subagent/README.zh.md 与 dsh-web-app/cordis.patch.yml 的分工注释。
 #
-# ⚠️ 不要再在 profile 的 cordis.patch.yml 里写同 id 的覆盖块 —— 会 duplicate loader entry id。
+# ⚠️ 不要在 profile 的 cordis.patch.yml 里【**再 insert 同一个 id**】—— 会 `duplicate loader entry id`
+#   （实测 2026-09-25：据此写成的 arm-isolation overlay 让那一代**整树装配失败**、前门 502、控制面仍 200）。
+# ★★ 但【**覆盖**这个 id 的 config】是**允许的**（`- id: <同名>` + `config:`）——
+#   活证：现役 profile 就是这么覆盖 `agent-default-model` / `tool-result-pruner` / `spill-policy` 的，
+#   而这三个 id 正是由 `dsh-base` 的 patch **insert** 出来的，现役**一直启动正常**。
+# ⇒ 一句话：**同一个 id 只能 insert 一次；后续想改它的 config ⇒ 用【覆盖块】，不要用 insert。**
 - insert:
     - id: subagent-council
       name: '@dsh-brain/subagent-council'

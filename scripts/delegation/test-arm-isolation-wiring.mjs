@@ -27,9 +27,14 @@ const clearEnv = () => { for (const k of ['DSH_ARM_SELF', 'DSH_ARM_DENY', 'DSH_S
 
 // ①
 const y1 = renderArmIsolationOverlay('A', 'D:/project_develop/_arms/a, C:/_arms/b')
-const need = ['- insert:', 'id: arm-isolation', "name: '@dsh-brain/arm-isolation'", 'self: "A"']
+const need = ['- id: arm-isolation', 'config:', 'self: "A"', 'extraDeny:']
 const miss = need.filter((s) => !y1.includes(s))
-check('① 两样齐 ⇒ 渲染出 insert 条目', miss.length === 0 && y1.includes('extraDeny:'), miss.length ? `缺：${miss.join(' | ')}` : '4 个关键字段齐 + extraDeny')
+// ★★ 反向断言：必须是【覆盖 config】，**不能是 insert**（实测：写成 insert 与包自带的 patch 撞 id
+//    ⇒ duplicate loader entry id ⇒ 整树装配失败 ⇒ 前门 502、控制面 200）
+const mustNot = ['- insert:', "name: '@dsh-brain/arm-isolation'"]
+const leaked = mustNot.filter((s) => y1.includes(s))
+check('① 覆盖 config（不是 insert，且不重复声明 name）', miss.length === 0 && leaked.length === 0,
+  (miss.length ? `缺：${miss.join(' | ')}` : '4 个关键字段齐') + (leaked.length ? ` ★ 不该有：${leaked.join(' | ')}` : '；且未 insert/未重复 name'))
 
 // ②
 const cases = [['缺 self', undefined, 'D:/x'], ['缺 deny', 'A', undefined], ['都空', '  ', '  '], ['deny 只有逗号', 'A', ' , , ']]
