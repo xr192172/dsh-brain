@@ -1,0 +1,76 @@
+{
+  "tag": "exp-t1-guard",
+  "front": "http://127.0.0.1:33080",
+  "cwd": "D:\\project_develop\\dsh-brain",
+  "preset": "standard",
+  "sessionId": "session-6c7a5f28-f046-4b1f-9d9c-d71ab09bf1d3",
+  "outcome": "settled",
+  "rounds": [
+    {
+      "round": 1,
+      "outcome": "settled"
+    }
+  ],
+  "wallMs": 317632,
+  "expect": null,
+  "presetReadBack": "standard",
+  "asOfSeq": {
+    "before": 3,
+    "after": 3536
+  },
+  "session": {
+    "file": "session.jsonl.zstd",
+    "events": 504,
+    "byType": {
+      "session": 1,
+      "permission/preset": 1,
+      "sandbox/mode": 1,
+      "approval/policy": 1,
+      "agent-preset/selected": 1,
+      "agent/inbox/spliced": 2,
+      "turn/start": 1,
+      "step/start": 11,
+      "user/message": 6,
+      "session/title": 1,
+      "request/header": 1,
+      "request/context": 1,
+      "session/title-llm-request": 1,
+      "assistant/chunk": 239,
+      "reasoning-chunks": 50,
+      "tool-call-chunks": 46,
+      "assistant/message": 11,
+      "tool/call": 49,
+      "tool/result": 49,
+      "step/end": 11,
+      "text-chunks": 19,
+      "turn/end": 1
+    }
+  },
+  "work": {
+    "toolCalls": 49,
+    "byTool": {
+      "read": 9,
+      "pwd": 1,
+      "pwsh": 30,
+      "grep": 5,
+      "glob": 3,
+      "write": 1
+    },
+    "codeDispatches": 0,
+    "steps": 11,
+    "turns": 1,
+    "outputTokens": 7506,
+    "uncachedInputTokens": 88523
+  },
+  "approvals": {
+    "asked": 0,
+    "decided": 0,
+    "open": false
+  },
+  "turnEndReasons": [
+    {
+      "kind": "completed"
+    }
+  ],
+  "assistantTexts": 11
+}

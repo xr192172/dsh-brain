@@ -63,8 +63,18 @@ export function experimentSpec(taskId, { arm = 'A', rounds = 1, cwd = WT } = {})
 
 /** 收卷：从 delegate 的结果里取"读了什么"（★ 不判分）。 */
 export function collectEvidence(delegateResult) {
+  // ★★ 修（**又是我自己犯的那一族**）：传进来 null/undefined 时，`evMissing` 会是 false、
+  //   于是 `readingQuality` 报 **ok** —— 把"根本没读到"说成"读到了" ✗
+  //    ⇒ **空读数一律算 missing**（"看不到 ≠ 没有"）。
+  if (!delegateResult || typeof delegateResult !== 'object') {
+    return {
+      outcome: null, toolCalls: null, assistantTexts: null, byTool: {},
+      evMissing: true, sessionId: null,
+      readingQuality: 'missing（委托结果没拿到 ⇒ 不许当 0、也不许当 ok）',
+    }
+  }
   const w = delegateResult?.work ?? {}
-  const evMissing = w.evMissing === true
+  const evMissing = w.evMissing === true || w.toolCalls === undefined
   return {
     outcome: delegateResult?.outcome ?? null,
     toolCalls: evMissing ? null : (w.toolCalls ?? null),
@@ -115,6 +125,23 @@ if (isMain) {
   const s = experimentSpec(taskId, { arm: argOf('--arm') ?? 'A', rounds: Number(argOf('--rounds') ?? 1) })
   if (!s.ok) { console.error(`[拒绝] ${s.reason}`); process.exit(2) }
   const sp = s.spec
+
+  // ★ `--from <result.json>`：**只重采证据**（用于"跑过了但收卷读错路径"这种情形 —— 免得白重跑一次）
+  const fromFile = argOf('--from')
+  if (fromFile) {
+    const p = path.resolve(fromFile)
+    if (!fs.existsSync(p)) { console.error(`[拒绝] 找不到 ${p}`); process.exit(2) }
+    const ev = collectEvidence(JSON.parse(fs.readFileSync(p, 'utf8')))
+    const dir = path.join(WT, 'evals', 'runs', '_evidence', sp.taskId)
+    fs.mkdirSync(dir, { recursive: true })
+    const f = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-recollect.json`)
+    fs.writeFileSync(f, JSON.stringify({ spec: sp, evidence: ev, recollectedFrom: path.relative(WT, p) }, null, 2) + '\n', 'utf8')
+    console.log(`-- 重采证据（from ${path.relative(WT, p)}）--`)
+    console.log(`  outcome=${ev.outcome}  toolCalls=${ev.toolCalls}  assistantTexts=${ev.assistantTexts}  读数质量=${ev.readingQuality}`)
+    console.log(`  证据已存：${f}`)
+    process.exit(ev.evMissing ? 1 : 0)
+  }
+
   console.log(`\n===== 实验：${sp.taskId}「${sp.title}」=====`)
   console.log(`  环境(env) : ${JSON.stringify(sp.env)}`)
   console.log(`  用哪一代   : arm=${sp.arm}  front=${sp.front}  DSH_HOME=${sp.dshHome}`)
@@ -138,9 +165,14 @@ if (isMain) {
   const dlOut = (dl.stdout ?? '') + (dl.stderr ?? '')
   console.log(dlOut.split('\n').filter((l) => /outcome|toolCalls|evMissing|产物|读数/.test(l)).slice(0, 6).join('\n'))
   let dres = null
-  const rp = path.join(WT, 'evals', 'runs', '_delegate-' + `exp-${sp.taskId}`, 'result.json')
-  const rp2 = path.join(WT, 'out', '_tasks', '_delegate-' + `exp-${sp.taskId}`, 'result.json')
-  for (const p of [rp, rp2]) if (fs.existsSync(p)) dres = JSON.parse(fs.readFileSync(p, 'utf8'))
+  // ★★ 派活产物目录的真实位置 = **<任务书所在目录>/_delegate-<tag>/**（我今天已记下这条，却又只找了另外两处）
+  const rps = [
+    path.join(path.dirname(sp.promptPath), `_delegate-exp-${sp.taskId}`, 'result.json'),
+    path.join(WT, 'out', '_tasks', `_delegate-exp-${sp.taskId}`, 'result.json'),
+    path.join(WT, 'evals', 'runs', `_delegate-exp-${sp.taskId}`, 'result.json'),
+  ]
+  for (const p of rps) if (fs.existsSync(p)) { dres = JSON.parse(fs.readFileSync(p, 'utf8')); console.log(`  （读到的 result.json = ${path.relative(WT, p)}）`); break }
+  if (!dres) console.log(`  ⚠️ **没找到 result.json**（找过：${rps.map((p) => path.relative(WT, p)).join(' / ')}）⇒ 证据会是 missing`)
 
   // ③ 收卷（采证据，**不判分**）
   const ev = collectEvidence(dres)

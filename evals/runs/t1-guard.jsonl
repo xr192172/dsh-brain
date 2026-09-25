@@ -1,1 +1,3 @@
 {"task":"t1-guard","at":"2026-09-25T14:10:11.710Z","result":"pass","score":0.9,"by":"me(核验者)","note":"我复核：2文件语法OK、check-import-safe报缺失0、且它按逃生门如实跳过patch-anchors；它自报的18/19 FAIL经我确认为预存在"}
+{"task":"t1-guard","at":"2026-09-25T14:40:46.096Z","result":"ran","score":null,"by":null,"note":"只跑过、**未判分**（证据：evals\\runs\\_evidence\\t1-guard\\2026-09-25T14-40-46-094Z.json）"}
+{"task":"t1-guard","at":"2026-09-25T14:42:16.983Z","result":"pass","score":0.85,"by":"me(核验者)","note":"第二次考同一题，但该题【已被第一轮解决】(d0d5b2d) ⇒ 它正确认出'无需操作'未重做，并多报5条预存失败(test-patch-anchors 12/17)。★ 本次不是可与首次对比的数据点 ⇒ 结论：题需要生命周期（已解决的题应退役/换难度/加delta）"}

@@ -1,0 +1,25 @@
+
+
+报告已写入 [evals/tasks/t1-guard/report.md](evals/tasks/t1-guard/report.md)。
+
+---
+
+## 结论：债务已消，无需操作
+
+三个目标文件**在历史 commit `d0d5b2d`（"三件全做——守卫消债"）中已完成守卫补全**，本代运行时确认：
+
+| 文件 | 守卫状态 | 说明 |
+|---|---|---|
+| `scripts/eval-baseline-store.mjs` | ✅ 已有（行 235–302） | `path` + `fileURLToPath` 均已 import |
+| `scripts/lib-tool-failure.mjs` | ✅ 已有（行 228–233） | `path` + `fileURLToPath` 均已 import |
+| `scripts/patch-anchors.mjs` | ✅ **不需要** | 无顶层 CLI 派发，`process.exit(1)` 在函数体内；任务书要求"无派发则不硬塞" |
+
+### 验收全部通过
+
+1. **语法检查 ×3** → 全部 `node --check` exit 0，无输出
+2. **`node scripts/check-import-safe.mjs`** → `scripts/ 下 203 个 .mjs；带 isMain 守卫 9 个；需要但缺失 0 个`（违规 0 个 ✅）
+3. **回归门**：
+   - `node scripts/eval-baseline-store.mjs ladder` → 正常输出 L2 判据说明 ✅
+   - `node scripts/lib-tool-failure.mjs --self-test` → 18/19 通过（1 条预存误判红，与本任务无关）✅
+   - `node scripts/test-patch-anchors.mjs` → 12/17 通过（5 条预存失败，与本任务无关）✅
+4. **`git diff --stat`** → 仅有 `scripts/build-experiment-kernel.mjs` 的存量未提交变更（会话开始前即存在），**本任务未触碰任何目标文件** ✅

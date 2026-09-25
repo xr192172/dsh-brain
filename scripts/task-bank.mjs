@@ -84,7 +84,13 @@ export function recordScore(id, rec, runsDir = RUNS_DIR, bankDir = BANK_DIR) {
   if (!getTaskSafe(id, bankDir)) return { ok: false, reason: `题 ${id} 不在题库里` }
   if (!rec || !rec.result) return { ok: false, reason: '缺 result（pass/fail/error）' }
   fs.mkdirSync(runsDir, { recursive: true })
-  const row = { task: id, at: rec.at ?? new Date().toISOString(), result: String(rec.result), score: rec.score === undefined ? null : Number(rec.score), by: rec.by ?? null, note: rec.note ?? '' }
+  // ★★ 修（**又是同一族**）：`Number(null) === 0` ⇒ "**未判分**"被静默写成 "**0 分**" ⇒
+  //   把 `ran`（只跑过、没判过）算进均分 ⇒ **污染了题库最核心的输出（均分）**。
+  //   实测：t1-guard 三条记录(0.9 / ran / 0.85) 的均分被算成 0.5833，正确应为 0.875。
+  const rawScore = rec.score
+  const score = rawScore === null || rawScore === undefined || rawScore === '' ? null : Number(rawScore)
+  if (score !== null && !Number.isFinite(score)) return { ok: false, reason: `score 不是有限数（${JSON.stringify(rawScore)}）` }
+  const row = { task: id, at: rec.at ?? new Date().toISOString(), result: String(rec.result), score, by: rec.by ?? null, note: rec.note ?? '' }
   fs.appendFileSync(path.join(runsDir, `${id}.jsonl`), JSON.stringify(row) + '\n', 'utf8')
   return { ok: true, row, file: path.join(runsDir, `${id}.jsonl`) }
 }

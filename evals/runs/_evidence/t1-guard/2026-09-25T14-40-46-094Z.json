@@ -1,0 +1,25 @@
+{
+  "spec": {
+    "taskId": "t1-guard",
+    "title": "任务 T1：给 3 个既存违规补 `isMain` 守卫（消债）",
+    "arm": "A",
+    "env": {
+      "inherit": true,
+      "note": "题面未特化环境 ⇒ 用默认实验场"
+    },
+    "front": "http://127.0.0.1:33080",
+    "dshHome": "D:/project_develop/_arms/a/dshhome",
+    "promptPath": "D:\\project_develop\\dsh-brain\\evals\\tasks\\t1-guard\\task.md",
+    "cwd": "D:\\project_develop\\dsh-brain",
+    "rounds": 1
+  },
+  "evidence": {
+    "outcome": null,
+    "toolCalls": null,
+    "assistantTexts": null,
+    "byTool": {},
+    "evMissing": false,
+    "sessionId": null,
+    "readingQuality": "ok"
+  }
+}
