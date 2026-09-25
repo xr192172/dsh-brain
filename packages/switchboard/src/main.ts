@@ -30,12 +30,13 @@ import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { FrontDoor } from './proxy.js'
 import { Coordinator, allocGenPort, type CoordinatorConfig } from './coordinator.js'
 import { AdminClient } from './adminclient.js'
 import { spawnGen } from './spawner.js'
 import { PreflightRunner, type PreflightConfig, type PreflightState } from './preflight.js'
+import * as mgmt from './mgmt.js'
 import type { PreflightManifest } from './preflight-contract.js'
 import { resolveGenSpawnSpec, projectAssembly } from './gen-assembly.js'
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -253,6 +254,49 @@ function boot(config: CoordinatorConfig): void {
       } catch (e) {
         res.statusCode = 500
         res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }))
+      }
+    } else if (cmd === 'mgmt') {
+      // ★★ 2026-09-25：**控制面当 DSH 的管理面**。
+      //   用户：*"我只需要点在桌面启动这个蓝绿面板，然后你就可以通过这个蓝绿面板去**绕过这个 Shell**，
+      //   毕竟它**已经是个长服务**了，去绕过这个 Shell 去用这个蓝绿面板去**管理这个 DSH**。"*
+      //   ★ 安全三前提见 `mgmt.ts`：**具名动作白名单 / 参数先校验 / 绝不经 shell（spawn 数组）**。
+      const wt = process.cwd()
+      const V = mgmt.validate(url, wt)
+      if (!V.ok) {
+        res.end(JSON.stringify({ ok: false, cmd: 'mgmt', error: V.reason }))
+      } else if (V.v.action === 'result') {
+        const f = join(mgmt.mgmtDir(wt), `${V.v.runId}.json`)
+        res.end(
+          existsSync(f)
+            ? readFileSync(f, 'utf8')
+            : JSON.stringify({ ok: false, stage: 'missing', runId: V.v.runId, error: '还没有这个 runId 的结果（或尚未落盘）' }),
+        )
+      } else if (V.v.action === 'experiment') {
+        // ★ 长任务 ⇒ **立即回 started + runId**（与 handover / preflight 同款），结果落文件供轮询
+        const runId = `${V.v.task}-${Date.now()}`
+        const dir = mgmt.mgmtDir(wt)
+        try { mkdirSync(dir, { recursive: true }) } catch { /* 忽略 */ }
+        writeFileSync(
+          join(dir, `${runId}.json`),
+          JSON.stringify({ ok: true, stage: 'running', task: V.v.task, arm: V.v.arm, runId, startedAt: new Date().toISOString() }, null, 2),
+          'utf8',
+        )
+        res.end(JSON.stringify({ ok: true, cmd: 'mgmt', action: 'experiment', stage: 'started', runId }))
+        void (async () => {
+          const r = mgmt.execAction(V.v as mgmt.Validated, wt, process.execPath)
+          writeFileSync(
+            join(dir, `${runId}.json`),
+            JSON.stringify(
+              { ok: r.code === 0, stage: 'done', task: V.v.task, arm: V.v.arm, runId, code: r.code, stdout: r.stdout.slice(-20000), stderr: r.stderr.slice(-4000) },
+              null,
+              2,
+            ),
+            'utf8',
+          )
+        })()
+      } else {
+        const r = mgmt.execAction(V.v, wt, process.execPath)
+        res.end(JSON.stringify({ ok: r.code === 0, cmd: 'mgmt', action: V.v.action, code: r.code, stdout: r.stdout.slice(-20000), stderr: r.stderr.slice(-4000) }))
       }
     } else if (cmd === 'status') {
       const lease = coord.getLease()
