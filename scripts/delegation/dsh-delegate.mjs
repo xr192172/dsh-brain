@@ -159,6 +159,11 @@ const roundLog = []
 
 for (round = 1; round <= rounds; round++) {
   const text = round === 1 ? firstText : continueText(round)
+  // ★★ 2026-09-25 修：基准 seq 必须在【发指令之前】读。
+  //   原来读在 `session.prompt` **之后** ⇒ 若会话在那两步之间就跑完一个回合，
+  //   `asOfSeq` 恰好等于基准 ⇒ 完成判据 `!== baseSeq` **永不成立** ⇒ 挂到预算上限。
+  //   （`round.mjs` 被这条实测卡了 17 分钟；本脚本同结构，一并堵上。）
+  const baseSeq = (await sessionItem(sid))?.projections?.asOfSeq ?? beforeSeq
   const sent = await rpc('session.prompt', {
     sessionId: sid, mode: 'steer', content: [{ type: 'text', text }], clientTimeZone: 'Asia/Shanghai',
   })
@@ -168,10 +173,10 @@ for (round = 1; round <= rounds; round++) {
     console.error(`[失败] 指令没被接受：${sent.text.slice(0, 300)}`)
     process.exit(1)
   }
-  // ★ 每轮都以"发指令那一刻"的 seq 为基准（否则第二轮会因为 seq 早已前进而立刻判 settled）
-  const baseSeq = (await sessionItem(sid))?.projections?.asOfSeq ?? beforeSeq
   let lastSeq = baseSeq
   let lastProgressAt = Date.now()
+  // ★ 2026-09-25：加"看见过前进"标志（配合上面的"发指令前读基准"，两条一起堵住误判）
+  let sawProgress = false
   let preEvents = readEvents(sid).events.length
   outcome = 'over-budget'
 
@@ -179,15 +184,15 @@ for (round = 1; round <= rounds; round++) {
     await new Promise((r) => setTimeout(r, 5000))
     const cur = await sessionItem(sid)
     const seq = cur?.projections?.asOfSeq ?? null
-    if (seq !== null && seq !== lastSeq) { lastSeq = seq; lastProgressAt = Date.now() }
+    if (seq !== null && seq !== lastSeq) { lastSeq = seq; lastProgressAt = Date.now(); sawProgress = true }
     try {
       const { events } = readEvents(sid)
       approvalAsked = events.filter((e) => e.type === 'approval/asked').length
       approvalDecided = events.filter((e) => e.type === 'approval/decided').length
-      if (events.length !== preEvents) { preEvents = events.length; lastProgressAt = Date.now() }
+      if (events.length !== preEvents) { preEvents = events.length; lastProgressAt = Date.now(); sawProgress = true }
     } catch { /* 读日志失败不算致命 */ }
 
-    if (cur && cur.running === false && (cur.projections?.asOfSeq ?? 0) !== baseSeq) { outcome = 'settled'; break }
+    if (cur && cur.running === false && sawProgress) { outcome = 'settled'; break }
     if (Date.now() - lastProgressAt > stallMs) {
       log(`⚠️ ${Math.round((Date.now() - lastProgressAt) / 1000)}s 无任何前进 —— 疑似在等审批（asked=${approvalAsked} decided=${approvalDecided}）或卡住；继续等但会如实记账`)
       lastProgressAt = Date.now()

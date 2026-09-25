@@ -107,6 +107,29 @@ export function apply(ctx: Context, config: z.infer<typeof Config>): void {
       if (r && r.trim()) denyRoots.push(normalizePath(r.trim()))
     }
   }
+  // ★★ 2026-09-25 主线修：**不许静默 no-op**。
+  //   原来这里只印一行 `denyRoots=0 条` ⇒ 一个**配置错的挂载会悄悄什么都不拦**，
+  //   而调用方以为"已经隔离好了" —— 这正是本项目最怕的**假绿**（比没有门更糟：它让人以为查过了）。
+  //   现在分两种情形，各自 fail 的方式不同：
+  //     · 配了 `self` ⇒ deny 却为空（arms 里除自己外没有别的臂、extraDeny 也空）⇒ **抛错拒绝启动**
+  //       （你明确要求"隔离我自己"，却没给任何可隔离的对象 ⇒ 这个配置不可能起作用）
+  //       ★ 与 `arms-registry`（缺 cwd/store/label 一律报错）和 `gen-assembly` INV-C（清单坏就 abort，
+  //         不静默降级）同一风格。
+  //     · 什么都没配 ⇒ **醒目警告 + 显式 no-op**（保留"挂了但没配"的合法语义，但绝不让人误解）
+  if (denyRoots.length === 0) {
+    if (config.self && config.self.trim()) {
+      throw new Error(
+        `arm-isolation: 已设 self="${config.self}"，但 deny 集合为空 ⇒ **拒绝启动（fail-closed）**：` +
+          `arms 里除 self 外没有其它臂，且 extraDeny 为空 ⇒ 本配置不可能起到隔离作用。` +
+          `请补 arms / extraDeny，或干脆不要挂载本插件。`,
+      )
+    }
+    console.log(
+      `[arm-isolation] ★★ 警告：未配置 self / arms / extraDeny ⇒ 本插件**不拦任何东西**（显式 no-op）。` +
+        `若你以为它正在隔离，那是误解 —— 沙箱全开（danger-full-access）时这一层是唯一护栏。`,
+    )
+    return
+  }
   console.log(`[arm-isolation] apply running; denyRoots=${denyRoots.length} 条`)
   ctx.inject(['tools'], (tctx) => {
     tctx.tools.guard((exec) => {

@@ -201,15 +201,24 @@ async function sendPrompt(text) {
 async function waitForSettle(baseSeq) {
   let lastSeq = baseSeq
   let lastProgressAt = Date.now()
+  // ★★ 2026-09-25 主线加：**"看见过前进"才认 settle**（原来只判 `asOfSeq !== baseSeq`）。
+  //   为什么必须加：一旦基准 seq 读晚了（或会话在两次轮询之间就把回合跑完），
+  //   `!==` 这个判据可能**永不成立** ⇒ 挂到预算上限（实测 17 分钟）。
+  //   加这个标志后，"从来没看见前进"就**不会**被误判成 settled（仍能防"还没起跑就判完"）；
+  //   再配合调用方"发指令【前】读基准"的修法，两条一起把口子堵上。
+  let sawProgress = false
   while (Date.now() - t0 < budgetMs) {
     await new Promise((r) => setTimeout(r, 5000))
     const cur = await sessionItem(sid)
     const seq = cur?.projections?.asOfSeq ?? null
-    if (seq !== null && seq !== lastSeq) { lastSeq = seq; lastProgressAt = Date.now() }
-    if (cur && cur.running === false && (cur.projections?.asOfSeq ?? 0) !== baseSeq) {
+    if (seq !== null && seq !== lastSeq) { lastSeq = seq; lastProgressAt = Date.now(); sawProgress = true }
+    if (cur && cur.running === false && sawProgress) {
       return { outcome: 'settled', cur }
     }
-    if (Date.now() - lastProgressAt > stallMs) {
+    if (!sawProgress && Date.now() - lastProgressAt > stallMs) {
+      log(`⚠️ ${Math.round((Date.now() - lastProgressAt) / 1000)}s **从没看见 seq 前进** —— 可能是基准读晚了或指令没生效，继续等但会如实记账`)
+      lastProgressAt = Date.now()
+    } else if (Date.now() - lastProgressAt > stallMs) {
       log(`⚠️ ${Math.round((Date.now() - lastProgressAt) / 1000)}s 无前进，继续等`)
       lastProgressAt = Date.now()
     }
@@ -236,9 +245,13 @@ const steerText = steerFile
 let seqAtSteer = beforeSeq
 if (r1.outcome === 'settled') {
   log('[边界] 注入边界约束...')
+  // ★★ 2026-09-25 主线修（**"第 2 轮永不收敛"的根因**）：基准 seq 必须在【发指令之前】读，
+  //    与第 1 轮的 `seqAtSend` 同一口径。原来这里是在 `sendPrompt` **之后**读 ⇒
+  //    若会话在"发指令"与"读 seq"之间就跑完了整个回合，`asOfSeq` 恰好等于这个基准 ⇒
+  //    `waitForSettle` 的完成判据**永不成立** ⇒ 等满预算（默认 40 分钟）。实测被这条卡了 17 分钟。
+  seqAtSteer = (await sessionItem(sid))?.projections?.asOfSeq ?? r1.cur?.projections?.asOfSeq ?? beforeSeq
   const okSteer = await sendPrompt(steerText)
   if (okSteer) {
-    seqAtSteer = (await sessionItem(sid))?.projections?.asOfSeq ?? r1.cur?.projections?.asOfSeq ?? beforeSeq
     let r2 = await waitForSettle(seqAtSteer)
     log(`第 2 轮（边界后）结束：${r2.outcome}`)
     roundLog.push({ round: 2, outcome: r2.outcome })

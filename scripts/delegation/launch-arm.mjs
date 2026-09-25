@@ -67,7 +67,34 @@ for (const k of ['cwd', 'store', 'label']) {
 // ── 生成启动规格 ───────────────────────────────────────────────────────────────
 const ts = new Date().toISOString()
 const gen = `gen-${Date.now()}`
-const profile = arm.preset ?? 'standard'
+// ★★ 2026-09-25 主线修：**`preset` ≠ `profile`**（原来写的是 `arm.preset ?? 'standard'`）。
+//   两者是**不同命名空间**：`preset` 是 agent preset（`council`/`standard`/`code`/…），
+//   `profile` 是 `$DSH_HOME/profiles/<name>` 下的装配剖面（`web`/`exp-base`/…）。
+//   实测：`council` **不在** profile 目录里 ⇒ 拿它换代**必然起一个起不来的代**
+//   （蓝绿有 verify+回滚兜住，但那是白折腾 + 一堆噪音，而且会让人误以为"换代机制坏了"）。
+//   现在：① `--profile <名>` 显式指定优先；② 否则用控制剖面（安全：**同剖面换代** =
+//   干净地验证蓝绿机制本身）；③ **无论哪种都必须真实存在**，否则 fail-closed 报错。
+const DSH_HOME_FOR_PROFILES = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'
+const CONTROL_PROFILE = 'web'
+let knownProfiles = []
+try {
+  knownProfiles = fs
+    .readdirSync(path.join(DSH_HOME_FOR_PROFILES, 'profiles'), { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name !== 'node_modules')
+    .map((e) => e.name)
+    .sort()
+} catch { /* 读不到就留空 ⇒ 下面会 fail-closed */ }
+const profile = argOf('--profile') ?? (knownProfiles.includes(CONTROL_PROFILE) ? CONTROL_PROFILE : null)
+if (!profile || !knownProfiles.includes(profile)) {
+  console.error(
+    `[失败] profile "${profile ?? '(推不出)'}" 不在 ${DSH_HOME_FOR_PROFILES}/profiles/ 下 ⇒ **拒绝**` +
+      `（换代到不存在的剖面 = 起个坏代）。\n` +
+      `  现存 profile：${knownProfiles.join(', ') || '(读不到目录)'}\n` +
+      `  ★ 臂的 preset=${JSON.stringify(arm.preset)} 是 **preset**，不是 profile —— 别混。\n` +
+      `  若要指定，用 --profile <name>。`,
+  )
+  process.exit(1)
+}
 const isolationHome = path.resolve(process.cwd(), 'out', `${arm.name.toLowerCase()}-dshhome`)
 const overlayDir = path.resolve(process.cwd(), 'out', `arm-overlay-${arm.name.toLowerCase()}`)
 
@@ -100,7 +127,14 @@ const startCmd = [
   'node scripts/capability-registry.mjs init --home "' + isolationHome.replace(/\\/g, '/') + '"',
   '',
   '# 3. 起隔离实例（独立端口段，不与现役冲突）',
-  'DSH_HOME="' + isolationHome.replace(/\\/g, '/') + '" node scripts/start-switchboard.mjs',
+  'DSH_HOME="' + isolationHome.replace(/\\/g, '/') + '" node scripts/relaunch-switchboard.mjs',
+  '',
+  '★ ★★ 这一段【尚未闭环】，别当成已解决：',
+  '   · `scripts/relaunch-switchboard.mjs:49` 把 `DSH_HOME` **硬编码**成现役库',
+  '     （`C:\\Users\\Admin\\.dsh`）⇒ 它**起不出"隔离 DSH_HOME"的实例**。',
+  '   · 现存 `scripts/start-switchboard.ps1` 的用法**未经核实**。',
+  '   ⇒ 要真起隔离实例，先补一个**能接 `DSH_HOME`** 的启动器（这是 ③ 剩下的那半）。',
+  '   · 另：本机硬约束 —— 长期服务**只能由你的终端起**，工具会话里起不来。',
 ].join('\n')
 
 // ── --mode print ────────────────────────────────────────────────────────────────
