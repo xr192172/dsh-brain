@@ -50,6 +50,21 @@ const dryRun = hasFlag('--dry-run')
 const force = hasFlag('--force')
 const record = hasFlag('--record')
 const launch = hasFlag('--launch')
+/** ★ 2026-09-25：默认给隔离实例挂上自进化的两席；`--no-evo-seats` 可关掉（判据要用它来自证"是我们写的"）。 */
+const noEvoSeats = hasFlag('--no-evo-seats')
+/**
+ * 自进化两席的路由，形如 `agnes/agnes-2.5-flash`（`provider/model`）。
+ * ★★ 防串供（`docs/revised-architecture-2026-09-20.md:218` 逐字"产变更方不能与审批方同源"）
+ *    要求两席**不同源** ⇒ 所以**分两个 flag 给**，而不是一个共用的。
+ */
+const parseRoute = (s) => {
+  const v = (s ?? '').trim()
+  if (!v) return { provider: '', model: '' }
+  const i = v.indexOf('/')
+  return i < 0 ? { provider: '', model: v } : { provider: v.slice(0, i), model: v.slice(i + 1) }
+}
+const routeDev = parseRoute(argOf('--evo-route-dev'))
+const routeReview = parseRoute(argOf('--evo-route-review'))
 
 if (!armName) {
   console.error('[用法] 需要 --arm <臂名>')
@@ -440,6 +455,51 @@ function preparePackageJson(profileSrc, profileDst) {
   return { ok: true, addedDep: '@dsh-brain/arm-isolation' }
 }
 
+/**
+ * ★★ 2026-09-25：给**隔离实例的 profile** 挂上「自进化的两个固定子 agent」（开发脑 / 审批脑）。
+ *
+ * 依据：`docs/training-ground-and-skill-sieve-2026-09-25.md` §11（用户口述）
+ *       + `docs/revised-architecture-2026-09-20.md` §7（三段流水线）。
+ *
+ * ★ 为什么写**两条** `insert` 而不是一条 `seats:['dev','review']`：
+ *   防串供（文档 `:218` 逐字「**产变更方不能与审批方同源**」）要求两席能各给路由 ⇒ 两条条目才装得下两套路由。
+ * ★ **id 必须互不相同**（本项目铁律：同名 loader 条目 ⇒ `duplicate loader entry id` ⇒ **整树装配失败**）。
+ * ★ **只写隔离实例自己的 profile** ⇒ 现役一个字都不动。
+ * ★ 幂等：文件里已有 `# [evo-seats]` 标记就跳过（`--force` 重建时会重写整份 profile，不会重复追加）。
+ */
+function prepareEvolutionSeats(profileDst, { routeDev, routeReview } = {}) {
+  const patch = path.join(profileDst, 'cordis.patch.yml')
+  if (!fs.existsSync(patch)) return { evoSeats: 'skipped（profile 里没有 cordis.patch.yml）' }
+  const cur = fs.readFileSync(patch, 'utf8')
+  if (cur.includes('# [evo-seats]')) return { evoSeats: '已存在（幂等跳过）' }
+
+  const seatLines = (seat, route) => {
+    const l = [`    - id: evo-${seat}`, `      name: '@dsh-brain/subagent-council'`, '      config:', `        seat: ${seat}`]
+    if (route.model) l.push(`        model: ${JSON.stringify(route.model)}`)
+    if (route.provider) l.push(`        provider: ${JSON.stringify(route.provider)}`)
+    return l
+  }
+  const out = [
+    '',
+    '# [evo-seats] 自进化的两个固定子 agent（开发脑 / 审批脑）—— 由 isolated-instance 注入（**只写隔离实例**）',
+    '#   依据 docs/revised-architecture-2026-09-20.md §7 与 docs/training-ground-and-skill-sieve-2026-09-25.md §11',
+    '#   ★ 防串供要求两席【不同源】；两条条目各带路由。未给路由 ⇒ 两席各自继承，插件启动期会告警"它们就同源"。',
+    '- insert:',
+  ]
+  out.push(...seatLines('dev', routeDev ?? { provider: '', model: '' }))
+  out.push(...seatLines('review', routeReview ?? { provider: '', model: '' }))
+  fs.appendFileSync(patch, out.join('\n') + '\n', 'utf8')
+
+  const same =
+    (routeDev?.provider ?? '') === (routeReview?.provider ?? '') &&
+    (routeDev?.model ?? '') === (routeReview?.model ?? '')
+  return {
+    evoSeats: same
+      ? '已注入 evo-dev / evo-review ★ 但**两席路由相同** ⇒ 防串供只有形式（未给两套路由）'
+      : '已注入 evo-dev / evo-review（两席路由不同 ⇒ 防串供有实质）',
+  }
+}
+
 function prepareProfile(profileSrc, profileDst) {
   const files = ['cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
   for (const f of files) {
@@ -455,7 +515,12 @@ function prepareProfile(profileSrc, profileDst) {
   // node_modules → 真实目录 + 逐项符号链接
   const nmResult = prepareNodeModules(profileSrc, profileDst)
 
-  return { ...pkgResult, ...nmResult }
+  // ★ 自进化两席（开发脑 / 审批脑）—— **只写隔离实例的 profile**，现役不动
+  const evoResult = noEvoSeats
+    ? { evoSeats: '已跳过（--no-evo-seats）' }
+    : prepareEvolutionSeats(profileDst, { routeDev, routeReview })
+
+  return { ...pkgResult, ...nmResult, ...evoResult }
 }
 
 function prepareSettings(settingsSrc, settingsDst, armPreset) {
@@ -596,6 +661,7 @@ console.log('  profile     : ' + profile)
 console.log('  node_modules: ' + (nmResult.built?.length ?? 0) + ' 项已建' +
   (nmResult.skipped?.length ? '，' + nmResult.skipped.length + ' 项跳过' : ''))
 console.log('  arm-isolation: ' + (nmResult.built?.includes('@dsh-brain/arm-isolation') ? '✓ 已加入' : '⚠ 未加入'))
+console.log('  自进化两席  : ' + (nmResult.evoSeats ?? '(未处理)'))
 console.log('  verifyout   : ' + verifyOut.replace(/\\/g, '/'))
 console.log('')
 console.log('  训练场身份：')
