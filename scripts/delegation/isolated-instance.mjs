@@ -813,6 +813,14 @@ console.log('  arm-isolation: ' + (fs.existsSync(armIsoPath) ? '✓ 已在（联
 console.log('  自进化两席  : ' + (nmResult.evoSeats ?? '(未处理)'))
 console.log('  端口覆盖    : ' + (nmResult.isoPorts ?? '(未处理)'))
 console.log('  自建 preset : ' + (presetResult.agentPresets ?? '(未处理)'))
+// ★★ 2026-09-25 加：把**算好的训练场身份**吐成一行机器可读的 JSON，供 `arm-up.mjs` **消费**。
+//   为什么必须由本脚本吐（而不是让 arm-up 自己再算一遍）：deny 的推导只能有**一处** ——
+//   否则就是"同一件事两套算法"，两边一漂移就会出现"启动器以为装了隔离、其实 deny 是空的"。
+//   实测：arm-up 第一版只传了 DSH_ARM_SELF、没传 DSH_ARM_DENY ⇒ 护栏走"显式 no-op" ⇒ **不拦任何东西**。
+console.log(
+  '[arm-env] ' +
+    JSON.stringify({ DSH_ARM_SELF: ARM_SELF, DSH_ARM_DENY: ARM_DENY, DSH_HOME: dshHome, ...PORTS }),
+)
 console.log('  verifyout   : ' + verifyOut.replace(/\\/g, '/'))
 console.log('')
 console.log('  训练场身份：')

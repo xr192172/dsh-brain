@@ -187,21 +187,58 @@ if (!armName) {
   process.exit(2)
 }
 
-// 臂清单（取自注册表；拿不到就退化成"只有这一臂"）
-let allArms = [armName]
+// ── 臂清单：**必须来自注册表，读不到就拒跑**（★ 我第一版这里静默退化 ⇒ 臂 B 拿到臂 A 的端口段）──
+//    为什么不能退化：`indexOf` 失败会返回 -1 ⇒ `Math.max(0,-1)=0` ⇒ **base 永远是 33080**
+//    ⇒ 与臂 A **撞段**，还会把 A 的前门当成自己的（"已在跑"⇒跳过启动）⇒ **自检去看空气**。
+let allArms = null
 try {
-  const reg = await import('node:module').then((m) => m.createRequire(path.join(WT, 'scripts/x.cjs'))('' + path.join(WT, 'scripts/arms-registry.mjs')))
-  allArms = (reg.loadArmsRegistry().arms ?? []).map((a) => a.name)
-  if (!allArms.includes(armName)) allArms = [armName, ...allArms]
-} catch { /* 退化 */ }
+  const { createRequire } = await import('node:module')
+  const req = createRequire(path.join(WT, 'scripts', 'arms-registry.mjs'))
+  const { loadArmsRegistry } = req(path.join(WT, 'scripts', 'arms-registry.mjs'))
+  allArms = (loadArmsRegistry('evals/arms.json', { base: WT }).arms ?? []).map((a) => a.name)
+} catch (e) {
+  console.error(`[失败] 读不到臂注册表（evals/arms.json）⇒ **拒绝猜臂序号**：${e?.message ?? e}`)
+  process.exit(2)
+}
+if (!allArms.includes(armName)) {
+  console.error(`[失败] 臂 "${armName}" 不在注册表里 ⇒ 拒绝猜它的序号（猜错会撞别的臂的端口段）。\n  可用的臂：${allArms.join(', ')}\n  ⇒ 要么用现成的臂名，要么先把它加进 evals/arms.json。`)
+  process.exit(2)
+}
 
 const ports = portsForArm(armName, allArms)
 const root = rootForArm(armName)
 console.log(`\n===== arm-up · 臂 ${armName} =====`)
 console.log(`  ★ 唯一自变量 = 臂名；端口段由臂序号派生（不再手抄）`)
+console.log(`  臂序号   : ${allArms.indexOf(armName)}（注册表 ${allArms.join(', ')}）`)
 console.log(`  根目录   : ${root}`)
 console.log(`  端口段   : switch=${ports.base}  gen=${ports.genBase}+  pool=${ports.pool}  admin=${ports.base + 100}  handover=${ports.base + 110}`)
 console.log(`  现役占用 : ${[...LIVE_PORTS].join(', ')}（派生结果不许落进来）`)
+
+// ── ★★ 段位归属前置断言：那一段若有人在应答，**必须证明是本实例的**（看本 root 有没有 lease）──
+//    否则就是"别人占着这段"（我第一版正是把臂 A 的前门当成了臂 B 的）⇒ **拒跑**。
+const rootHasLease = (() => {
+  // ★ 2026-09-25 修：lease 在 **`<root>/dshhome/switchboard/lease.json`**（**不在** `<gen>/lease.json`）。
+  //   我第一版找 `<gen>/lease.json` ⇒ 恒 false ⇒ **把自己的实例误判成"别人占着"⇒ 误拒**。
+  //   （误拒比误放好，但仍是错的 —— 读数路径没核对就拿来判，正是今天反复踩的那类。）
+  const f = path.join(root, 'dshhome', 'switchboard', 'lease.json')
+  if (!fs.existsSync(f)) return false
+  try {
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'))
+    return !!j?.activeGen?.gen
+  } catch { return false }
+})()
+const preFront = await rpc(ports.front, 'session.list')
+const preAdmin = await get(`${ports.admin}/?cmd=status`)
+const someoneThere = preFront.http === 200 || preAdmin.http === 200
+if (someoneThere && !rootHasLease) {
+  console.error(
+    `[失败] 端口段 ${ports.base} 已经**有人在应答**，但 ${path.join(root, 'dshhome')} 里没有 lease ⇒\n` +
+      `  那一段**不是本实例的**（很可能是别的臂占着）⇒ 拒跑。\n` +
+      `  ⇒ 请换一个臂名，或先把那一段上的实例停掉。`,
+  )
+  process.exit(2)
+}
+if (someoneThere) console.log(`  （前置：本段已在应答，且本 root 有 lease ⇒ 确认是**本实例**，将继续）`)
 
 // ① 准备（复用 isolated-instance，端口只传 base）
 if (!hasFlag('--no-start')) {
@@ -219,14 +256,41 @@ if (!hasFlag('--no-start')) {
   }
 
   // ② 起（★ 用派生出的 env 起，不经人手）
-  //    ★★ 但**先探一下**：已经在跑就不再起 —— 否则会 EADDRINUSE，而自检会读到**旧代**的 boot.log
-  //      ⇒ **假绿**（看着全过，其实看的是上一代）。这条是本脚本自己的"不许自欺"。
-  const already = await rpc(ports.front, 'session.list')
-  if (already.http === 200 && already.ok) {
-    console.log('\n-- ② 起 —— **跳过**：前门已在应答（只做自检，不重启）--')
+  //    ★★ 用**已核过 lease 的** `someoneThere`（上面那段前置断言），不再自己重新探一遍 ——
+  //    语义差别很大：只有"本 root 有 lease"才算"本实例已在跑"。
+  if (someoneThere) {
+    console.log('\n-- ② 起 —— **跳过**：本实例已在应答（lease 已核 ⇔ 是它自己；只做自检，不重启）--')
   } else {
-    console.log('\n-- ② 起（用派生 env 调 relaunch-switchboard.cmd，不经人手）--')
-    const env = { ...process.env, DSH_HOME: path.join(root, 'dshhome'), DSH_ARM_SELF: armName, ...ports.env }
+    console.log('\n-- ② 起（用**准备阶段吐出的**身份/端口 env 起，不经人手）--')
+    // ★★ 身份与端口**只信准备阶段那一处**（本脚本不再自己算一遍 deny —— 两套算法必然漂移）。
+    //    实测：只传 DSH_ARM_SELF、不传 DSH_ARM_DENY ⇒ 护栏走"显式 no-op" ⇒ **不拦任何东西**。
+    const armEnvLine = (r.stdout ?? '').split('\n').find((l) => l.includes('[arm-env] '))
+    if (!armEnvLine) {
+      console.error('[失败] 没从准备阶段拿到 [arm-env]（训练场身份 + 端口）⇒ **拒绝在"身份不明"下去起服务**')
+      process.exit(1)
+    }
+    let armEnv
+    try {
+      armEnv = JSON.parse(armEnvLine.slice(armEnvLine.indexOf('[arm-env] ') + '[arm-env] '.length))
+    } catch (e) {
+      console.error(`[失败] [arm-env] 不是合法 JSON ⇒ 拒跑：${e?.message ?? e}`)
+      process.exit(1)
+    }
+    // 三道一致性/非空断言（★ 最后一条正是刚才那个洞的守卫）
+    if (armEnv.DSH_ARM_SELF !== armName) {
+      console.error(`[失败] 准备阶段给的身份是 "${armEnv.DSH_ARM_SELF}"，与臂名 "${armName}" 不符 ⇒ 拒跑`)
+      process.exit(1)
+    }
+    if (String(armEnv.SWITCH_PORT) !== String(ports.base)) {
+      console.error(`[失败] 端口推导**两边不一致**（准备阶段 ${armEnv.SWITCH_PORT} ≠ 本脚本 ${ports.base}）⇒ 拒跑`)
+      process.exit(1)
+    }
+    if (!armEnv.DSH_ARM_DENY || String(armEnv.DSH_ARM_DENY).trim() === '') {
+      console.error(`[失败] DSH_ARM_DENY 为空 ⇒ 护栏会走"显式 no-op"**什么都不拦** ⇒ 拒跑（这一条是实测踩出来的）`)
+      process.exit(1)
+    }
+    console.log(`  身份 : DSH_ARM_SELF=${armEnv.DSH_ARM_SELF}  DSH_ARM_DENY=${armEnv.DSH_ARM_DENY}`)
+    const env = { ...process.env, ...armEnv, ...ports.env }
     const l = spawnSync('cmd', ['/c', path.join(WT, 'scripts', 'relaunch-switchboard.cmd')], { encoding: 'utf8', env, timeout: 120000 })
     console.log(`  relaunch exit=${l.status}（它自己返回后服务在后台起）`)
   }
