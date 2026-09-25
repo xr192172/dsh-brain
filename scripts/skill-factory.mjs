@@ -177,6 +177,14 @@ function selftest() {
 const argv = process.argv.slice(2)
 const argOf = (k) => { const i = argv.indexOf(k); return i < 0 ? null : (argv[i + 1] ?? null) }
 
+/**
+ * ★★ 2026-09-25 修：**只在"被当作主模块运行"时派发 CLI**（与 `skill-sieve.mjs` 同一个修法）。
+ *   实测**第三次**踩同一个坑：`skill-to-preset.mjs` 一 `import` 本文件，
+ *   本文件就拿 **import 方的 argv** 跑了自己的 `--selftest` 并 `process.exit(0)` ⇒ 把对方的判据**截断**。
+ *   ⇒ 常驻守卫：`scripts/check-import-safe.mjs`（凡"被别的脚本 import 且顶层派发 CLI"的都必须有本守卫）。
+ */
+const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
 if (argv.includes('--selftest-only')) {
   // 消融版自调用：只跑**那个单因子样本**，故意让它 FAIL 供父进程断言
   // （样本 = 二等"缺 Script"，Tools 非空 ⇒ 撤掉等级守卫后它会**通过** ⇒ 判据翻）
@@ -206,3 +214,4 @@ if (argv.includes('--json')) {
   for (const x of out.filter((y) => !y.ok)) console.log(`  ⛔ ${x.id} —— ${x.reason} ⇒ ${x.next}`)
 }
 console.log('\n★ 本工具只产出规格，**不注册、不启动、不改任何东西**（跑起来是编排层的事，且要先过"安全审批"）。')
+} // ← 收尾：`if (isMain)`（被 import 时不派发 CLI）
