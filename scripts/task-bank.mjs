@@ -112,7 +112,7 @@ export function stats(id, runsDir = RUNS_DIR, bankDir = BANK_DIR) {
   let prev = null
   for (const r of rows) {
     const now = { score: r.score, surface: r.surface ?? null }
-    const v = prev ? verdict(prev, now, expect) : { kind: 'baseline', reason: '首次读数（无基准，不判升降）', alarm: false }
+    const v = prev ? verdict(prev, now, expect, r.result) : { kind: 'baseline', reason: '首次读数（无基准，不判升降）', alarm: false }
     trajectory.push({ at: r.at, result: r.result, score: r.score, surface: now.surface, verdict: v.kind, why: v.reason, alarm: !!v.alarm })
     if (typeof r.score === 'number') prev = now
   }
@@ -179,24 +179,35 @@ export const TOL = 0.05
 
 /**
  * ★★ **重放判定**（纯函数）—— 用户 2026-09-25 的用法（逐字）：
- *   *"本身解决完的题就没有必要了吧，我们只需要这个题目的**正确性**，然后大不了这代开发的时候用一用，
- *    然后**下一代再自己再重新做一遍对自己的重放**即可。只要自己的重放能**功能性正确**，
- *    然后**分数不相差太大**就无所谓了，而且**分数在预料的范围内**即可，比如说**退步一小段时间**，
+ *   *"本身解决完的题就没有必要了吧……**下一代再自己再重新做一遍对自己的重放**即可。
+ *    只要自己的重放能**功能性正确**，然后**分数不相差太大**就无所谓了……比如说**退步一小段时间**，
  *    因为此次加入了某些工具等**那个牺牲了性能来扩展的功能面**这种，**完全是可以理解的**。"*
+ *   *"在你出这道题的时候，你就可以预想到……是在拿性能换功能还是在拿功能换性能。
+ *    你可以完全可以**自己去设这个阈值**的……**小更新是不用做这种东西的**，小更新就是比如说加个捉宠插件什么的，
+ *    **只要它子代运行成功即可**，就不需要去搞什么性能不性能……**这种东西你完全可以灵活应变，不一定要做这种强制**。"*
  *
- * ⇒ 所以题 = **回归基准**（不是"考卷"），分 = **自回归健康度**。
- * ★★ 而"退步可以理解"**必须落成可测条件**，否则退步永远可解释 = 假绿：
- *   **分数下降 ∧ 功能面变大 ⇒ tolerable；分数下降 ∧ 功能面不增 ⇒ regression（报警）**。
+ * ⇒ 题 = **回归基准**；分 = **自回归健康度**；★ 而**判据的松紧由出题者按改动性质设**（不搞一刀切）：
+ *   · `expect.mode = 'functional-only'`（**默认，给小更新**）：**只要跑成功就算过**，**不判分数升降**（但分数**始终记录**）
+ *   · `expect.mode = 'score-band'`（**大改动时由出题者显式写**）：走下面的分数带判定
  *
- * @param {{score:number|null, surface:number|null}} base  基准（上一次/上一代）
+ * @param {{score:number|null, surface:number|null}} base  基准
  * @param {{score:number|null, surface:number|null}} now   本次
- * @param {{score:[number,number]}} [expect] 预期范围
+ * @param {{mode?:string, score?:[number,number], functional?:string}} [expect]
+ * @param {string} [result] 本次的结果（`pass|fail|error|ran`）—— functional-only 要用它
  */
-export function verdict(base, now, expect) {
+export function verdict(base, now, expect, result) {
+  const mode = expect?.mode ?? 'functional-only'
+  // ★ **functional-only（默认，小更新）**：只看"跑成功没有"；分数照记但不判升降
+  if (mode === 'functional-only') {
+    if (result === 'pass') return { kind: 'functional-pass', reason: '功能通过（本模式不判分数升降，分数仍记录）', alarm: false }
+    if (result === 'ran') return { kind: 'unjudged', reason: '只跑过、未判分 ⇒ 不能算通过（本模式也要"功能通过"才算过）', alarm: false }
+    return { kind: 'functional-fail', reason: `功能未通过（result=${result ?? '?'}）⇒ ★ 报警`, alarm: true }
+  }
+  // ↓ `score-band`（大改动）：出题者显式给的分数带
   const lo = expect?.score?.[0] ?? 0
   const hi = expect?.score?.[1] ?? 1
-  if (typeof now?.score !== 'number') return { kind: 'unscored', reason: '本次没有分数（未判分）⇒ 不能作判定' }
-  if (typeof base?.score !== 'number') return { kind: 'baseline-missing', reason: '没有基准分 ⇒ 本次只能当"首次读数"记下，不能判退步' }
+  if (typeof now?.score !== 'number') return { kind: 'unscored', reason: '本次没有分数（未判分）⇒ 不能作判定', alarm: false }
+  if (typeof base?.score !== 'number') return { kind: 'baseline-missing', reason: '没有基准分 ⇒ 本次只能当"首次读数"记下，不能判退步', alarm: false }
   // ① 硬边界：**出了预期范围** ⇒ 一律报警（无论升降）
   if (now.score < lo || now.score > hi) {
     return { kind: 'out-of-expect', reason: `本次 ${now.score} 落在预期 [${lo}, ${hi}] 之外`, alarm: true }
@@ -204,7 +215,7 @@ export function verdict(base, now, expect) {
   const d = Number((now.score - base.score).toFixed(4))
   if (d > TOL) return { kind: 'improvement', reason: `较基准 +${d}` }
   if (Math.abs(d) <= TOL) return { kind: 'stable', reason: `较基准 ${d}（在容差 ${TOL} 内）` }
-  // ② 退步：看**功能面有没有变大**（这是"这代牺牲性能换功能面"的可测代理）
+  // ② 退步：看**功能面有没有变大**（"这代牺牲性能换功能面"的可测代理）
   const grew = typeof now?.surface === 'number' && typeof base?.surface === 'number' && now.surface > base.surface
   if (grew) {
     return {
@@ -220,11 +231,11 @@ export function verdict(base, now, expect) {
   }
 }
 
-/** 题目的**预期**（可在 meta 里覆盖；默认：功能必须过 + 分数 [0,1]）。 */
+/** 题目的**预期**（可在 meta 里覆盖；★ **默认 functional-only** —— 小更新不套性能阈值）。 */
 export function expectOf(taskId, bankDir = BANK_DIR) {
   const t = getTask(taskId, bankDir)
   const e = t?.meta?.expect
-  return { functional: e?.functional ?? 'must-pass', score: e?.score ?? [0, 1] }
+  return { mode: e?.mode ?? 'functional-only', functional: e?.functional ?? 'must-pass', ...(e?.score ? { score: e.score } : { score: [0, 1] }) }
 }
 
 /** ★ 判据：题目那一层里**不得出现** agent 味道的 key（递归查 meta.json）。 */
@@ -285,23 +296,34 @@ function selftest() {
   check('⑦b ★ refresh 出来的题**自带 env**（目标 + 环境）', checkExecutable(listTasks(bank).find((x) => x.id === 'demo-task')).ok === true, 'env:{inherit:true}')
 
   // ⑧ ★★★ **重放判定**（用户 2026-09-25 的规则：退步要能区分"有理由"与"真退步"）
-  const ex = { score: [0.5, 1] }
+  //    ★ 这一组**显式用 `score-band`**（大改动场景）；**默认模式是 functional-only**，见下面的 ⑨ 组。
+  const ex = { mode: 'score-band', score: [0.5, 1] }
   check('⑧a 分数降 + 功能面**增** ⇒ tolerable（不报警）',
-    verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 14 }, ex).kind === 'tolerable-regression',
-    verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 14 }, ex).kind)
-  const r8b = verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 10 }, ex)
+    verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 14 }, ex, 'pass').kind === 'tolerable-regression',
+    verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 14 }, ex, 'pass').kind)
+  const r8b = verdict({ score: 0.9, surface: 10 }, { score: 0.8, surface: 10 }, ex, 'pass')
   check('⑧b ★ 分数降 + 功能面**不变** ⇒ regression（**报警**）', r8b.kind === 'regression' && r8b.alarm === true, `${r8b.kind} alarm=${r8b.alarm}`)
-  check('⑧c 分数升 ⇒ improvement', verdict({ score: 0.7, surface: 10 }, { score: 0.9, surface: 10 }, ex).kind === 'improvement', '')
-  check('⑧d 差不超容差 ⇒ stable', verdict({ score: 0.90, surface: 10 }, { score: 0.88, surface: 10 }, ex).kind === 'stable', '')
-  check('⑧e 出预期范围 ⇒ out-of-expect（报警）', verdict({ score: 0.9, surface: 10 }, { score: 0.3, surface: 99 }, ex).alarm === true, '硬边界优先于"功能面变大"')
-  check('⑧f 本次未判分 ⇒ unscored（不判升降）', verdict({ score: 0.9, surface: 10 }, { score: null, surface: 10 }, ex).kind === 'unscored', '')
-  check('⑧g 无基准 ⇒ baseline-missing（只记读数，不判）', verdict(null, { score: 0.9, surface: 10 }, ex).kind === 'baseline-missing', '')
+  check('⑧c 分数升 ⇒ improvement', verdict({ score: 0.7, surface: 10 }, { score: 0.9, surface: 10 }, ex, 'pass').kind === 'improvement', '')
+  check('⑧d 差不超容差 ⇒ stable', verdict({ score: 0.90, surface: 10 }, { score: 0.88, surface: 10 }, ex, 'pass').kind === 'stable', '')
+  check('⑧e 出预期范围 ⇒ out-of-expect（报警）', verdict({ score: 0.9, surface: 10 }, { score: 0.3, surface: 99 }, ex, 'pass').alarm === true, '硬边界优先于"功能面变大"')
+  check('⑧f 本次未判分 ⇒ unscored（不判升降）', verdict({ score: 0.9, surface: 10 }, { score: null, surface: 10 }, ex, 'ran').kind === 'unscored', '')
+  check('⑧g 无基准 ⇒ baseline-missing（只记读数，不判）', verdict(null, { score: 0.9, surface: 10 }, ex, 'pass').kind === 'baseline-missing', '')
+
+  // ⑨ ★★ **默认模式 `functional-only`**（小更新：只看能不能跑，不套性能阈值）
+  const exFO = { mode: 'functional-only' }
+  check('⑨a functional-only + pass ⇒ functional-pass（不报警）', verdict(null, { score: null }, exFO, 'pass').kind === 'functional-pass', '')
+  const r9b = verdict(null, { score: null }, exFO, 'fail')
+  check('⑨b ★ functional-only + fail ⇒ functional-fail（**报警**）', r9b.kind === 'functional-fail' && r9b.alarm === true, `${r9b.kind} alarm=${r9b.alarm}`)
+  check('⑨c ★ functional-only + ran ⇒ **不算通过**（未判 ≠ 通过）', verdict(null, { score: null }, exFO, 'ran').kind === 'unjudged', '')
+  check('⑨d ★ 默认（题里没写 expect）就是 functional-only', expectOf('demo-task', bank).mode === 'functional-only', expectOf('demo-task', bank).mode)
+
   check('⑧h ★ 轨迹里只有**真退步**才报警', (() => {
     const T = path.join(HERE, '..', 'out', '_tb-traj')
     fs.rmSync(T, { recursive: true, force: true }); fs.mkdirSync(path.join(T, 'runs'), { recursive: true })
     const B = path.join(T, 'tasks'); fs.mkdirSync(path.join(B, 'x'), { recursive: true })
     fs.writeFileSync(path.join(B, 'x', 'task.md'), '# x\n\n## 可判定的验收\n…\n', 'utf8')
-    fs.writeFileSync(path.join(B, 'x', 'meta.json'), JSON.stringify({ id: 'x', title: 'x', env: { inherit: true }, expect: { score: [0.5, 1] } }), 'utf8')
+    // ★ 这道题显式声明 `score-band`（模拟"大改动"），否则默认 functional-only 不会去判分数升降
+    fs.writeFileSync(path.join(B, 'x', 'meta.json'), JSON.stringify({ id: 'x', title: 'x', env: { inherit: true }, expect: { mode: 'score-band', score: [0.5, 1] } }), 'utf8')
     const R = path.join(T, 'runs')
     recordScore('x', { result: 'pass', score: 0.9, surface: 10 }, R, B)
     recordScore('x', { result: 'pass', score: 0.8, surface: 14 }, R, B) // 有理由的退步

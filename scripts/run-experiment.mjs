@@ -215,5 +215,17 @@ if (isMain) {
   console.log(`\n-- ④ 留痕 --`)
   console.log(`  ${sc.ok ? `已记录 result=${rec.result}${rec.score !== null ? ` score=${rec.score}` : ''}` : `★ 记录失败：${sc.reason}`}`)
   if (!judged) console.log('  ★ 未给 --result ⇒ 记 ran（**不冒充通过**）。判分只能由发起方/核验方给 —— 答题方自评不算数。')
-  process.exit(0)
+
+  // ⑤ 判定（**报警 / 放行**）—— ★ 判据松紧由**题里的 `expect`** 决定：
+  //    默认 `functional-only`（小更新：**只要跑成功就算过**，不套性能阈值）；
+  //    大改动时由出题者在题里显式写 `{mode:'score-band', score:[lo,hi]}`。
+  const s2 = stats(sp.taskId)
+  const last = s2.trajectory[s2.trajectory.length - 1] ?? null
+  console.log(`\n-- ⑤ 判定（报警 / 放行）--`)
+  console.log(`  模式 = ${s2.expect?.mode}${s2.expect?.mode === 'functional-only' ? '（小更新：只看能不能跑）' : `（分数带 [${s2.expect?.score?.[0]}, ${s2.expect?.score?.[1]}]）`}`)
+  console.log(`  本次判定 = ${last?.verdict} —— ${last?.why}`)
+  console.log(`  该题重放轨迹（报警 ${s2.alarms} 次）：${s2.trajectory.map((t) => `${t.result}${t.score !== null ? `:${t.score}` : ''}⇒${t.verdict}`).join('  →  ')}`)
+  const alarm = !!last?.alarm
+  console.log(`\n===== ${alarm ? '❌ 报警（不要放行）' : '✅ 放行（无报警）'} =====`)
+  process.exit(alarm ? 1 : 0)
 }
