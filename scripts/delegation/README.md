@@ -59,7 +59,25 @@ node scripts/delegation/steer.mjs <sessionId> --from-file <文案文件>
 | `probe-permission.mjs` | **权限档位没有 RPC 通道**（12 个候选名全 404）；经 prompt 发 `/permission` 只当普通消息 |
 | `probe-approval-answer.mjs` | **审批也没有编程应答通道**（17 个候选 + 4 个列举面全 404）⇒ 提权必挂 |
 
-## 五、与具体任务绑定的（**不是通用工具，别当通用工具用**）
+## 五、★ 哪些判据 worker **跑不了**（必须**主线代跑**）
+
+沙箱（`workspace-write`）不区分"读"与"执行工作区外的二进制"，再加上 P2 宿主护栏会连**读**一起拦
+⇒ 下面这几类判据**子代理注定跑不了**，任务书里要么**别写**，要么**明确让它写"未跑"**，
+再由主线在真树里代跑。★ 这三条是我在三天里**重新发现过三次**的（L2/L3/合并各一次）。
+
+| 判据 | worker 侧的现象 | 为什么 | 主线怎么代跑 |
+|---|---|---|---|
+| `scripts/gate-vector-run.mjs --impl <主仓>/out/gatecheck.exe` | `NEEDS-EVIDENCE` / `实现无法启动：EPERM`，退出码 2 | 要**执行工作区外的 `.exe`** | 主仓直接跑 ⇒ 实测 **16/16 exit 0** |
+| `scripts/test-capability-gate.mjs` | 跑不动 | 它用 **`spawnSync` 起子进程**，被 sandbox/shim 拦 | 主仓跑 |
+| `scripts/eval-validate.mjs`（holdout 的 R2 三段自证） | "因 spawnSync EPERM 未跑" | 同上（它要起 oracle 子进程） | 主仓跑；或让 worker **直接跑 oracle**（L3 的替代做法，如实标注） |
+| 往 `D:/project_develop/_holdout/**` 写 | 被拒 / **提权后挂死** | 目标在**工作区外** | 主线代劳落盘（真 holdout 集就是这么放的） |
+| 读 `packages/switchboard/**` | EPERM / 被 P2 护栏拒 | **P2 宿主护栏连"读"也拦**（每个 gen 都挂着 switchboard 这个 bundle） | 主线读；或给 worker **副本** / 只描述形状 |
+| `taskkill` / 进程操作 | 被拒 | 沙箱 + 安全策略 | 主线做 |
+
+★ **一句话**：**"能把活儿干完"与"能证明活儿干完了"在 worker 侧是两件事** ——
+派活时就把后者规划到主线头上，别指望它。
+
+## 六、与具体任务绑定的（**不是通用工具，别当通用工具用**）
 
 - `ablate-l2-behavioral.mjs` —— 针对 `_l2/wt` 的**行为级消融**（驱动真 CLI 看真 verdict）。
   它证明了一件通用的事：**"只读源码文本"的消融是弱判据**，会给出**假结论**
@@ -68,7 +86,7 @@ node scripts/delegation/steer.mjs <sessionId> --from-file <文案文件>
 
 ★ 这两份留在本目录是**当范本**：新任务要写判据时，先看它们**怎么把判据写成行为型**。
 
-## 六、已知限制
+## 七、已知限制
 
 - `dsh-delegate.mjs` 只连**现役前门**（`:3080`），不自己起实例、不杀进程。
 - `audit-delegates.mjs` 的输出默认落 `out/delegation/`（gitignore）。
