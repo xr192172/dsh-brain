@@ -502,3 +502,10 @@
 - ★★★★ **闭环已完整**：`题 → 起一代(arm-up 不 flip) → 发题 → 收卷 → 判定 → 报警/放行`
   （`run-experiment` §⑤：报警 ⇒ **exit 1 不放行**；打印该题**重放轨迹**与报警数）。
   判据：`task-bank` **21/21 + 消融 3/3**、`run-experiment` **5/5**。
+- ★★★★ **控制面管理面（`?cmd=mgmt`，commit `c4430d1`）**：绕开 Shell，用**长服务**管理 DSH。
+  · 动作：`tasks` ／ `verdict&task=` ／ **`experiment&task=&arm=[&dry=1]`（异步：started+runId）** ／ `result&runId=`
+  · ★★ **安全三前提**：① **具名动作白名单** ② **参数先校验**（题在题库、臂有实例、名字 `[a-zA-Z0-9._-]`）
+    ③ ★★ **绝不经 shell**（`spawnSync(node,[脚本,...参数])` **数组**）
+  · 判据 `scripts/delegation/test-mgmt-surface.mjs` **9/9 + 单因子消融**（7 个恶意题名全拒、argv 零元字符）
+  · ★★ **要生效必须重启控制面**（switchboard 进程要重载代码 ⇒ **换代不够**）。★ 且**谁的进程谁重启**：
+    我拉起的（arm-up B）我能停能起；**用户终端拉起的（arm A / 现役）我 `process.kill` 会 EPERM**。
