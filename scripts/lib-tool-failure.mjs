@@ -54,6 +54,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { decompress } from 'fzstd'
 
 /** 会话根（只读；运行数据，永不写入） */
@@ -219,6 +220,14 @@ function selfTest() {
   return fails.length === 0
 }
 
+/**
+ * ★★ 只在"被当作主模块运行"时派发 CLI（与 `skill-sieve.mjs` 同形）。
+ * 原守卫用 `startsWith('lib-tool-failure')` 是弱校验——被 import 方传 `--self-test`
+ * 即可触发本文件 selftest + process.exit()，截断调用方。改用 canonical URL 比对。
+ */
+const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
 if (process.argv[1] && path.basename(process.argv[1]).startsWith('lib-tool-failure') && process.argv.includes('--self-test')) {
   process.exit(selfTest() ? 0 : 1)
+}
 }

@@ -65,6 +65,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const HOME = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'
 const DIR = path.join(HOME, 'capabilities')
@@ -227,6 +228,12 @@ export function compareMetrics(currentMetrics, baseline) {
 const argv = process.argv.slice(2)
 const cmd = argv[0]
 
+/**
+ * ★ 只在"被当作主模块运行"时派发 CLI（与 `skill-sieve.mjs` 同形）。
+ * 被 import 时拿 import 方的 argv 跑自己的 CLI ⇒ 静默截断调用方。
+ */
+const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
 if (cmd === 'list') {
   const db = load()
   const ids = Object.keys(db.baselines ?? {})
@@ -292,3 +299,4 @@ if (cmd === 'list') {
 } else {
   console.log(fs.readFileSync(new URL(import.meta.url)).toString('utf8').split('\n').slice(1, 18).join('\n'))
 }
+} // ← 收尾：`if (isMain)`（被 import 时不派发 CLI）
