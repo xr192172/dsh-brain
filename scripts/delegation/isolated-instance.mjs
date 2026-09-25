@@ -136,10 +136,18 @@ const DEFAULT_PORTS = {
   SWITCH_ADMIN_PORT: '33180',
   HANDOVER_ADMIN_PORT_BASE: '33190',
   DSH_PUBLIC_WEB_URL: 'http://127.0.0.1:33080',
+  /**
+   * ★★ 2026-09-25 补：**key-pool-proxy 的端口**。
+   *   为什么必须显式给：`packages/key-pool-proxy/cordis.patch.yml`（包自带的 patch）**硬编码 `port: 3101`**，
+   *   而池端口**只有在「代装配清单」声明了 `pool.enabled` 时才由 gen 端口派生**（`poolPortOf`）。
+   *   ⇒ 本实例**没有清单** ⇒ 插件就用它自带的 **3101** ⇒ ★ **实测直接撞现役的池端口**（现役前门一度整个掉）。
+   *   ⇒ 处置：在本实例的 profile 里**覆盖这个 config**（同 arm-isolation 那一招，也同 §铁律 2 的教训）。
+   */
+  POOL_PORT: '33101',
 }
 
 // ★ 端口冲突检查：若任一端口命中现役端口段，拒绝（防止误起在现役上）
-const LIVE_PORTS = new Set(['3080', '3081', '31800', '31810'])
+const LIVE_PORTS = new Set(['3080', '3081', '3101', '31800', '31810'])
 const portConflict = Object.entries(DEFAULT_PORTS).filter(([k, v]) => {
   if (k === 'DSH_PUBLIC_WEB_URL') return /:(3080|3081)\b/.test(v)
   return LIVE_PORTS.has(v)
@@ -520,6 +528,47 @@ function prepareEvolutionSeats(profileDst, { routeDev, routeReview } = {}) {
   }
 }
 
+/**
+ * ★★ 2026-09-25 补（**实测事故**）：把本实例的**端口**写进 profile，覆盖包自带的硬编码。
+ *
+ * · 必须覆盖的那个：**`key-pool-proxy` 的 `port`** —— 它包自带的 `cordis.patch.yml`
+ *   **硬编码 `port: 3101`**，而池端口**只有在「代装配清单」声明了 `pool.enabled` 时才由 gen 端口派生**
+ *   （`poolPortOf`）。本实例**没有清单** ⇒ 插件就用自带的 3101 ⇒ ★ **抢走现役的池端口**
+ *   （实测后果：**现役前门整个掉**，`netstat` 里 `:3101` 的 pid 变成隔离实例那个 gen）。
+ * · 形状用【**覆盖 config**】（`- id: <同名>` + `config:`）—— 铁律 2：同一个 id 只能 `insert` 一次；
+ *   实测：写成 `insert` 会 `duplicate loader entry id` ⇒ **整树装配失败**（首跑就是这么死的）。
+ * · 幂等：见到 `# [iso-ports]` 标记就跳过。
+ */
+function prepareIsoPorts(profileDst) {
+  const patch = path.join(profileDst, 'cordis.patch.yml')
+  if (!fs.existsSync(patch)) return { isoPorts: 'skipped（profile 里没有 cordis.patch.yml）' }
+  const cur = fs.readFileSync(patch, 'utf8')
+  if (cur.includes('# [iso-ports]')) return { isoPorts: '已存在（幂等跳过）' }
+  const poolPort = Number(DEFAULT_PORTS.POOL_PORT)
+  const out = [
+    '',
+    '# [iso-ports] 本隔离实例的端口覆盖 —— 由 isolated-instance 注入（**只写隔离实例**）',
+    '#   ★ 为什么必须覆盖：key-pool-proxy 包自带的 patch 硬编码 port=3101（**现役的池端口**）⇒',
+    '#     不覆盖就会抢现役的端口（实测 2026-09-25：现役前门一度整个掉）。',
+    '#   ★ 形状是【覆盖 config】不是 insert（写成 insert 会 duplicate loader entry id ⇒ 整树装配失败）。',
+    '- id: key-pool-proxy',
+    '  config:',
+    `    port: ${poolPort}`,
+    '',
+    '# ★ 第二处：design-canvas MCP 的 LLM 上游也指向池端口（profile 里逐字写着「指向 dsh key-pool-proxy(3101)」）。',
+    '#   不覆盖 ⇒ 隔离实例的 design-canvas 会去用**现役的池**（跨实例串用）。',
+    '#   ★ 只给 env 子映射（不重述 command/args/cwd）—— 依赖"部分 config 深合并"这一语义（现役的 spill-policy',
+    '#     覆盖就是只给一个键）。**待重启后验证**：若 design-canvas 的 MCP 工具消失 ⇒ 说明是"整体替换"语义 ⇒',
+    '#     那时改成重述完整 config。',
+    '- id: mcp-client',
+    '  config:',
+    '    env:',
+    `      AGNES_UPSTREAM_BASE: http://127.0.0.1:${poolPort}`,
+  ]
+  fs.appendFileSync(patch, out.join('\n') + '\n', 'utf8')
+  return { isoPorts: `已把 key-pool-proxy.port 覆盖为 ${poolPort}（避开现役的 3101）` }
+}
+
 function prepareProfile(profileSrc, profileDst) {
   const files = ['cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
   for (const f of files) {
@@ -540,7 +589,10 @@ function prepareProfile(profileSrc, profileDst) {
     ? { evoSeats: '已跳过（--no-evo-seats）' }
     : prepareEvolutionSeats(profileDst, { routeDev, routeReview })
 
-  return { ...pkgResult, ...nmResult, ...evoResult }
+  // ★ 端口覆盖（必须**无条件**做：否则会抢现役的 3101 池端口）
+  const portResult = prepareIsoPorts(profileDst)
+
+  return { ...pkgResult, ...nmResult, ...evoResult, ...portResult }
 }
 
 function prepareSettings(settingsSrc, settingsDst, armPreset) {
@@ -685,8 +737,12 @@ console.log('  dshHome     : ' + dshHome.replace(/\\/g, '/'))
 console.log('  profile     : ' + profile)
 console.log('  node_modules: ' + (nmResult.built?.length ?? 0) + ' 项已建' +
   (nmResult.skipped?.length ? '，' + nmResult.skipped.length + ' 项跳过' : ''))
-console.log('  arm-isolation: ' + (nmResult.built?.includes('@dsh-brain/arm-isolation') ? '✓ 已加入' : '⚠ 未加入'))
+// ★★ 2026-09-25 修：按【实际存在】判，不看 `built` 列表 ——
+//   幂等跳过时 `built` 是空的，原来那行会**误报"⚠ 未加入"**（明明联接可用）。
+const armIsoPath = path.join(dshHome, 'profiles', profile, 'node_modules', '@dsh-brain', 'arm-isolation')
+console.log('  arm-isolation: ' + (fs.existsSync(armIsoPath) ? '✓ 已在（联接可用）' : '⚠ 未加入'))
 console.log('  自进化两席  : ' + (nmResult.evoSeats ?? '(未处理)'))
+console.log('  端口覆盖    : ' + (nmResult.isoPorts ?? '(未处理)'))
 console.log('  verifyout   : ' + verifyOut.replace(/\\/g, '/'))
 console.log('')
 console.log('  训练场身份：')

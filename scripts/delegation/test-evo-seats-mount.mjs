@@ -47,9 +47,16 @@ check('② 两条都指向 subagent-council 且 seat 正确',
   c1.includes("name: '@dsh-brain/subagent-council'") && /id: evo-dev[\s\S]{0,120}seat: dev/.test(c1) && /id: evo-review[\s\S]{0,120}seat: review/.test(c1),
   'name 与 seat 都对')
 
-const ids = [...c1.matchAll(/^\s*-\s*id:\s*(\S+)/gm)].map((m) => m[1])
-const dup = ids.filter((x, i) => ids.indexOf(x) !== i)
-check('③ 没有重名 loader id', dup.length === 0, dup.length ? `重复：${[...new Set(dup)].join(', ')}` : `ids=[${ids.join(', ')}]`)
+// ★ ③ 要**分组**看：`insert:` 里嵌套的 id 与**顶层**覆盖的 id 语义不同 ——
+//   同一个名字**出现在两组里**正是"覆盖"该有的样子（不是重复！）。
+//   真正要防的重复是：**同一组内**出现两次（那才会 duplicate loader entry id）。
+const topIds = [...c1.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1])
+const insIds = [...c1.matchAll(/^\s{4}- id:\s*(\S+)/gm)].map((m) => m[1])
+const dupOf = (a) => a.filter((x, i) => a.indexOf(x) !== i)
+const dupTop = dupOf(topIds), dupIns = dupOf(insIds)
+check('③ 无重名 loader id（**分组内**各不重复；跨组同名 = 覆盖，是预期）',
+  dupTop.length === 0 && dupIns.length === 0,
+  `顶层覆盖=[${topIds.join(', ')}] ／ insert=[${insIds.join(', ')}]` + (dupTop.length + dupIns.length ? ` ★ 组内重复：${[...dupTop, ...dupIns].join(', ')}` : ''))
 
 // ④ 现役没动
 check('④ ★ 现役 profile 未被动过', liveBefore.sha === sha(LIVE_PATCH) && liveBefore.mtime === mtime(LIVE_PATCH),
@@ -99,6 +106,17 @@ if (!src.includes(ANCHOR)) {
   const restored = cr.includes('id: evo-dev')
   check('⑧b 还原后复绿', restored, `还原后含 evo-dev=${restored}（exit=${rr.code}）`)
 }
+
+// ⑨ ★★ 端口覆盖（**实测事故**：隔离实例抢了现役的 `:3101` 池端口 ⇒ **现役前门整个掉**）
+//    根因：key-pool-proxy 包自带的 patch 硬编码 port=3101，而池端口只在"清单声明 pool"时才派生。
+const c9 = fs.readFileSync(p1, 'utf8')
+const hasPoolOverride = /- id: key-pool-proxy[\s\S]{0,160}?port:\s*33101/.test(c9)
+check('⑨ ★ 覆盖 key-pool-proxy.port = 33101（避开现役的 3101）', hasPoolOverride, hasPoolOverride ? '已覆盖' : '★ 没覆盖 ⇒ 会抢现役的 3101')
+// ★ ⑨b 改成**断言"覆盖存在且指向本段端口"** —— 不能用"不得出现 3101"：
+//   因为 profile 是从现役**复制**来的，那个 `mcp-client.env.AGNES_UPSTREAM_BASE: …:3101` 的**原文仍在**，
+//   我们只是**在后面追加了覆盖**（生效值以覆盖为准）⇒ "文本里没有 3101" 是**做不到**的要求（我第一版写成那样 = 假判据）。
+const hasUpstreamOverride = /- id: mcp-client[\s\S]{0,200}?AGNES_UPSTREAM_BASE:\s*http:\/\/127\.0\.0\.1:33101/.test(c9)
+check('⑨b ★ 覆盖 mcp-client.env.AGNES_UPSTREAM_BASE → 本段池端口', hasUpstreamOverride, hasUpstreamOverride ? '已覆盖为 33101' : '★ 没覆盖 ⇒ 隔离实例会用现役的池')
 
 const pass = results.filter((r) => r.ok).length
 const total = pass === results.length && ablOk
