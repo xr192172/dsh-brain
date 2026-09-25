@@ -86,9 +86,48 @@ node scripts/delegation/steer.mjs <sessionId> --from-file <文案文件>
 
 ★ 这两份留在本目录是**当范本**：新任务要写判据时，先看它们**怎么把判据写成行为型**。
 
-## 七、已知限制
+## 七、编排固化与按臂起代（G2）
+
+### `round.mjs` —— 一轮委派的**一条命令**
+```
+node scripts/delegation/round.mjs --prompt <任务书> --tag <标签> [--cwd <工作目录>] \
+  [--expect <交付文件>] [--rounds 3] [--steer <边界文案文件>] [--no-audit] \
+  [--wt-new <分支名>] [--budget-ms 2400000] [--stall-ms 420000]
+```
+按固定顺序做完：派活 → 补边界（内置六条或 `--steer` 覆盖）→ 等第二轮 settle → 审计 → 核验交付 → 判层 → 回执表。
+★ **绝不自动提交、绝不自动批票**。
+- 内置边界文案来自 `out/_steer-boundary-v2.txt` 的六条（见 `DEFAULT_BOUNDARY` 常量）；`--steer <文件>` 可覆盖。
+- `--wt-new` 因沙箱禁 `spawnSync` 无法自动建工作树，回执中会打印手动命令。
+- ★★ **判层**已改为**调真的** `scripts/change-classify.mjs`（原内联版是子集规则 + 相对模式，
+  而喂进去的是绝对路径 ⇒ 命中 0 条 ⇒ **一律落 R2 = 假绿**；已实测对照：真脚本判 R1、内联版判 R2）。
+  另加 **`git status --porcelain` 回落**（worker 用 `pwsh` 重定向写时，工具参数里抓不到路径 ⇒ 曾静默漏判）。
+
+### `launch-arm.mjs` —— 按臂起代（两种模式，必须显式选）
+```
+node scripts/delegation/launch-arm.mjs --arm <臂名> [--arms evals/arms.json] --mode print|flip
+  [--record] [--i-know-this-flips-live]
+```
+- 读 `evals/arms.json`（用 `arms-registry.mjs` 的 `loadArmsRegistry`，不自己 parse）。
+- 产出该臂这一代的启动规格（`profile` / `cwd` / `store` / 隔离 env）。
+- `--mode print`（缺省）：**只打印**，不做任何副作用；加 `--record` 时往 `out/arm-gen-index.json` append 一条。
+- `--mode flip`：**必须**同时给 `--i-know-this-flips-live`，否则 fail-closed 拒绝（非 0 退出）。
+  ★ 即使给了 flag 也**只打印 URL，不实际发起换代请求**（安全约束）。
+- 臂定义缺 `cwd`/`store`/`label` 任一字段 ⇒ 报错停下，不静默降级。
+- `out/arm-gen-index.json` 为 append-only 索引（`{ arm, gen, profile, cwd, store, at, mode, note }`）。
+
+### `evals/arms.json` 的 gen 绑定
+★ 故意不改 schema（多脚本共享输入）。绑定走 `out/arm-gen-index.json`（append-only）。
+
+## 八、已知限制
 
 - `dsh-delegate.mjs` 只连**现役前门**（`:3080`），不自己起实例、不杀进程。
 - `audit-delegates.mjs` 的输出默认落 `out/delegation/`（gitignore）。
 - 这套工具**不替代** `verify-delegated-work` 的核验清单：核验必须**独立复算**，
   不能只跑子代理自己的脚本（那只能证明它没算错自己那套口径）。
+- ★★★ **`round.mjs` 的"第 2 轮（边界注入轮）"存在长时间不收敛**（2026-09-25 实测）：
+  传一个"只回一个词、不要调用工具"的极小任务 ⇒ 第 1 轮 settled、边界注入、第 2 轮 `accepted=true` 之后
+  **再无输出**；**等了 17 分钟中止**（其默认预算 **40 分钟**）。
+  ⇒ **§一 那条负向判据（`--expect` 永不存在 ⇒ 非 0 + "未产出"）未通过；`round.mjs` 目前只在正向可用。**
+  · 规避：`--budget-ms` 调小；或先只用它跑正向轮。
+  · 待查方向：第 2 轮的 `baseSeq` 是**发指令之后**才读的 ⇒ 若会话在"发指令"与"读 baseSeq"之间就 settle 了，
+    `asOfSeq` 恒等于 `baseSeq` ⇒ **完成判据永不成立**（`dsh-delegate.mjs` 同结构，但它每轮都会前进所以没暴露）。
