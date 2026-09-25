@@ -110,6 +110,21 @@ const rootDir = optRoot ? path.resolve(optRoot) : path.resolve(WT_ROOT, armName.
 // ── 确定 profile ───────────────────────────────────────────────────────────────
 const DSH_HOME_ACTIVE = process.env.DSH_HOME ?? 'C:/Users/Admin/.dsh'
 const CONTROL_PROFILE = 'web'
+/**
+ * ★★ 2026-09-25 加：**防"把隔离实例当成现役"**。
+ *   本脚本要用「现役的 DSH_HOME」当**源**（拷 profile / settings / 自建 preset）。
+ *   但起隔离实例的那串 env 里**有 `DSH_HOME`** ⇒ 如果它在当前 shell 里还export着，
+ *   再跑本脚本就会把**隔离实例**当现役 ⇒ 源与目标同一个 ⇒ 复制成空转、还可能把配置搞乱。
+ *   ⇒ 判据：`DSH_HOME` 若等于本实例自己的 `<root>/dshhome` ⇒ **直接拒跑**并说明。
+ */
+if (optRoot && path.resolve(DSH_HOME_ACTIVE) === path.resolve(path.join(rootDir, 'dshhome'))) {
+  console.error(
+    `[失败] 当前 shell 里的 DSH_HOME 指向的就是【本隔离实例自己】（${DSH_HOME_ACTIVE}）⇒\n` +
+      `  本脚本要拿【现役】当源，这样会把隔离实例当现役（空转/搞乱）。\n` +
+      `  ⇒ 请先 \`Remove-Item Env:DSH_HOME\`（或新开一个终端）再跑。`,
+  )
+  process.exit(2)
+}
 let knownProfiles = []
 try {
   knownProfiles = fs
@@ -593,6 +608,29 @@ function prepareIsoPorts(profileDst) {
   }
 }
 
+/**
+ * ★★ 2026-09-25 补（实测：隔离实例**起得来、但建不了会话** —— `agent-preset-not-found: council`）：
+ *   **用户自建的 preset 住在 `$DSH_HOME/.agent-presets/<名>/{preset.yml, agent.cordis.yml}`**
+ *   —— 既不在 profile 里、也不在 `storages/` 里。复制 DSH_HOME 时**必须一并带过去**，
+ *   否则 `settings.yaml` 的 `agent-presets.default: council` 指到一个**不存在**的 preset
+ *   ⇒ `session.create` 直接失败（实测报错原文就是这个）。
+ */
+function prepareAgentPresets(srcHome, dstHome) {
+  const src = path.join(srcHome, '.agent-presets')
+  const dst = path.join(dstHome, '.agent-presets')
+  if (!fs.existsSync(src)) return { agentPresets: 'skipped（现役没有 .agent-presets/）' }
+  const names = fs.readdirSync(src).filter((n) => fs.statSync(path.join(src, n)).isDirectory())
+  let files = 0
+  for (const name of names) {
+    fs.mkdirSync(path.join(dst, name), { recursive: true })
+    for (const f of fs.readdirSync(path.join(src, name))) {
+      fs.copyFileSync(path.join(src, name, f), path.join(dst, name, f))
+      files++
+    }
+  }
+  return { agentPresets: `已复制 ${names.length} 个自建 preset（${names.join(', ')}）／${files} 个文件` }
+}
+
 function prepareProfile(profileSrc, profileDst) {
   const files = ['cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
   for (const f of files) {
@@ -749,6 +787,9 @@ if (!nmResult.ok) {
 // 3. 复制 settings.yaml（修改 default preset）
 prepareSettings(settingsSrc, path.join(dshHome, 'settings.yaml'), armPreset)
 
+// 3b. ★★ 复制【用户自建的 preset】—— 少了它，`agent-presets.default` 会指向一个不存在的 preset
+const presetResult = dryRun ? { agentPresets: '(dry-run 跳过)' } : prepareAgentPresets(DSH_HOME_ACTIVE, dshHome)
+
 // 4. verifyout 已创建（空目录）
 
 // ── 打印规格 ───────────────────────────────────────────────────────────────────
@@ -767,6 +808,7 @@ const armIsoPath = path.join(dshHome, 'profiles', profile, 'node_modules', '@dsh
 console.log('  arm-isolation: ' + (fs.existsSync(armIsoPath) ? '✓ 已在（联接可用）' : '⚠ 未加入'))
 console.log('  自进化两席  : ' + (nmResult.evoSeats ?? '(未处理)'))
 console.log('  端口覆盖    : ' + (nmResult.isoPorts ?? '(未处理)'))
+console.log('  自建 preset : ' + (presetResult.agentPresets ?? '(未处理)'))
 console.log('  verifyout   : ' + verifyOut.replace(/\\/g, '/'))
 console.log('')
 console.log('  训练场身份：')
