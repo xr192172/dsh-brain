@@ -397,3 +397,11 @@
   · **桌面图标**：`scripts/install-desktop-icon.mjs`（默认 dry-run，`--yes` 才写）。
     ★ **不生成 `.lnk`**（要 COM，本机 PS/脚本宿主都不可靠）⇒ **把 `.cmd` 拷到桌面**（纯文件、可撤）。
   · `.cmd` 一律 **ASCII-only**（cmd/Task Scheduler 在非 ASCII 代码页会乱码）。
+- ★★★ **`scripts/arm-ports.mjs` = 端口/根目录的【唯一定义】**（纯模块、**无副作用、可安全 import**）：
+  谁要用"臂名 → front/DSH_HOME"就 import 它（`arm-up.mjs` 与 `dsh-delegate.mjs` 共用）。
+  ★ 为什么单独一个文件：`arm-up.mjs` **有顶层主流程** ⇒ **一 import 就真去起服务**
+  ⇒ 凡"要被多处共用的推导"都放纯模块里（**脚本必须 import-safe**）。
+- ★★★ **派活给隔离实例必须用 `--for-arm <臂名>`**（它同时定 `front` 与 `DSH_HOME`）。
+  ★ 起因：**我两次把成功的派活误判成"空跑"** —— 因为只传了 `--front` 没传 `--home` ⇒
+  去**现役的库**找 sid ⇒ 找不到 ⇒ `toolCalls` 报 **0**。⇒ 已改 **fail-loud**（`missing:true` ⇒
+  `toolCalls: null` + 提示；"疑似空跑"只在 `!missing` 时才允许触发）。**看不到 ≠ 没有**。
