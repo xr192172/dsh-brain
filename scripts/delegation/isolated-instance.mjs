@@ -495,8 +495,8 @@ function prepareEvolutionSeats(profileDst, { routeDev, routeReview } = {}) {
     (routeDev?.model ?? '') === (routeReview?.model ?? '')
   return {
     evoSeats: same
-      ? '已注入 evo-dev / evo-review ★ 但**两席路由相同** ⇒ 防串供只有形式（未给两套路由）'
-      : '已注入 evo-dev / evo-review（两席路由不同 ⇒ 防串供有实质）',
+      ? '已注入 evo-dev / evo-review ★ 两席路由相同 ⇒ 独立性只到【跨会话】档（未到【跨模型】，文档 §6 三级阶梯）'
+      : '已注入 evo-dev / evo-review（两席路由不同 ⇒ 独立性更强）',
   }
 }
 

@@ -72,7 +72,7 @@ const routeOk = /id: evo-dev[\s\S]{0,200}model: "agnes-2\.5-flash"/.test(c3) &&
   /id: evo-review[\s\S]{0,200}provider: "other"/.test(c3)
 check('⑥a 两套路由各自落到对应条目', routeOk, routeOk ? 'evo-dev→agnes/*，evo-review→other/*' : '路由没落对')
 const r4 = run(['--arm', 'A', '--root', path.join(TMP, 'd'), '--evo-route-dev', 'agnes/x', '--evo-route-review', 'agnes/x'])
-check('⑥b 两席同路由 ⇒ 输出带"防串供只有形式"', /防串供只有形式/.test(r4.out), r4.out.includes('防串供只有形式') ? '已告警' : '★ 没告警')
+check('⑥b 两席同路由 ⇒ 输出按【三级阶梯】标注只到跨会话档', /跨会话/.test(r4.out), r4.out.includes('跨会话') ? '已标注' : '★ 没标注')
 
 // ⑦ dry-run
 const r5 = run(['--arm', 'A', '--root', path.join(TMP, 'e'), '--dry-run'])

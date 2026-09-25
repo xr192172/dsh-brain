@@ -55,9 +55,11 @@ check('② 开发脑人格：职责边界 + 六段要素齐', devMiss.length ===
 const rev = SEAT_PERSONAS.review ?? ''
 const revNeed = ['职责边界', '独立复算', '裁决', '下一步', '我可能错在哪']
 const revMiss = revNeed.filter((k) => !rev.includes(k))
-const hasAntiCollusion = rev.includes('同源') && (rev.includes('产变更方') || rev.includes('作者'))
-check('③ 审批脑人格：职责边界 + 五段要素 + **防串供**', revMiss.length === 0 && hasAntiCollusion,
-  revMiss.length ? `缺：${revMiss.join('、')}` : (hasAntiCollusion ? `${rev.split('\n').length} 行，五段齐 + 防串供已写入` : '★ 防串供没写进人格'))
+// ★ 独立性那一条必须**可执行**：写明"没给作者信息就写【独立性无法核对】" + 三级阶梯（跨模型 > 跨会话 > …）
+const hasIndependence =
+  rev.includes('无环') && rev.includes('不同机构') && rev.includes('跨模型') && rev.includes('独立性无法核对')
+check('③ 审批脑人格：职责边界 + 五段要素 + **可执行的独立性条款**', revMiss.length === 0 && hasIndependence,
+  revMiss.length ? `缺：${revMiss.join('、')}` : (hasIndependence ? `${rev.split('\n').length} 行，五段齐 + 独立性条款可执行` : '★ 独立性条款不可执行（缺：无环/不同机构/跨模型/独立性无法核对 之一）'))
 
 // ④
 const both = runApply({ seats: ['dev', 'review'] })
@@ -80,9 +82,9 @@ check('⑥ 未知席位 ⇒ 跳过（不降级成 architect）',
 // ⑦ 防串供可见性
 const warnProbe = runApply({ seats: ['dev', 'review'] })
 const visible = warnProbe.logs.some((l) => l.includes('自进化两席已就位')) && warnProbe.logs.some((l) => l.includes('防串供'))
-const warnedInherit = warnProbe.logs.some((l) => l.includes('它们就同源'))
-check('⑦ 防串供可见：打印身份 + 两席同继承时告警', visible && warnedInherit,
-  `可见=${visible} 继承告警=${warnedInherit}`)
+const warnedInherit = warnProbe.logs.some((l) => l.includes('跨会话') && l.includes('跨模型'))
+check('⑦ 独立性可见：打印身份 + 两席同继承时按【三级阶梯】告警', visible && warnedInherit,
+  `可见=${visible} 阶梯告警=${warnedInherit}`)
 
 // ⑧ ★★ 消融自证
 const SRC = 'D:/project_develop/dsh-brain/packages/subagent-council/src/index.ts'
