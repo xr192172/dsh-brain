@@ -224,15 +224,37 @@ export function apply(ctx: Context, config: Config): void | (() => void) {
     }
   })
 
-  // 多代并存：3101 可能已被 active gen 占用。容忍 EADDRINUSE（复用共享代理，不崩溃），
-  // 交接时 staging gen 不应因端口占用而挂掉。
+  // ★★ 2026-09-25 修（实测：**连续换代后池静默消失**）：
+  //   旧行为：撞到 `EADDRINUSE` 就**平静地打一句 "already serving (reused); skipped own bind"** 然后
+  //   **永远不再试**。而换代时是"**新代先绑、旧代后释放**" ⇒ 新代一旦撞上就永久放弃
+  //   ⇒ 旧代退出后**池无主**（实测现场：新代日志说 reused，而 netstat 上该端口**没有任何监听**）。
+  //   ⇒ 正解：**退避重试**（旧代退出会释放，重试就能拿到）；重试到顶要**响亮地报警**，不再平静放弃。
+  let bindRetries = 0
+  let bindTimer: ReturnType<typeof setInterval> | null = null
   server.on('error', (err) => {
     const code = (err as NodeJS.ErrnoException).code
-    if (code === 'EADDRINUSE') {
-      console.log('[key-pool-proxy] 127.0.0.1:' + config.port + ' already serving (reused); skipped own bind')
-    } else {
+    if (code !== 'EADDRINUSE') {
       console.log('[key-pool-proxy] server error: ' + (err as Error).message)
+      return
     }
+    if (bindTimer || server.listening) return
+    console.log(
+      '[key-pool-proxy] ' + config.port + ' 被占（多半是**上一代还没退**）⇒ 退避重试（每 1.5s，最多 8 次）',
+    )
+    bindTimer = setInterval(() => {
+      bindRetries++
+      if (bindRetries > 8) {
+        if (bindTimer) clearInterval(bindTimer)
+        bindTimer = null
+        console.log(
+          '[key-pool-proxy] ⚠️ ' + config.port + ' 连续 ' + bindRetries + ' 次拿不到 ⇒ **本代没有池**' +
+            '（旧代可能没退干净）⇒ 这一代的 LLM 路由会退化，请查上代是否残留进程',
+        )
+        return
+      }
+      try { server.close() } catch { /* 未在监听，忽略 */ }
+      bindProxy()
+    }, 1500)
   })
 
   // per-gen：单一活跃代独占 3101（baseURL 共享指 3101，谁服务谁持池）。
@@ -241,9 +263,12 @@ export function apply(ctx: Context, config: Config): void | (() => void) {
   const mode = String(process.env.HANDOVER_MODE || 'active')
   const isStaging = mode === 'staging' || mode === 'demoted'
   const bindProxy = (): void => {
-    if (listening) return
-    listening = true
+    if (listening || server.listening) return
     server.listen(config.port, '127.0.0.1', () => {
+      // ★ 修：**只有真绑上才算 listening**（旧行为在 listen 之前就置 true ⇒ 撞错后永不重试）
+      listening = true
+      bindRetries = 0
+      if (bindTimer) { clearInterval(bindTimer); bindTimer = null }
       console.log(
         '[key-pool-proxy] listening 127.0.0.1:' +
           config.port +
@@ -256,6 +281,7 @@ export function apply(ctx: Context, config: Config): void | (() => void) {
     })
   }
   const closeProxy = (): void => {
+    if (bindTimer) { clearInterval(bindTimer); bindTimer = null }
     if (!listening) return
     listening = false
     server.close()
