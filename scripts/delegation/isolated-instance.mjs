@@ -483,7 +483,8 @@ function prepareEvolutionSeats(profileDst, { routeDev, routeReview } = {}) {
     '',
     '# [evo-seats] 自进化的两个固定子 agent（开发脑 / 审批脑）—— 由 isolated-instance 注入（**只写隔离实例**）',
     '#   依据 docs/revised-architecture-2026-09-20.md §7 与 docs/training-ground-and-skill-sieve-2026-09-25.md §11',
-    '#   ★ 防串供要求两席【不同源】；两条条目各带路由。未给路由 ⇒ 两席各自继承，插件启动期会告警"它们就同源"。',
+    '#   ★ 用户裁决（开发期一律 AGNES）：**独立性主要靠【出发点不同】**，不是靠换模型；',
+    '#     两条条目分开写，是为了**将来能给两席各自的路由**（可选加强），也为了 id 互不相同。',
     '- insert:',
   ]
   out.push(...seatLines('dev', routeDev ?? { provider: '', model: '' }))

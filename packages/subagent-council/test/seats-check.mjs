@@ -81,10 +81,10 @@ check('⑥ 未知席位 ⇒ 跳过（不降级成 architect）',
 
 // ⑦ 防串供可见性
 const warnProbe = runApply({ seats: ['dev', 'review'] })
-const visible = warnProbe.logs.some((l) => l.includes('自进化两席已就位')) && warnProbe.logs.some((l) => l.includes('防串供'))
+const visible = warnProbe.logs.some((l) => l.includes('自进化两席已就位') && l.includes('出发点'))
 const warnedInherit = warnProbe.logs.some((l) => l.includes('跨会话') && l.includes('跨模型'))
-check('⑦ 独立性可见：打印身份 + 两席同继承时按【三级阶梯】告警', visible && warnedInherit,
-  `可见=${visible} 阶梯告警=${warnedInherit}`)
+check('⑦ 独立性可见：打印身份 + 按【出发点不同】口径说明档位', visible && warnedInherit,
+  `可见=${visible} 档位说明=${warnedInherit}`)
 
 // ⑧ ★★ 消融自证
 const SRC = 'D:/project_develop/dsh-brain/packages/subagent-council/src/index.ts'

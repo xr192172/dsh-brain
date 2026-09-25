@@ -141,7 +141,7 @@ export const SEAT_PROVIDER_NAMES: Record<string, string> = {
 	review: "evo-review",
 };
 
-/** 自进化两席：这两席**必须不同源**（防串供）。用于启动期的同源检查。 */
+/** 自进化两席：这两席就是"产/审"两侧（★ 独立性看【出发点是否不同】，用户 2026-09-25 裁决：开发期一律 AGNES）。 */
 export const EVOLUTION_SEATS = ["dev", "review"] as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,13 +232,17 @@ export function apply(ctx: any, config: any) {
 	if (on.length === EVOLUTION_SEATS.length) {
 		console.log(
 			`[subagent-council] ★ 自进化两席已就位：${on.map((s) => `${s}(${SEAT_PROVIDER_NAMES[s]})`).join(" + ")}` +
-				`；防串供要求**不同源**，当前路由=(provider="${provider || "(继承)"}", model="${model || "(继承)"}")`,
+				`；★ 独立性看的是【**出发点是否不同**】（用户裁决：开发期一律 AGNES，不追求换模型），` +
+				`当前路由=(provider="${provider || "(继承)"}", model="${model || "(继承)"}")`,
 		);
 		if (provider === "" && model === "") {
+			// ★★ 2026-09-25 用户裁决（docs/...-2026-09-25.md §11.7）：
+			//    开发期**一律 AGNES** ⇒ **不追求跨模型**；独立性主要靠【**出发点不同**】（输入不同 ⇒ 采样分叉）。
 			console.log(
-				`[subagent-council] ⚠️ 两席都**继承顶层**（未显式给路由）⇒ 只能算【**跨会话**】档，**未到【跨模型】**档。` +
-					`★ 独立性是**三级阶梯**（文档 self-evolution-design.md §6 逐字：跨模型 > 跨会话 > 同会话换 prompt）：` +
-					`跨会话**已算独立**，只是判别力弱于跨模型 ⇒ 要更强就**给两席各自的路由**（两次挂载、各给 config）。`,
+				`[subagent-council] 两席同路由（都继承顶层）：按文档 §6 三级阶梯属【跨会话】档 —— **已算独立**。` +
+					`★ 用户裁决：开发期**一律 AGNES**，不追求跨模型。` +
+					`★★ 但**独立性主要靠【出发点不同】**：请确保**审者不拿生产者的推理过程**（只给 目标+产物+判据）；` +
+					`否则"投骰子"的差异接近零 —— 那时弱的是【出发点相同】，**不是**【模型相同】。`,
 			);
 		}
 	}
