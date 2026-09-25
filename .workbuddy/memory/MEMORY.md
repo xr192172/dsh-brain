@@ -173,6 +173,15 @@
   ② **去重哈希（`SourceHash`）**；**本体不留**；吸收后**不再重新使用**；哈希用于**去重防重回**。全部现成字段。
 - ★ **实测待办**：本机**没有任何 `*skill*` 文件** ⇒ **真实 skill 数据取不到**（Go 侧 `dataDir/skill_tree.json` 无实体）
   ⇒ 筛**只能跑自测**；**要让这条链跑起来得先确认 skill store 的真实落点**。
+- ★★★ **能力源不限于 skill（§9）**：**外置 MCP 走同一条流水线**（`源 → ToolDef → 绑进 skill → 升格成 agent`）；
+  MCP 天然自带 `Description`+`Schema` ⇒ **几乎逐字段对上 `ToolDef`**；★ 但纯 MCP 来源**缺"指导"** ⇒ 按 §7 判据**是二等**。
+- ★★★ **元工具 vs 链路工具（用户点出的原则，实测对上）**：
+  **元工具** = `design-canvas-bridge` 的 55 个 `mcp__design-canvas__*`（**零件**，让 agent 自己组织 = 把编排负担丢给模型）；
+  **链路工具** = 同文件自写的 **`safe_rename`**（`:558-671`）+ `move_symbol`（`:673`）⇒ **一个工具 = 一整条链路**。
+  ⇒ **能力的粒度是【链路工具】不是【元工具】**；绑 agent 的粒度应是链路工具。
+  ⇒ **目标形态（原话）**：像 SAFE RENAME 那样的、一个工具包含整个链路、不需要 agent 自己组织。
+  ★ 判据缺口：§7 只数"有没有工具"、**数不出元/链路** ⇒ "55 元工具+指导+脚本"会被判一等（**恰是不要的形态**）；
+    口径（怎么判"是不是链路工具"）**等用户给**，我不自己发明。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
