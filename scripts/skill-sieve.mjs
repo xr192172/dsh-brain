@@ -247,6 +247,19 @@ function selftest() {
 }
 
 const argv = process.argv.slice(2)
+/**
+ * ★★ 2026-09-25 修：**只在"被当作主模块运行"时派发 CLI**。
+ *
+ * 为什么必须修（实测踩到）：本文件在**模块顶层**就 `process.argv` 派发 + `process.exit()`，
+ * 于是 `skill-factory.mjs` 一 `import { classifySkill } from './skill-sieve.mjs'`，
+ * **本文件就拿 import 方的 argv 执行了自己的 CLI** —— 表现为：跑 `skill-factory.mjs --selftest`
+ * 输出的是**本文件的自测**、然后 `process.exit(0)` 把工厂自己的判据**截断**（看起来"通过"，实际没跑）。
+ *
+ * ★ 处置：`if (isMain) { …整段 CLI… }`。下面那段**原样保留原缩进**（未重排，便于审计 diff）；
+ *   将来重构时把它搬进 `function main()` 即可。
+ */
+const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
 if (argv.includes('--selftest-only')) {
   // 消融版自调用：只跑最小集（分级 2 例 + 融合 1 例），不再递归消融。
   // ★ 两个消融各自断言自己那一行 FAIL，所以这里要把两行都打出来。
@@ -317,3 +330,4 @@ if (emit) {
   console.log(`\n已见哈希台账 → ${emit}（${all.size} 条）★ 这是"防重回"的去重键，不是本体`)
 }
 console.log('\n★ 本工具只判定 + 记账，**不删除任何东西**（"退役不留本体"是独立的、需人确认的动作）。')
+} // ← 收尾：`if (isMain)`（被 import 时不派发 CLI）
