@@ -166,6 +166,13 @@
 - ★★ **接线现状**：(a1) `gen-assembly.ts` 按 **`DSH_ARM_SELF`+`DSH_ARM_DENY`** 插 `arm-isolation` overlay（R0 已进主仓）；
   (a2) `isolated-instance.mjs` 给身份 + **自己的 `node_modules`（真目录+逐项符号链接）**让插件能解析（已进主仓）。
   ⇒ **接线层闭环；端到端（真起一代看 guard 拦跨训练场）未做** —— 起服务**只能用户终端**。
+- ★★ **筛已落成代码**：`scripts/skill-sieve.mjs` —— 纯函数 `classifySkill(node) ⇒ 一等/二等/三等/跳过`
+  （跳过含 `used`/`retired`/`duplicate`防重回/`no-guidance`；★ **判定顺序=纪律优先**）；
+  自测 **10/10** + **消融自证通过**。★ **它只判定 + 记账，绝不删任何东西**。
+- ★★ **退役留存规则（§8）**：退役/吸收后**本地只留** ① **来源定位（`SourceFile` = GitHub 链接）**
+  ② **去重哈希（`SourceHash`）**；**本体不留**；吸收后**不再重新使用**；哈希用于**去重防重回**。全部现成字段。
+- ★ **实测待办**：本机**没有任何 `*skill*` 文件** ⇒ **真实 skill 数据取不到**（Go 侧 `dataDir/skill_tree.json` 无实体）
+  ⇒ 筛**只能跑自测**；**要让这条链跑起来得先确认 skill store 的真实落点**。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
