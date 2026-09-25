@@ -1,4 +1,4 @@
-# scripts/delegation —— 把 DSH 会话当子代理用的一整套工具
+﻿# scripts/delegation —— 把 DSH 会话当子代理用的一整套工具
 
 > ★ **为什么在这个目录**：这一套原本住在 `out/` 下 —— 而 `out/` 是 **gitignore** 的
 > ⇒ **不受版本控制 = 下一个会话看不到 = 等于不存在**（本项目"做完实质东西必须登记"那条纪律）。
@@ -118,6 +118,26 @@ node scripts/delegation/launch-arm.mjs --arm <臂名> [--arms evals/arms.json] -
 ### `evals/arms.json` 的 gen 绑定
 ★ 故意不改 schema（多脚本共享输入）。绑定走 `out/arm-gen-index.json`（append-only）。
 
+
+### `isolated-instance.mjs` —— 起一套**隔离实例**（准备 + 打印，默认不 spawn）
+```
+node scripts/delegation/isolated-instance.mjs --arm <臂名> [--root <目录>] [--profile <剖面>] \
+    [--dry-run] [--force] [--record] [--launch]
+```
+- 臂定义读 `evals/arms.json`（用 `arms-registry.mjs` 的 `loadArmsRegistry`，不自己 parse）。
+- 缺省 `--root` = `D:/project_develop/_arms/<臂名小写>`（给用户用）；测试时须用 `--root` 覆盖。
+- `--profile` 缺省 = `web`；必须真实存在于 `$DSH_HOME/profiles/`，否则 fail-closed。
+- 准备内容：① `profiles/<profile>/`（`package.json`/`cordis.yml`/`cordis.patch.yml` 复制 + `node_modules` **junction**）；
+  ② `settings.yaml`（只改 `agent-presets.default` 为该臂的 `preset`，其余不动）；
+  ③ `<root>/verifyout/`；④ key 经 env 传，不落盘。
+- 端口段固定为 `33080/33081/33180/33190`，与现役 `3080/3081/31800/31810` 不冲突；
+  ★ 若配置端口命中现役端口 ⇒ **拒绝**（防误起）。
+- 缺省（无 `--launch`）：**只打印**启动规格 + JSON + 终端命令，**不 spawn**。
+- `--launch`：真的 spawn（本任务禁用，仅留给用户终端）。
+- `--dry-run`：完全不写盘。
+- `--record`：往 `out/arm-gen-index.json` 追加 `{ arm, gen, profile, root, dshHome, ports, at, mode }`。
+- 幂等：目标 `dshhome` 已存在且非空 ⇒ 拒绝（除非 `--force`）。
+
 ## 八、已知限制
 
 - `dsh-delegate.mjs` 只连**现役前门**（`:3080`），不自己起实例、不杀进程。
@@ -131,3 +151,4 @@ node scripts/delegation/launch-arm.mjs --arm <臂名> [--arms evals/arms.json] -
   · 规避：`--budget-ms` 调小；或先只用它跑正向轮。
   · 待查方向：第 2 轮的 `baseSeq` 是**发指令之后**才读的 ⇒ 若会话在"发指令"与"读 baseSeq"之间就 settle 了，
     `asOfSeq` 恒等于 `baseSeq` ⇒ **完成判据永不成立**（`dsh-delegate.mjs` 同结构，但它每轮都会前进所以没暴露）。
+
