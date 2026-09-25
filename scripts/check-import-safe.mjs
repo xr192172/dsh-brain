@@ -42,12 +42,12 @@ function collect(dir = SCRIPTS, acc = []) {
 export function scan() {
   const files = collect()
   const src = new Map(files.map((f) => [f, fs.readFileSync(f, 'utf8')]))
-  // 谁被 import 了？（只看 scripts/ 内部）
-  const imported = new Map() // basename(no ext) -> [importer…]
+  // 谁被 import 了？（只看 scripts/ 内部。★ 排除"自己 import 自己"那种注释/字符串误命中）
+  const imported = new Map()
   for (const [f, s] of src) {
     for (const m of s.matchAll(/from\s+['"](\.{1,2}\/[^'"]+\.mjs)['"]/g)) {
       const target = path.resolve(path.dirname(f), m[1])
-      if (!src.has(target)) continue
+      if (!src.has(target) || target === f) continue
       const key = path.basename(target)
       if (!imported.has(key)) imported.set(key, [])
       imported.get(key).push(path.relative(SCRIPTS, f))
@@ -57,14 +57,20 @@ export function scan() {
   for (const [f, s] of src) {
     const base = path.basename(f)
     const importers = imported.get(base) ?? []
-    if (importers.length === 0) continue // 不被 import ⇒ 不要求
-    const looksCli = /process\.exit\(|process\.argv/.test(s)
-    if (!looksCli) continue // 纯函数模块 ⇒ 没这个问题
-    const hasGuard = s.includes('isMain')
+    if (importers.length === 0) continue
+    // ★★ 2026-09-25 修（我第一版是**坏的尺子**）：判"顶层派发"必须**锚定行首** ——
+    //   第一版用 `/process\.exit\(|process\.argv/` 全文匹配 ⇒ 文件里**提到**它（注释/函数体）就算
+    //   ⇒ 报出 2 个**假阳性**（实测：那两个文件顶层派发行是 **0**）。
+    const topLevelCli = /^(?:process\.exit\(|const argv = process\.argv|if \(argv\.includes\()/m.test(s)
+    if (!topLevelCli) continue
+    // ★★ 判"有守卫"必须认**真正的谓词**，不能只查字符串 `isMain` ——
+    //   第一版只查 `s.includes('isMain')` ⇒ 我把 const 那行删掉、"if (isMain) {" 还在 ⇒ 仍算"有"
+    //   ⇒ **消融永远翻不动**（实测消融 FAIL）。
+    const hasGuard = /path\.resolve\(process\.argv\[1\]\)\s*===\s*fileURLToPath\(import\.meta\.url\)/.test(s)
     rows.push({ file: path.relative(SCRIPTS, f).replace(/\\/g, '/'), importers, hasGuard })
   }
-  // ★ 阳性计数：整个 scripts/ 里有多少文件带守卫（含未被 import 的）
-  const guarded = [...src.values()].filter((s) => s.includes('isMain')).length
+  // 阳性计数：整个 scripts/ 里有多少文件带**真正的守卫谓词**
+  const guarded = [...src.values()].filter((s) => /path\.resolve\(process\.argv\[1\]\)\s*===\s*fileURLToPath\(import\.meta\.url\)/.test(s)).length
   return { rows, total: src.size, guarded, importedCount: imported.size }
 }
 
@@ -83,10 +89,23 @@ function selftest() {
   const bak = fs.readFileSync(target, 'utf8')
   let ablOk = false
   try {
-    fs.writeFileSync(target, bak.replace(/const isMain = [^\n]*\n/, '// ABLATED: isMain 已撤\n'), 'utf8')
-    const out = (spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { encoding: 'utf8', timeout: 60000 }).stdout ?? '')
-    ablOk = /FAIL skill-sieve\.mjs/.test(out)
-    console.log(`  ${ablOk ? 'ok  ' : 'FAIL'} 撤掉 skill-sieve 的 isMain ⇒ 它被报 FAIL ${ablOk ? '✓' : '（没报 ⇒ 这条判据没接线）'}`)
+    // ★★ 消融要撤**真正的谓词**（撤掉后 `hasGuard` 必须变 false）——
+    //   我第一版撤的是 `const isMain = …` 那行，而 `if (isMain) {` 还在 ⇒ 字符串判定仍算"有" ⇒ **消融翻不动**。
+    const PRED = /path\.resolve\(process\.argv\[1\]\)\s*===\s*fileURLToPath\(import\.meta\.url\)/
+    const PRED_G = new RegExp(PRED.source, 'g') // ★ 用 /g 版本做替换：谓词在文件里可能**出现不止一次**
+    const nHits = (bak.match(PRED_G) ?? []).length
+    console.log(`  （skill-sieve 里守卫谓词出现 ${nHits} 次）`)
+    if (!PRED.test(bak)) {
+      console.log('  ★ 消融锚点失配：skill-sieve 里找不到守卫谓词 —— 必须重写这条消融')
+    } else {
+      fs.writeFileSync(target, bak.replace(PRED_G, 'true /* ABLATED */'), 'utf8')
+      const out = (spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { encoding: 'utf8', timeout: 60000 }).stdout ?? '')
+      // ★★ 断言要认**报告路径真正打的字**：报告打 `❌ <file>（被 … import）`，
+      //   而 `FAIL` 只出现在本自测自己的行里 ⇒ 我第一版断言 `FAIL skill-sieve.mjs` ⇒
+      //   **永远匹配不上 = 假消融**（手工复现才看出来：机制其实是好的）。
+      ablOk = /(❌|FAIL)\s+skill-sieve\.mjs/.test(out)
+      console.log(`  ${ablOk ? 'ok  ' : 'FAIL'} 撤掉 skill-sieve 的守卫谓词 ⇒ 它被报 FAIL ${ablOk ? '✓' : '（没报 ⇒ 这条判据没接线）'}`)
+    }
   } finally {
     fs.writeFileSync(target, bak, 'utf8')
   }
