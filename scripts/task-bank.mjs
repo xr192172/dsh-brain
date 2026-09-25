@@ -37,8 +37,20 @@ export const INBOX_DIR = path.join(HERE, '..', 'out', '_tasks')
 
 const slug = (s) => String(s).replace(/[^a-zA-Z0-9\u4e00-\u9fa5._-]+/g, '-').replace(/^-|-$/g, '').toLowerCase()
 
-/** ★ 判据用：题库里【不许出现】的字段名（出现即说明"场"又混进了 agent）。 */
-export const AGENT_ISH_KEYS = ['agent', 'arm', 'by', 'tester', 'model', 'provider', 'preset', 'sessionId']
+/**
+ * ★★ 2026-09-25 精化（用户提问带来的认知修正）：
+ *   用户说：*"不需要去设题库，你只是把**下一个开发目标**放进题里，然后把这个**下一个的开发环境**
+ *   也放进题里（实验场）里，让他去根据这些去开发下一代……测试成绩留下来。"*
+ *   ⇒ **题 = 目标 + 环境**。所以"环境"（`env`）**是题的一部分**，不是非法字段。
+ * ★ 所以判据必须精化：把 **"谁"** 与 **"在哪"** 分开 ——
+ *   · **禁止（谁）**：`agent / by / tester / model / provider / preset / sessionId`
+ *   · **允许（在哪）**：`env`（含 `arm / dshHome / ports / isolate / profile`）
+ *   ⚠️ 这不是"为了让判据通过而放宽"：**"在什么条件下开发"是题面的要求**，
+ *     而 **"谁来做"不是** —— 前者决定实验怎么搭台，后者与题无关。
+ */
+export const AGENT_ISH_KEYS = ['agent', 'by', 'tester', 'model', 'provider', 'preset', 'sessionId']
+/** 环境里**允许**出现的键（题面的一部分：在哪跑）。 */
+export const ENV_KEYS = ['arm', 'dshHome', 'ports', 'isolate', 'profile', 'inherit', 'note']
 
 export function listTasks(bankDir = BANK_DIR) {
   if (!fs.existsSync(bankDir)) return []
@@ -109,15 +121,29 @@ export function refresh({ bankDir = BANK_DIR, inbox = INBOX_DIR } = {}) {
     if (fs.existsSync(path.join(dir, 'task.md'))) { skipped.push(id); continue }
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'task.md'), raw, 'utf8')
-    // ★ meta **只放题目属性**：不放 agent/arm/by（那是 runs 的事）
+    // ★ meta = **目标(题面,在 task.md) + 环境(env)**；★ 不写"谁"（agent/arm…那是 runs 的事）
+    //   `env: {inherit:true}` = "继承默认实验场"（题面没特别要求时用它；要特化就写全 env）
     fs.writeFileSync(
       path.join(dir, 'meta.json'),
-      JSON.stringify({ id, title, source: `out/_tasks/${f}`, difficulty: null, gates: [], tags: [], importedAt: new Date().toISOString() }, null, 2) + '\n',
+      JSON.stringify({ id, title, source: `out/_tasks/${f}`, difficulty: null, gates: [], tags: [], env: { inherit: true }, importedAt: new Date().toISOString() }, null, 2) + '\n',
       'utf8',
     )
     imported.push(id)
   }
   return { imported, skipped, notATask }
+}
+
+/**
+ * ★★ 判"这道题**可不可执行**"：题 = **目标 + 环境** ⇒ 缺 env 就**跑不起来**。
+ * 用户 2026-09-25：*"你只是把下一个开发目标放进题里，然后把这个下一个的**开发环境**也放进题里（实验场）。"*
+ */
+export function checkExecutable(t) {
+  if (!t) return { ok: false, reason: '题不存在' }
+  if (!t.title) return { ok: false, reason: '缺 title（题面没有目标）' }
+  if (!t.env || typeof t.env !== 'object' || Object.keys(t.env).length === 0) {
+    return { ok: false, reason: '缺 env（题面没有"在什么环境里做"）⇒ 不可执行' }
+  }
+  return { ok: true }
 }
 
 /** ★ 判据：题目那一层里**不得出现** agent 味道的 key（递归查 meta.json）。 */
@@ -174,8 +200,10 @@ function selftest() {
   check('⑥ ★ 题库里**没有** agent 味道的字段（场 ≠ 实验）', leak0.length === 0, leak0.length ? `泄漏：${leak0.join(', ')}` : '干净')
   // ⑦ 拒绝对不存在的题记分（fail-closed）
   check('⑦ 给不存在的题记分 ⇒ 拒绝', recordScore('nope', { result: 'pass' }, runs).ok === false, '')
+  // ⑦b ★ **题 = 目标 + 环境**：refresh 出来的题必须自带 env
+  check('⑦b ★ refresh 出来的题**自带 env**（目标 + 环境）', checkExecutable(listTasks(bank).find((x) => x.id === 'demo-task')).ok === true, 'env:{inherit:true}')
 
-  // ⑧ ★★ 消融：往题目 meta 里塞一个 `by` ⇒ 判据⑥ 必须变红
+  // ⑧ ★★ 两个消融：塞 `by` ⇒ ⑥ 变红；删 `env` ⇒ ⑦b 变红
   console.log('\n=== 消融自证 ===')
   const mf = path.join(bank, 'demo-task', 'meta.json')
   const bak = fs.readFileSync(mf, 'utf8')
@@ -185,10 +213,16 @@ function selftest() {
   fs.writeFileSync(mf, bak, 'utf8')
   const ablOk = leak1.length > 0
   console.log(`  ${ablOk ? 'ok  ' : 'FAIL'} 把 agent 字段塞进题目 ⇒ 判据⑥ 变红 ${ablOk ? '✓' : '（没变红 ⇒ 这条判据没接线）'}`)
+  const m2 = JSON.parse(bak); delete m2.env
+  fs.writeFileSync(mf, JSON.stringify(m2, null, 2) + '\n', 'utf8')
+  const exec2 = checkExecutable(listTasks(bank).find((x) => x.id === 'demo-task'))
+  fs.writeFileSync(mf, bak, 'utf8')
+  const ablOk2 = exec2.ok === false
+  console.log(`  ${ablOk2 ? 'ok  ' : 'FAIL'} 把 env 删掉 ⇒ 判据⑦b 变红（题不可执行）${ablOk2 ? '✓' : '（没变红）'}`)
   fs.rmSync(TMP, { recursive: true, force: true })
   const pass = res.filter((x) => x.ok).length
-  const total = pass === res.length && ablOk
-  console.log(`\n结果：判据 ${pass}/${res.length}，消融 ${ablOk ? '通过' : '未通过'} ⇒ ${total ? 'PASS' : 'FAIL'}`)
+  const total = pass === res.length && ablOk && ablOk2
+  console.log(`\n结果：判据 ${pass}/${res.length}，消融 ${ablOk && ablOk2 ? '通过（2/2）' : '未通过'} ⇒ ${total ? 'PASS' : 'FAIL'}`)
   return total ? 0 : 1
 }
 

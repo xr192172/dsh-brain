@@ -5,5 +5,9 @@
   "difficulty": null,
   "gates": [],
   "tags": [],
-  "importedAt": "2026-09-25T14:08:49.870Z"
+  "importedAt": "2026-09-25T14:08:49.870Z",
+  "env": {
+    "inherit": true,
+    "note": "题面未特化环境 ⇒ 用默认实验场"
+  }
 }
