@@ -203,6 +203,16 @@
     **开发脑编排(原工具+目标任务)→产出回值→写回商城→两脑按回值迭代工具链**。
     ★ **链路工具就是这两个脑【编排】出来的产物**（不是人手写）。
   · 三条待定（我不自己发明）：商城存储形状 / 回值字段 / 迭代触发。
+- ★★★ **自进化的两个固定子 agent 已落地（commit `5bf3a16`）**：`packages/subagent-council` 新增两席 ——
+  **开发脑 `dev` / provider `evo-dev`**（= 文档"生产脑"）与 **审批脑 `review` / provider `evo-review`**（= 文档"评审团/专家团"）。
+  · dev：只施工；把【原工具+目标任务】**编排成一个工具**（★不是列一堆元工具）；**融合也是它的活**；
+    六段产出（链路图/编排产物/融合说明/**自证**/回值/我可能错在哪）。
+  · review：只裁"值不值得"；五段产出（被审对象/**独立复算**/裁决/下一步/我可能错在哪）；
+    ★★ **防串供写进人格**（"产变更方不能与审批方同源"）。
+  · 机制：`Config.seats[]` 一次挂多席；**留空 ⇒ 只挂 `seat`（向后兼容）**；未知席位**跳过**（不降级成 architect）。
+  · ★★ **仍未接线**：两席**没被挂上**（profile 未设 `seats`）⇒ **代码在、没上线**；且防串供实质要求
+    两席**各自不同**的 provider/model ⇒ 要**两次挂载、各给路由**。
+  · 判据 `packages/subagent-council/test/seats-check.mjs`：**7/7 + 消融通过**。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
