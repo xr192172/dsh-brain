@@ -213,6 +213,21 @@
   · ★★ **仍未接线**：两席**没被挂上**（profile 未设 `seats`）⇒ **代码在、没上线**；且防串供实质要求
     两席**各自不同**的 provider/model ⇒ 要**两次挂载、各给路由**。
   · 判据 `packages/subagent-council/test/seats-check.mjs`：**7/7 + 消融通过**。
+- ★★★ **Agent 工厂第一段已落地（`scripts/skill-factory.mjs`，commit `3c9cecd`）**：
+  `skillToAgentSpec(skill) ⇒ agent 规格`（**纯函数**）：`Principle`+`Fix`→**persona** / `Tools[].Name`→**toolFilter**（窄脸）/
+  **`provider:'spawn'`（★不是 fork，D10）** / `outputSchema` 默认不给 / `depthLimit` 默认不收窄 / `source` 留痕；
+  ★ **只有一等才建**（判据**复用 `skill-sieve.classifySkill`，不重写**）；**只出规格，不注册不启动**。
+  判据 **13/13 + 单因子消融**。
+- ★★ **`scripts/` 下的脚本必须 import-safe**：`skill-sieve.mjs` 曾在**模块顶层派发 CLI**
+  ⇒ 被 import 时**拿 import 方的 argv 跑自己的 CLI + `process.exit`** ⇒ 把工厂的判据**截断**（**假绿**）。
+  ⇒ 一律 `const isMain = …; if (isMain) { …CLI… }`。
+- ★★ **消融必须【单因子】**：要挑"**只有被撤那条守卫适用**"的样本 ——
+  "二等（缺 Tools）"被两道守卫同时满足 ⇒ 撤一道不翻（多因子）；"二等（缺 Script）"才翻得动。
+- ★★ **ai-base 里"工具商城"的现状（用户说那边有实现）**：`工具商城`/`toolMall`/`回值` 等词**全零命中**；
+  ★ 最接近的是 **`internal/hub/v2/friends/`**（**friend registration + remote Brain transports**：
+  `FriendConfig` 持久化在 `.agent/friends/{id}/`、`FriendRegistry` CRUD+落盘、`FriendService` REST `/api/v1/friends/*`、
+  **C 方案 Remote Brain 通过 `POST /api/v1/friends` 动态加入**，transport = ws/a2a/mcp）
+  ⇒ **这就是"上架/货架"**；**但只有骨架**：`FriendConfig` **无任何"回值/评分"字段**，且 **`.agent/friends/` 是空的**。
   · ★★ **已挂进隔离实例**（commit `401108f`）：`isolated-instance` 给隔离 profile 追加**两条 insert**
     （`evo-dev`/`evo-review`，id 互异、可各给路由）；`--no-evo-seats` 可关；幂等。
     判据 `scripts/delegation/test-evo-seats-mount.mjs`：**9/9 + 消融**（含"现役 sha+mtime 一字未动"）。
