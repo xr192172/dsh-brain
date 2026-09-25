@@ -213,6 +213,12 @@
   · ★★ **仍未接线**：两席**没被挂上**（profile 未设 `seats`）⇒ **代码在、没上线**；且防串供实质要求
     两席**各自不同**的 provider/model ⇒ 要**两次挂载、各给路由**。
   · 判据 `packages/subagent-council/test/seats-check.mjs`：**7/7 + 消融通过**。
+  · ★★ **已挂进隔离实例**（commit `401108f`）：`isolated-instance` 给隔离 profile 追加**两条 insert**
+    （`evo-dev`/`evo-review`，id 互异、可各给路由）；`--no-evo-seats` 可关；幂等。
+    判据 `scripts/delegation/test-evo-seats-mount.mjs`：**9/9 + 消融**（含"现役 sha+mtime 一字未动"）。
+    ★★ 但**只有一个 provider/model** ⇒ **防串供只有形式**；且**还没真跑过**（起服务只能用户终端）。
+- ★★ **`git commit` 别用 `-m` 带反引号**：`-m "…\`--flag\`…"` 会被 shell 当**命令替换**执行，
+  内容**静默消失**而提交照样成功 ⇒ **一律写消息文件 + `-F`**（本项目铁律已收录同类）。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
