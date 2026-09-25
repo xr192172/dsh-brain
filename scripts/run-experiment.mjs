@@ -161,7 +161,14 @@ if (isMain) {
   // ② 发题（+ 收卷）
   console.log('\n-- ② 发题（dsh-delegate --for-arm）--')
   const outDir = path.join(WT, 'evals', 'runs', '_evidence', sp.taskId)
-  const dl = spawnSync(NODE, [path.join(HERE, 'delegation', 'dsh-delegate.mjs'), '--for-arm', sp.arm, '--tag', `exp-${sp.taskId}`, '--cwd', sp.cwd, '--rounds', String(sp.rounds), '--budget-ms', '1500000', '--stall-ms', '420000', '--prompt', sp.promptPath], { encoding: 'utf8', timeout: 1800000 })
+  fs.mkdirSync(outDir, { recursive: true })
+  // ★★ 2026-09-25 修（**实现与自己刚立的原则矛盾**）：派活产物会落在**任务书所在目录**下
+  //   （`<dir>/_delegate-<tag>/`）⇒ 直接拿 `evals/tasks/<id>/task.md` 当 `--prompt`
+  //   就会把**实验产物写进【题目录】** ⇒ 违反"**场 ≠ 实验**"。
+  //   ⇒ 正解：把题面**拷贝到证据区**再用它当 prompt ⇒ 产物自然落在证据区 ✓
+  const stagedPrompt = path.join(outDir, 'task.md')
+  fs.copyFileSync(sp.promptPath, stagedPrompt)
+  const dl = spawnSync(NODE, [path.join(HERE, 'delegation', 'dsh-delegate.mjs'), '--for-arm', sp.arm, '--tag', `exp-${sp.taskId}`, '--cwd', sp.cwd, '--rounds', String(sp.rounds), '--budget-ms', '1500000', '--stall-ms', '420000', '--prompt', stagedPrompt], { encoding: 'utf8', timeout: 1800000 })
   const dlOut = (dl.stdout ?? '') + (dl.stderr ?? '')
   console.log(dlOut.split('\n').filter((l) => /outcome|toolCalls|evMissing|产物|读数/.test(l)).slice(0, 6).join('\n'))
   let dres = null
