@@ -182,6 +182,14 @@
   ⇒ **目标形态（原话）**：像 SAFE RENAME 那样的、一个工具包含整个链路、不需要 agent 自己组织。
   ★ 判据缺口：§7 只数"有没有工具"、**数不出元/链路** ⇒ "55 元工具+指导+脚本"会被判一等（**恰是不要的形态**）；
     口径（怎么判"是不是链路工具"）**等用户给**，我不自己发明。
+- ★★★ **脚本本身可改、可融合（§10）**：`Script` 不只能包成工具，**本身可替换/可融合**（两层：脚本融合 / 设计融合）；
+  择优形容词 = 更合理/更科学/更兼容 ⇒ ★ **我提议的可测代理**（文档标明"我提的"）：更兼容=同输入同输出 /
+  更合理=同功能用例通过更多；★★ **融合验收 = 必须通过【原先两者】的全部用例**（否则是退步）。
+  落到现成字段：**`MergedFrom[]` + `AbsorbedBy` + `SuccessRate`/`Score`/`UseCount`**（不新增）。
+- ★★ **`scripts/skill-sieve.mjs` 现状**（**已可跑，判据含消融**）：
+  `classifySkill`（分级 10/10）+ `suggestMerges`（融合候选 6/6）+ **两个消融都通过**；
+  CLI：`--in` / `--json` / `--emit-seen` / `--suggest-merge [--min-trigger-overlap N]` / `--selftest`。
+  ★★★ **只判定 + 记账，绝不自动融合/删除**。
 
 ★★ **能力库线（我们自己写的，2026-09-22 补登）**：
 - `docs/capability-registry-evolution.md`（设计文档 62KB）+ `scripts/capability-{registry,gate,sources,store,snapshot}.mjs`
