@@ -40,6 +40,10 @@ const leaked3 = badNames.filter((t) => validate(U(`cmd=mgmt&action=verdict&task=
 check('③ ★ 题名非法（元字符/穿越/空格）⇒ 全拒', leaked3.length === 0, `${badNames.length} 个全拒（漏 ${leaked3.length}）`)
 // ④ 臂不存在
 check('④ 臂不存在 ⇒ 拒', validate(U('cmd=mgmt&action=experiment&task=t1-guard&arm=ZZZ'), WT).ok === false, '')
+// ④b ★★ **正例**：真存在的臂必须**被接受** —— ★ 这条是补的：我第一版把臂路径写成 `wt/_arms`（实际是
+//     `wt/../_arms`）⇒ **误拒了真臂**，而当时只有"不存在的臂被拒"那条 ⇒ **判据抓不到**。
+const r4b = validate(U('cmd=mgmt&action=experiment&task=t1-guard&arm=A&dry=1'), WT)
+check('④b ★ 真存在的臂（A）⇒ **接受**（正例，防误拒）', r4b.ok === true && r4b.v.arm === 'A' && r4b.v.dry === true, r4b.ok ? `arm=${r4b.v.arm} dry=${r4b.v.dry}` : `★ 误拒：${r4b.reason}`)
 // ⑤ 臂名非法
 const leaked5 = ['A;rm', 'A&&x', '../a'].filter((a) => validate(U(`cmd=mgmt&action=experiment&task=t1-guard&arm=${encodeURIComponent(a)}`), WT).ok)
 check('⑤ 臂名非法 ⇒ 拒', leaked5.length === 0, `漏 ${leaked5.length}`)

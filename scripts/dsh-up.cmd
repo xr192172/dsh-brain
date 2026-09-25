@@ -23,7 +23,28 @@ rem    `node scripts\install-desktop-icon.mjs --yes`
 rem ============================================================================
 chcp 65001 >nul
 setlocal
-cd /d "%~dp0.."
+rem ---------------------------------------------------------------------------
+rem  ★★ 2026-09-25 修（**双击桌面那份才暴露的 bug**）：原来写 `cd /d "%~dp0.."`，
+rem     而 `%~dp0` 是"**这个 .cmd 自己所在的目录**" ⇒ 本文件在 scripts\ 里时 `..` = 仓库根 ✓
+rem     但**拷到桌面**后 `..` = `C:\Users\Admin\` ⇒ 去找 `C:\Users\Admin\scripts\arm-up.mjs` ✗
+rem  ⇒ 正解：留一个**标记行**，由 `install-desktop-icon.mjs` 把**绝对仓库路径**写进桌面那份。
+rem ---------------------------------------------------------------------------
+set "DSH_REPO_OVERRIDE="
+if not "%DSH_REPO_OVERRIDE%"=="" (
+  set "REPO=%DSH_REPO_OVERRIDE%"
+) else (
+  set "REPO=%~dp0.."
+)
+if not exist "%REPO%\scripts\arm-up.mjs" (
+  echo [dsh-up] ERROR: cannot find scripts\arm-up.mjs under "%REPO%".
+  echo          If you copied this file elsewhere, re-run
+  echo          "node scripts\install-desktop-icon.mjs --yes" from the repo
+  echo          so the absolute repo path gets stamped into the copy.
+  echo.
+  pause
+  exit /b 2
+)
+cd /d "%REPO%"
 
 if "%~1"=="" (
   echo [dsh-up] starting LIVE instance ^(3080^) ...

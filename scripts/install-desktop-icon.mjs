@@ -67,9 +67,32 @@ if (remove) {
   process.exit(0)
 }
 
-// ★ 写之前先把认领标记注进去（这样 --remove 能认出是自己写的）
+// ★ 写之前做两处**打标记**：
+//   ① 认领标记（`--remove` 靠它认出是自己写的）
+//   ② ★★ **把绝对仓库路径写进去** —— 这是本工具存在的**真正理由**：
+//      桌面那份与 `scripts\` 的**相对关系不成立**（`%~dp0..` 在桌面 = `C:\Users\Admin\`）
+//      ⇒ 必须把 `%DSH_REPO_OVERRIDE%` 填成绝对路径，否则双击会报 `Cannot find module …\scripts\arm-up.mjs`。
+const REPO = path.resolve(HERE, '..')
 const body = fs.readFileSync(SRC, 'utf8')
-const stamped = body.includes(FLAG) ? body : body.replace('@echo off', `@echo off\r\nrem ${FLAG}`)
+let stamped = body.includes(FLAG) ? body : body.replace('@echo off', `@echo off\r\nrem ${FLAG}`)
+// ★ 匹配必须**锚定整行且不跨行** —— 我第一版用 `[^"]*`，它**跨过了换行**把下一行的 `if not` 也吞了，
+//   产出 `set "DSH_REPO_OVERRIDE=D:\…"%DSH_REPO_OVERRIDE%"=="" (` 这种坏行 ✗
+const OVERRIDE_LINE = /^set "DSH_REPO_OVERRIDE=[^"\r\n]*"$/m
+if (!OVERRIDE_LINE.test(stamped)) {
+  console.error('[失败] 源文件里找不到独立的 `set "DSH_REPO_OVERRIDE=…"` 行 ⇒ 装了也没用，拒绝继续')
+  process.exit(2)
+}
+stamped = stamped.replace(OVERRIDE_LINE, `set "DSH_REPO_OVERRIDE=${REPO}"`)
+if (!stamped.includes(`set "DSH_REPO_OVERRIDE=${REPO}"`)) {
+  console.error('[失败] 绝对路径没写进去 ⇒ 拒绝继续（宁可报错也不要留一个会崩的图标）')
+  process.exit(2)
+}
+// ★ 坏形态的**精确**判据：引号**在同行闭合之后还有多余内容**（即"吞掉了下一行"那种）。
+//   ⚠️ 我第一版写成 /…"=="" \(/ ⇒ 把**正常那行** `if not "%DSH_REPO_OVERRIDE%"=="" (` 也判成坏 ⇒ **假红**。
+if (/^set "DSH_REPO_OVERRIDE=[^"\r\n]*"[ \t]*\S/m.test(stamped)) {
+  console.error('[失败] 检测到被吞坏的续行（引号闭合后同行仍有多余内容）⇒ 拒绝继续')
+  process.exit(2)
+}
 
 console.log(`源文件 : ${SRC}`)
 for (const d of desks) {

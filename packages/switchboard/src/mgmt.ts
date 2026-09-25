@@ -64,8 +64,12 @@ export function validate(url: URL, wt: string): { ok: true; v: Validated } | { o
   if (action === 'experiment') {
     const arm = url.searchParams.get('arm') ?? 'A'
     if (!/^[a-zA-Z0-9_-]+$/.test(arm)) return { ok: false, reason: 'arm 不合法' }
-    if (!fs.existsSync(path.join(wt, '_arms', arm.toLowerCase(), 'dshhome'))) {
-      return { ok: false, reason: `臂 "${arm}" 没有实例（_arms/${arm.toLowerCase()}/dshhome 不存在）⇒ 先 arm-up` }
+    // ★★ 2026-09-25 修：臂**不在仓库里**，而是**仓库的同级目录** `D:\project_develop\_arms\<名>\dshhome`
+    //   （权威定义见 `scripts/arm-ports.mjs` 的 `rootForArm()`／`dshHomeForArm()`）。
+    //   我第一版写成 `path.join(wt,'_arms',…)` ⇒ 恒不存在 ⇒ **误拒**（而 `tasks` 能跑 ⇒ 让我误以为 wt 没问题）。
+    const armHome = path.resolve(wt, '..', '_arms', arm.toLowerCase(), 'dshhome')
+    if (!fs.existsSync(armHome)) {
+      return { ok: false, reason: `臂 "${arm}" 没有实例（${armHome} 不存在）⇒ 先 arm-up ${arm}` }
     }
     v.arm = arm
     v.dry = url.searchParams.get('dry') === '1'
