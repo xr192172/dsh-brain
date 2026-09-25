@@ -1,0 +1,1 @@
+{"task":"t1-guard","at":"2026-09-25T14:10:11.710Z","result":"pass","score":0.9,"by":"me(核验者)","note":"我复核：2文件语法OK、check-import-safe报缺失0、且它按逃生门如实跳过patch-anchors；它自报的18/19 FAIL经我确认为预存在"}

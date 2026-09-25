@@ -1,0 +1,9 @@
+{
+  "id": "t1-guard",
+  "title": "任务 T1：给 3 个既存违规补 `isMain` 守卫（消债）",
+  "source": "out/_tasks/t1-guard.md",
+  "difficulty": null,
+  "gates": [],
+  "tags": [],
+  "importedAt": "2026-09-25T14:08:49.869Z"
+}
