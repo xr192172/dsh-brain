@@ -37,6 +37,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { decompress } from 'fzstd'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+// ★ 端口/根目录的**唯一定义**（纯模块，无副作用）—— 派活的地址与读日志的库**必须同出一处**
+import { portsForArm, dshHomeForArm, LIVE_SPEC } from '../arm-ports.mjs'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const WT = path.resolve(HERE, '..', '..')
 
 const argv = process.argv.slice(2)
 const argOf = (k) => { const i = argv.indexOf(k); return i < 0 ? null : (argv[i + 1] ?? null) }
@@ -45,11 +51,45 @@ const promptFile = argOf('--prompt')
 const textArg = argOf('--text')
 const tag = argOf('--tag') ?? 'dsh'
 const cwd = argOf('--cwd') ?? 'D:/project_develop/dsh-brain'
-const front = argOf('--front') ?? 'http://127.0.0.1:3080'
+/**
+ * ★★ 2026-09-25 修：`--for-arm <臂名>` ⇒ **自动推出** `--front` 与 `--home`。
+ *
+ * 为什么必须（实测踩过、而且**误导了我两次**）：派活给**隔离实例**时我只传了 `--front`（33080），
+ * 没传 `--home` ⇒ 本脚本去**现役的库**（`C:/Users/Admin/.dsh/sessions`）找那个 sid ⇒ 找不到 ⇒
+ * **把 `toolCalls` 报成 0**、还打"疑似空跑" ⇒ 我据此**两次把成功误判成失败**。
+ * ★ 根子在"读数来源没核对"（铁律 15）；修法是**让地址与库同出一处**（`scripts/arm-ports.mjs`）。
+ */
+const forArm = argOf('--for-arm')
+let front = argOf('--front') ?? 'http://127.0.0.1:3080'
+let DSH_HOME = argOf('--home') ?? 'C:/Users/Admin/.dsh'
+if (forArm) {
+  if (argOf('--front') || argOf('--home')) console.warn('[警告] --for-arm 与 --front/--home 同时给了 ⇒ 以 --for-arm 为准')
+  if (forArm === 'live' || forArm === '--live') {
+    front = LIVE_SPEC.front
+    DSH_HOME = LIVE_SPEC.dshHome
+  } else {
+    let allArms = null
+    try {
+      const { createRequire } = await import('node:module')
+      const req = createRequire(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'x.cjs'))
+      const { loadArmsRegistry } = req(path.join(WT, 'scripts', 'arms-registry.mjs'))
+      allArms = (loadArmsRegistry('evals/arms.json', { base: WT }).arms ?? []).map((a) => a.name)
+    } catch (e) {
+      console.error(`[失败] --for-arm 需要臂注册表（evals/arms.json）才能推出端口 ⇒ ${e?.message ?? e}`)
+      process.exit(3)
+    }
+    if (!allArms.includes(forArm)) {
+      console.error(`[失败] 臂 "${forArm}" 不在注册表里（可用：${allArms.join(', ')}）⇒ 拒绝猜它的端口段`)
+      process.exit(3)
+    }
+    front = portsForArm(forArm, allArms).front
+    DSH_HOME = dshHomeForArm(forArm)
+  }
+  console.log(`[for-arm ${forArm}] front=${front}  DSH_HOME=${DSH_HOME}`)
+}
 const preset = argOf('--preset') ?? 'standard'
 const budgetMs = Number(argOf('--budget-ms') ?? 2400000)   // 40 min
 const stallMs = Number(argOf('--stall-ms') ?? 420000)      // 7 min 无前进 ⇒ 报"疑似卡住"
-const DSH_HOME = argOf('--home') ?? 'C:/Users/Admin/.dsh'
 // ★ 停工续跑：`--expect` 指定的产出文件（判据是**文件在不在**，不是"感觉它做完了"）
 const expectFile = argOf('--expect') ? path.resolve(argOf('--expect')) : null
 const rounds = Math.max(1, Number(argOf('--rounds') ?? 3))
@@ -96,9 +136,12 @@ function sessionFile(sid) {
 }
 function readEvents(sid) {
   const f = sessionFile(sid)
-  if (!f) return { file: null, events: [] }
+  // ★★ 2026-09-25 修（**铁律 12：看不到 ≠ 没有**）：找不到日志 ⇒ 明确标 `missing`，
+  //    **绝不返回"0 条事件"冒充读数**。实测代价：我把 `toolCalls:0` 当成"空跑"，
+  //    两次把**成功**的派活误判成失败 —— 真因只是 `--home` 指错了库。
+  if (!f) return { file: null, events: [], missing: true }
   let raw = ''
-  try { raw = Buffer.from(decompress(fs.readFileSync(f))).toString('utf8') } catch { return { file: f, events: [] } }
+  try { raw = Buffer.from(decompress(fs.readFileSync(f))).toString('utf8') } catch { return { file: f, events: [], missing: false } }
   const events = raw.split('\n').filter((l) => l.trim()).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
   return { file: f, events }
 }
@@ -209,7 +252,13 @@ for (round = 1; round <= rounds; round++) {
 }
 
 // ── ⑦ 采读数（★ "真的干活了吗"）──────────────────────────────────────────────
-const { file: evFile, events } = readEvents(sid)
+const { file: evFile, events, missing: evMissing } = readEvents(sid)
+if (evMissing) {
+  console.log(
+    `\n★★ 读数**拿不到**：在 ${DSH_HOME} 下找不到会话 ${sid} 的日志 ⇒ **不把"看不到"当"0"**（铁律 12）。\n` +
+      `   ⇒ 大概率是**库指错了**：派活发给隔离实例时必须用 \`--for-arm <臂名>\`（它会同时定 front 与 DSH_HOME）。`,
+  )
+}
 const byType = {}
 for (const e of events) byType[e.type] = (byType[e.type] ?? 0) + 1
 const toolCalls = events.filter((e) => e.type === 'tool/call')
@@ -239,7 +288,7 @@ const result = {
   asOfSeq: { before: beforeSeq, after: final?.projections?.asOfSeq ?? null },
   session: { file: evFile ? path.basename(evFile) : null, events: events.length, byType },
   work: {
-    toolCalls: toolCalls.length, byTool, codeDispatches,
+    toolCalls: evMissing ? null : toolCalls.length, byTool, codeDispatches, evMissing,
     steps: stats.steps ?? null, turns: stats.turns ?? null,
     outputTokens: tokens.outputTokens ?? null, uncachedInputTokens: tokens.uncachedInputTokens ?? null,
   },
@@ -252,7 +301,7 @@ let code = 0
 if (outcome !== 'settled') code = 1
 else if (approvalOpen) code = 6
 else if (expectFile && !expectOk) code = 7
-else if (toolCalls.length === 0 && codeDispatches === 0) code = 5
+else if (!evMissing && toolCalls.length === 0 && codeDispatches === 0) code = 5
 
 fs.writeFileSync(path.join(OUTDIR, 'result.json'), JSON.stringify(result, null, 2), 'utf8')
 if (lastText) fs.writeFileSync(path.join(OUTDIR, 'last-assistant.txt'), lastText, 'utf8')

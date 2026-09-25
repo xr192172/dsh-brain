@@ -29,6 +29,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+// ★ 端口/根目录的**唯一定义**（纯模块，无副作用可安全 import）
+import { LIVE_PORTS, LIVE_SPEC, portsForArm as sharedPortsForArm, rootForArm as sharedRootForArm } from './arm-ports.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WT = path.resolve(HERE, '..')
@@ -37,30 +39,18 @@ const argv = process.argv.slice(2)
 const argOf = (k) => { const i = argv.indexOf(k); return i < 0 ? null : (argv[i + 1] ?? null) }
 const hasFlag = (k) => argv.includes(k)
 
-/** ★ 现役占用的端口 —— 派生结果**不许落在**这里面（实测：池端口曾抢现役的 3101，现役前门整个掉）。 */
-export const LIVE_PORTS = new Set([3080, 3081, 3101, 31800, 31810])
+/** ★ `LIVE_PORTS` / `LIVE_SPEC` / `portsForArm` / `rootForArm` 都定义在 `./arm-ports.mjs`（**唯一一份**）。 */
+export { LIVE_PORTS, LIVE_SPEC }
 
 /**
  * ★★ **唯一的推导**：臂名 + 臂序号 ⇒ 整段端口。**外部不再给任何端口变量。**
  * 步长 40 ⇒ 段内布局：switch / gen / pool(+21) / admin(+100) / handover(+110)。
  */
 export function portsForArm(armName, allArms) {
-  const idx = Math.max(0, allArms.indexOf(armName))
-  const base = 33080 + idx * 40
-  return {
-    base,
-    env: {
-      SWITCH_PORT: String(base),
-      GEN_PORT_BASE: String(base + 1),
-      SWITCH_ADMIN_PORT: String(base + 100),
-      HANDOVER_ADMIN_PORT_BASE: String(base + 110),
-      DSH_PUBLIC_WEB_URL: `http://127.0.0.1:${base}`,
-    },
-    front: `http://127.0.0.1:${base}`,
-    admin: `http://127.0.0.1:${base + 100}`,
-    pool: base + 21,
-    genBase: base + 1,
-  }
+  // ★★ 2026-09-25：**算法已抽到 `scripts/arm-ports.mjs`**（唯一一份）——
+  //   因为 `dsh-delegate.mjs` 也要按臂名推出同一个 front/DSH_HOME，
+  //   绝不能各写一遍（那正是"每回不一致"的根源）。这里只做转调。
+  return sharedPortsForArm(armName, allArms)
 }
 
 /**
@@ -68,7 +58,7 @@ export function portsForArm(armName, allArms) {
  * ★★ 默认必须与 `isolated-instance.mjs` 的 `DEFAULT_ROOT` **一致**：`D:/project_develop/_arms/<臂名小写>`。
  *    （我第一版拿 `path.resolve(WT)` 当根 ⇒ 算成了**仓库里**的 `dsh-brain/a` ⇒ 准备阶段直接失败。）
  */
-export const rootForArm = (armName) => path.join('D:/project_develop/_arms', armName.toLowerCase())
+export const rootForArm = (armName) => sharedRootForArm(armName)
 
 /**
  * ★★ 2026-09-25 加：**现役模式**（`--live`）。
@@ -81,15 +71,8 @@ export const rootForArm = (armName) => path.join('D:/project_develop/_arms', arm
  * ⇒ **不新增第二个启动器**（那正是"不一致"的来源）：本脚本**只留一个入口**，`--live` 只是它的另一个模式 ——
  *   · **不需要任何参数**（它自己知道现役的 DSH_HOME 与端口）；
  *   · 与臂模式**共用同一套自检**（臂专属那几条对现役不适用 ⇒ 见 judgeSelfCheck 的 mode 参数）。
+ * ★ 定义见 `./arm-ports.mjs`（与 `portsForArm` 同一份，避免两套算法漂移）。
  */
-export const LIVE_SPEC = {
-  arm: '(现役)',
-  dshHome: 'C:\\Users\\Admin\\.dsh',
-  switchboardDir: 'C:\\Users\\Admin\\.dsh\\switchboard',
-  ports: { base: 3080, genBase: 3081, pool: 3101, admin: 31800, handover: 31810, env: {} },
-  front: 'http://127.0.0.1:3080',
-  admin: 'http://127.0.0.1:31800',
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 自检（★ 把今天踩的坑逐条固化）
