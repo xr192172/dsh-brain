@@ -19,10 +19,16 @@
 // 安全约束：
 //   · 只读现役 profile/settings（复制骨架当模板，不修改）。
 //   · key 不落盘（经 env 传给启动进程）。
-//   · node_modules 用**目录联接**（junction），不 cp -r。
+//   · node_modules 是**自己的真实目录 + 逐项符号链接**（不再共享现役那份目录）。
 //   · 目标非空已存在 ⇒ 拒绝（除非 --force）。
 //   · 臂定义缺字段 ⇒ 报错停下。
 //   · 端口与现役冲突 ⇒ 拒绝（防误起）。
+//
+// ★ 2026-09-25 改动：
+//   · node_modules 由「junction 指现役」改为「真实目录 + 逐项 symlink」，并在其中
+//     额外加入 @dsh-brain/arm-isolation（工具层护栏，dev 模式唯一安全屏障）。
+//   · 启动规格与终端命令中追加 DSH_ARM_SELF / DSH_ARM_DENY（训练场身份）。
+//   · DSH_ARM_DENY 来源：evals/arms.json（经 loadArmsRegistry，不自己 parse）。
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -134,6 +140,18 @@ if (portConflict.length > 0) {
 }
 const PORTS = DEFAULT_PORTS
 
+// ── 训练场身份（DSH_ARM_SELF / DSH_ARM_DENY）──────────────────────────────────
+// DSH_ARM_SELF = 当前臂名
+const ARM_SELF = arm.name.trim()
+// DSH_ARM_DENY = 其它臂的 cwd + store，逗号分隔（★ 不含自己）
+const OTHER_ARMS = registry.arms.filter((a) => a.name !== ARM_SELF)
+const denyRoots = []
+for (const a of OTHER_ARMS) {
+  if (a.cwd && String(a.cwd).trim()) denyRoots.push(path.resolve(a.cwd))
+  if (a.store && String(a.store).trim()) denyRoots.push(path.resolve(a.store))
+}
+const ARM_DENY = denyRoots.join(',')
+
 // ── 解析 dshhome 路径 ──────────────────────────────────────────────────────────
 const dshHome = path.join(rootDir, 'dshhome')
 const verifyOut = path.join(rootDir, 'verifyout')
@@ -182,18 +200,248 @@ function copyFile(src, dst) {
   fs.writeFileSync(dst, content)
 }
 
-function createJunction(target, linkPath) {
-  ensureDir(path.dirname(linkPath))
-  // If target already exists as a junction/symlink, skip (idempotent)
-  if (fs.existsSync(linkPath)) {
-    const stat = fs.lstatSync(linkPath)
-    if (stat.isSymbolicLink() || stat.isJunction()) return
+/**
+ * 把 srcDir 下的文件递归复制到 dstDir（只复制文件，不递归链接目标）。
+ * 用于复制 pnpm 内部目录（.bin、.pnpm 等）和 hoisted 包。
+ */
+function copyDirRecursive(srcDir, dstDir) {
+  ensureDir(dstDir)
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true })
+  for (const e of entries) {
+    const src = path.join(srcDir, e.name)
+    const dst = path.join(dstDir, e.name)
+    if (e.isDirectory()) {
+      // 跳过 .pnpm 内部（太大），只复制顶层
+      if (e.name === '.pnpm') {
+        console.warn(`  [跳过] .pnpm 内部不递归复制（太大）`)
+        continue
+      }
+      copyDirRecursive(src, dst)
+    } else if (e.isFile()) {
+      copyFile(src, dst)
+    }
   }
-  fs.symlinkSync(target, linkPath, 'junction')
+}
+
+/**
+ * 准备 node_modules：真实目录 + 逐项符号链接。
+ * 不再共享现役那份 node_modules 目录本身（避免改现役）。
+ *
+ * 做法：
+ *  1. 把现役 node_modules 里的「非 @ 作用域 + 非 pnpm 内部」包按原样复制过来（hoisted 包）。
+ *  2. 把现役 node_modules/@dsh-brain/* 的 symlink 目标（= dsh-brain 仓库路径）逐项建立。
+ *  3. 额外添加 @dsh-brain/arm-isolation symlink。
+ *  4. 复制 .bin、.modules.yaml、.pnpm-workspace-state-v1.json。
+ *
+ * 返回 { ok: true, built: [...], skipped: [...] } 或 { ok: false, reason }。
+ */
+function prepareNodeModules(profileSrc, profileDst) {
+  const srcNm = path.join(profileSrc, 'node_modules')
+  const dstNm = path.join(profileDst, 'node_modules')
+
+  // 现役 node_modules 不存在 ⇒ 建一个最小版
+  if (!fs.existsSync(srcNm)) {
+    console.warn('[警告] 现役 profile node_modules 不存在，建最小 node_modules')
+    ensureDir(dstNm)
+    return { ok: true, built: [], skipped: ['source-node-modules-missing'] }
+  }
+
+  // 目标 node_modules 已存在且非空 ⇒ 幂等跳过
+  if (fs.existsSync(dstNm)) {
+    try {
+      const existing = fs.readdirSync(dstNm, { withFileTypes: true })
+      const hasContent = existing.some((e) => e.name !== '.' && e.name !== '..')
+      if (hasContent) {
+        console.log('  [幂等] node_modules 已存在且非空，跳过重建')
+        return { ok: true, built: [], skipped: ['already-exists'] }
+      }
+    } catch { /* 读不到，继续 */ }
+  }
+
+  ensureDir(dstNm)
+  const built = []
+  const skipped = []
+
+  // ── ① 复制 pnpm 元数据 + .bin ────────────────────────────────────────────────
+  const metaFiles = ['.bin', '.modules.yaml', '.pnpm-workspace-state-v1.json']
+  for (const name of metaFiles) {
+    const src = path.join(srcNm, name)
+    const dst = path.join(dstNm, name)
+    if (fs.existsSync(src)) {
+      if (fs.statSync(src).isDirectory()) {
+        copyDirRecursive(src, dst)
+        built.push(name)
+      } else {
+        copyFile(src, dst)
+        built.push(name)
+      }
+    }
+  }
+
+  // ── ② 复制 hoisted 包（非 @ 作用域、非 pnpm 内部）─────────────────────────────
+  const skipPrefixes = new Set(['.', '@dsh-brain', '@deepseek-ai'])
+  const srcEntries = fs.readdirSync(srcNm, { withFileTypes: true })
+  for (const e of srcEntries) {
+    if (e.name === '.pnpm') continue // 太大，跳过
+    const src = path.join(srcNm, e.name)
+    const dst = path.join(dstNm, e.name)
+    if (e.isDirectory()) {
+      // 跳过 dsh-brain（用 symlink 处理）
+      if (e.name.startsWith('@dsh-brain')) continue
+      if (e.name.startsWith('@deepseek-ai')) continue
+      // 直接复制（hoisted 包如 clsx、cosmokit、schemastery 等）
+      copyDirRecursive(src, dst)
+      built.push(e.name)
+    }
+  }
+
+  // ── ③ 为 @dsh-brain/* 建符号链接（指向 dsh-brain 仓库）───────────────────────
+  const dshBrainSrc = path.join(srcNm, '@dsh-brain')
+  const dshBrainDst = path.join(dstNm, '@dsh-brain')
+  if (fs.existsSync(dshBrainSrc)) {
+    ensureDir(dshBrainDst)
+    const dbEntries = fs.readdirSync(dshBrainSrc, { withFileTypes: true })
+    for (const e of dbEntries) {
+      if (!e.isSymbolicLink() && !e.isDirectory()) continue
+      const src = path.join(dshBrainSrc, e.name)
+      const dst = path.join(dshBrainDst, e.name)
+      try {
+        // 读源 symlink 的 target，在新位置建立同样的 symlink
+        let target
+        try {
+          target = fs.readlinkSync(src)
+        } catch {
+          // 不是 symlink，跳过（可能是坏链接）
+          skipped.push(`@dsh-brain/${e.name}（非 symlink，跳过）`)
+          continue
+        }
+        // 建立 symlink（用绝对路径，避免相对路径在跨卷时失效）
+        const absTarget = path.isAbsolute(target) ? target : path.resolve(srcNm, target)
+        fs.symlinkSync(absTarget, dst)
+        built.push(`@dsh-brain/${e.name}`)
+      } catch (err) {
+        skipped.push(`@dsh-brain/${e.name}: ${err.message}`)
+      }
+    }
+  }
+
+  // ── ④ 为 @deepseek-ai/* 建符号链接（指向 dsh-brain 仓库 node_modules）────────
+  const deepseekSrc = path.join(srcNm, '@deepseek-ai')
+  const deepseekDst = path.join(dstNm, '@deepseek-ai')
+  if (fs.existsSync(deepseekSrc)) {
+    ensureDir(deepseekDst)
+    const daEntries = fs.readdirSync(deepseekSrc, { withFileTypes: true })
+    for (const e of daEntries) {
+      const src = path.join(deepseekSrc, e.name)
+      const dst = path.join(deepseekDst, e.name)
+      try {
+        let target
+        try {
+          target = fs.readlinkSync(src)
+        } catch {
+          skipped.push(`@deepseek-ai/${e.name}（非 symlink，跳过）`)
+          continue
+        }
+        const absTarget = path.isAbsolute(target) ? target : path.resolve(srcNm, target)
+        fs.symlinkSync(absTarget, dst)
+        built.push(`@deepseek-ai/${e.name}`)
+      } catch (err) {
+        skipped.push(`@deepseek-ai/${e.name}: ${err.message}`)
+      }
+    }
+  }
+
+  // ── ⑤ ★ 额外添加 @dsh-brain/arm-isolation ─────────────────────────────────────
+  const armIsolationPkg = 'D:/project_develop/dsh-brain/packages/arm-isolation'
+  const armIsolationTarget = path.join(dshBrainDst, 'arm-isolation')
+  try {
+    if (fs.existsSync(armIsolationTarget)) {
+      // 已存在 ⇒ 幂等
+      const existingStat = fs.lstatSync(armIsolationTarget)
+      if (existingStat.isSymbolicLink()) {
+        const existingTarget = fs.readlinkSync(armIsolationTarget)
+        if (existingTarget === armIsolationPkg) {
+          console.log('  [幂等] @dsh-brain/arm-isolation 已存在，跳过')
+        } else {
+          // target 不同 ⇒ 删除旧链接重建
+          fs.unlinkSync(armIsolationTarget)
+          fs.symlinkSync(armIsolationPkg, armIsolationTarget)
+          built.push('@dsh-brain/arm-isolation（重建）')
+        }
+      } else {
+        skipped.push('@dsh-brain/arm-isolation（已存在但不是 symlink）')
+      }
+    } else {
+      fs.symlinkSync(armIsolationPkg, armIsolationTarget)
+      built.push('@dsh-brain/arm-isolation')
+    }
+  } catch (err) {
+    skipped.push(`@dsh-brain/arm-isolation: ${err.message}`)
+  }
+
+  console.log(`  [node_modules] 成功建立 ${built.length} 项，跳过 ${skipped.length} 项`)
+  for (const b of built) console.log(`    ✓ ${b}`)
+  for (const s of skipped) console.log(`    ✗ ${s}`)
+
+  return { ok: true, built, skipped }
+}
+
+/**
+ * 准备 package.json：从现役复制，并额外添加 @dsh-brain/arm-isolation 依赖。
+ * 返回 { ok, addedDep } 表示是否成功添加了依赖。
+ */
+function preparePackageJson(profileSrc, profileDst) {
+  const srcPkg = path.join(profileSrc, 'package.json')
+  const dstPkg = path.join(profileDst, 'package.json')
+
+  if (!fs.existsSync(srcPkg)) {
+    // 现役没有 package.json ⇒ 建一个最小版
+    const minimalPkg = {
+      name: 'dsh-profile',
+      version: '0.0.0',
+      private: true,
+      type: 'module',
+      dsh: {
+        profile: {
+          bundles: ['@dsh-brain/arm-isolation'],
+        },
+      },
+      dependencies: {
+        '@dsh-brain/arm-isolation': 'link:D:/project_develop/dsh-brain/packages/arm-isolation',
+      },
+    }
+    fs.writeFileSync(dstPkg, JSON.stringify(minimalPkg, null, 2) + '\n', 'utf8')
+    console.log('  [package.json] 创建最小版（现役无 package.json）')
+    return { ok: true, addedDep: '@dsh-brain/arm-isolation' }
+  }
+
+  // 读取并复制现役 package.json
+  const raw = fs.readFileSync(srcPkg, 'utf8')
+  const pkg = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw)
+
+  // 确保 dependencies 对象存在
+  pkg.dependencies = pkg.dependencies ?? {}
+
+  // ★ 添加 @dsh-brain/arm-isolation 依赖
+  const armIsolationDep = 'link:D:/project_develop/dsh-brain/packages/arm-isolation'
+  pkg.dependencies['@dsh-brain/arm-isolation'] = armIsolationDep
+
+  // 确保 dsh.profile.bundles 包含 arm-isolation
+  pkg.dsh = pkg.dsh ?? {}
+  pkg.dsh.profile = pkg.dsh.profile ?? {}
+  const bundles = pkg.dsh.profile.bundles ?? []
+  if (!bundles.includes('@dsh-brain/arm-isolation')) {
+    bundles.push('@dsh-brain/arm-isolation')
+    pkg.dsh.profile.bundles = bundles
+  }
+
+  fs.writeFileSync(dstPkg, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
+  console.log('  [package.json] 已添加 @dsh-brain/arm-isolation 依赖')
+  return { ok: true, addedDep: '@dsh-brain/arm-isolation' }
 }
 
 function prepareProfile(profileSrc, profileDst) {
-  const files = ['package.json', 'cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
+  const files = ['cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
   for (const f of files) {
     const src = path.join(profileSrc, f)
     const dst = path.join(profileDst, f)
@@ -201,15 +449,13 @@ function prepareProfile(profileSrc, profileDst) {
       copyFile(src, dst)
     }
   }
-  // node_modules -> junction（指向现役那份）
-  const srcNm = path.join(profileSrc, 'node_modules')
-  const dstNm = path.join(profileDst, 'node_modules')
-  if (fs.existsSync(srcNm)) {
-    ensureDir(path.dirname(dstNm))
-    createJunction(srcNm, dstNm)
-    return true
-  }
-  return false
+  // package.json 单独处理（要加 arm-isolation 依赖）
+  const pkgResult = preparePackageJson(profileSrc, profileDst)
+
+  // node_modules → 真实目录 + 逐项符号链接
+  const nmResult = prepareNodeModules(profileSrc, profileDst)
+
+  return { ...pkgResult, ...nmResult }
 }
 
 function prepareSettings(settingsSrc, settingsDst, armPreset) {
@@ -246,6 +492,8 @@ const sep = '='.repeat(61)
 console.log('')
 console.log(sep)
 console.log(`  arm=${arm.name} 隔离实例准备（${dryRun ? 'dry-run，不写盘' : '实际准备'}）`)
+console.log(`  DSH_ARM_SELF = ${ARM_SELF}`)
+console.log(`  DSH_ARM_DENY = ${ARM_DENY || '(无其他臂)'}`)
 console.log(sep)
 
 // 源路径（现役 DSH_HOME 下的 profile）
@@ -253,7 +501,7 @@ const profileSrc = path.join(DSH_HOME_ACTIVE, 'profiles', profile)
 const settingsSrc = path.join(DSH_HOME_ACTIVE, 'settings.yaml')
 
 // 校验源文件存在
-for (const f of ['package.json', 'cordis.yml', 'cordis.patch.yml']) {
+for (const f of ['cordis.yml', 'cordis.patch.yml']) {
   if (!fs.existsSync(path.join(profileSrc, f))) {
     console.error(`[失败] 现役 profile ${profile} 缺少 ${f}，无法复制骨架`)
     process.exit(1)
@@ -272,7 +520,7 @@ if (dryRun) {
   console.log(`     mkdir -p "${dshHome.replace(/\\/g, '/')}"`)
   console.log(`     mkdir -p "${verifyOut.replace(/\\/g, '/')}"`)
   console.log('')
-  console.log('  2. 复制 profile 骨架（含 node_modules junction）：')
+  console.log('  2. 复制 profile 骨架（node_modules = 真实目录 + 逐项 symlink）：')
   console.log(`     源: ${profileSrc}`)
   console.log(`     目标: ${path.join(dshHome, 'profiles', profile).replace(/\\/g, '/')}`)
   console.log('')
@@ -283,6 +531,10 @@ if (dryRun) {
   console.log('  4. 创建 verifyout 目录：')
   console.log(`     ${verifyOut.replace(/\\/g, '/')}`)
   console.log('')
+  console.log('  5. 训练场身份（写入启动 env）：')
+  console.log(`     DSH_ARM_SELF=${ARM_SELF}`)
+  console.log(`     DSH_ARM_DENY=${ARM_DENY || '(无其他臂)'}`)
+  console.log('')
   console.log('  端口配置（写入启动 env）：')
   console.log(JSON.stringify(PORTS, null, 2))
   console.log('')
@@ -290,6 +542,8 @@ if (dryRun) {
   console.log('')
   const escapedHome = dshHome.replace(/\\/g, '/').replace(/"/g, '\\"')
   console.log(`  DSH_HOME="${escapedHome}" \`
+    DSH_ARM_SELF=${ARM_SELF} \`
+    DSH_ARM_DENY="${ARM_DENY}" \`
     SWITCH_PORT=${PORTS.SWITCH_PORT} \`
     GEN_PORT_BASE=${PORTS.GEN_PORT_BASE} \`
     SWITCH_ADMIN_PORT=${PORTS.SWITCH_ADMIN_PORT} \`
@@ -306,7 +560,7 @@ if (dryRun) {
     if (fs.existsSync(indexPath)) {
       try { index = JSON.parse(fs.readFileSync(indexPath, 'utf8')) } catch { index = [] }
     }
-    index.push({ arm: arm.name, gen, profile, root: rootDir, dshHome, ports: PORTS, at: ts, mode: 'dry-run+record' })
+    index.push({ arm: arm.name, gen, profile, root: rootDir, dshHome, ports: PORTS, at: ts, mode: 'dry-run+record', armSelf: ARM_SELF, armDeny: ARM_DENY })
     fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8')
     console.log('[record] appended to ' + indexPath.replace(/\\/g, '/'))
   }
@@ -320,10 +574,10 @@ ensureDir(dshHome)
 ensureDir(path.join(dshHome, 'profiles', profile))
 ensureDir(verifyOut)
 
-// 2. 复制 profile 骨架 + node_modules junction
-const nmLinked = prepareProfile(profileSrc, path.join(dshHome, 'profiles', profile))
-if (!nmLinked) {
-  console.warn('[警告] profile node_modules 不可用（现役不存在），junction 未创建')
+// 2. 复制 profile 骨架 + node_modules（真实目录 + 符号链接）
+const nmResult = prepareProfile(profileSrc, path.join(dshHome, 'profiles', profile))
+if (!nmResult.ok) {
+  console.warn(`[警告] node_modules 准备失败：${nmResult.reason}`)
 }
 
 // 3. 复制 settings.yaml（修改 default preset）
@@ -339,8 +593,14 @@ console.log('  label       : ' + arm.label)
 console.log('  root        : ' + rootDir.replace(/\\/g, '/'))
 console.log('  dshHome     : ' + dshHome.replace(/\\/g, '/'))
 console.log('  profile     : ' + profile)
-console.log('  node_modules: ' + (nmLinked ? 'junction OK' : '未链接（现役无此目录）'))
+console.log('  node_modules: ' + (nmResult.built?.length ?? 0) + ' 项已建' +
+  (nmResult.skipped?.length ? '，' + nmResult.skipped.length + ' 项跳过' : ''))
+console.log('  arm-isolation: ' + (nmResult.built?.includes('@dsh-brain/arm-isolation') ? '✓ 已加入' : '⚠ 未加入'))
 console.log('  verifyout   : ' + verifyOut.replace(/\\/g, '/'))
+console.log('')
+console.log('  训练场身份：')
+console.log('  DSH_ARM_SELF = ' + ARM_SELF)
+console.log('  DSH_ARM_DENY = ' + (ARM_DENY || '(无其他臂)'))
 console.log('')
 console.log('  端口配置：')
 console.log(JSON.stringify(PORTS, null, 2))
@@ -349,6 +609,8 @@ console.log('  完整启动命令（请在终端执行）：')
 console.log('')
 const escapedHome2 = dshHome.replace(/\\/g, '/').replace(/"/g, '\\"')
 console.log(`  DSH_HOME="${escapedHome2}" \`
+    DSH_ARM_SELF=${ARM_SELF} \`
+    DSH_ARM_DENY="${ARM_DENY}" \`
     SWITCH_PORT=${PORTS.SWITCH_PORT} \`
     GEN_PORT_BASE=${PORTS.GEN_PORT_BASE} \`
     SWITCH_ADMIN_PORT=${PORTS.SWITCH_ADMIN_PORT} \`
@@ -366,7 +628,7 @@ if (record) {
   if (fs.existsSync(indexPath)) {
     try { index = JSON.parse(fs.readFileSync(indexPath, 'utf8')) } catch { index = [] }
   }
-  index.push({ arm: arm.name, gen, profile, root: rootDir, dshHome, ports: PORTS, at: ts, mode: 'prepared' })
+  index.push({ arm: arm.name, gen, profile, root: rootDir, dshHome, ports: PORTS, at: ts, mode: 'prepared', armSelf: ARM_SELF, armDeny: ARM_DENY })
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8')
   console.log('[record] appended to ' + indexPath.replace(/\\/g, '/'))
 }
@@ -378,6 +640,8 @@ if (launch) {
   const childEnv = {
     ...process.env,
     DSH_HOME: dshHome,
+    DSH_ARM_SELF: ARM_SELF,
+    DSH_ARM_DENY: ARM_DENY,
     SWITCH_PORT: PORTS.SWITCH_PORT,
     GEN_PORT_BASE: PORTS.GEN_PORT_BASE,
     SWITCH_ADMIN_PORT: PORTS.SWITCH_ADMIN_PORT,
@@ -411,5 +675,3 @@ if (launch) {
 }
 
 process.exit(0)
-
-

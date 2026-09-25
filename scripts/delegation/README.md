@@ -1,4 +1,4 @@
-﻿# scripts/delegation —— 把 DSH 会话当子代理用的一整套工具
+# scripts/delegation —— 把 DSH 会话当子代理用的一整套工具
 
 > ★ **为什么在这个目录**：这一套原本住在 `out/` 下 —— 而 `out/` 是 **gitignore** 的
 > ⇒ **不受版本控制 = 下一个会话看不到 = 等于不存在**（本项目"做完实质东西必须登记"那条纪律）。
@@ -127,9 +127,14 @@ node scripts/delegation/isolated-instance.mjs --arm <臂名> [--root <目录>] [
 - 臂定义读 `evals/arms.json`（用 `arms-registry.mjs` 的 `loadArmsRegistry`，不自己 parse）。
 - 缺省 `--root` = `D:/project_develop/_arms/<臂名小写>`（给用户用）；测试时须用 `--root` 覆盖。
 - `--profile` 缺省 = `web`；必须真实存在于 `$DSH_HOME/profiles/`，否则 fail-closed。
-- 准备内容：① `profiles/<profile>/`（`package.json`/`cordis.yml`/`cordis.patch.yml` 复制 + `node_modules` **junction**）；
+- 准备内容：① `profiles/<profile>/`（`package.json`/`cordis.yml`/`cordis.patch.yml` 复制；
+  ★ `node_modules` 是**真实目录 + 逐项符号链接**（不再 junction 到现役，避免改现役）；
+  `@dsh-brain/arm-isolation` 额外 symlink 加入并写入 `dependencies` + `dsh.profile.bundles`）；
   ② `settings.yaml`（只改 `agent-presets.default` 为该臂的 `preset`，其余不动）；
   ③ `<root>/verifyout/`；④ key 经 env 传，不落盘。
+- ★ 训练场身份：启动规格与终端命令中追加 `DSH_ARM_SELF=<臂名>` 与
+  `DSH_ARM_DENY=<其它臂 cwd+store 逗号分隔>`（来源：`evals/arms.json` 经 `loadArmsRegistry`，
+  不含自己）。这是 `packages/arm-isolation` 工具层护栏的输入（见 commit `594e2db`）。
 - 端口段固定为 `33080/33081/33180/33190`，与现役 `3080/3081/31800/31810` 不冲突；
   ★ 若配置端口命中现役端口 ⇒ **拒绝**（防误起）。
 - 缺省（无 `--launch`）：**只打印**启动规格 + JSON + 终端命令，**不 spawn**。
@@ -137,6 +142,9 @@ node scripts/delegation/isolated-instance.mjs --arm <臂名> [--root <目录>] [
 - `--dry-run`：完全不写盘。
 - `--record`：往 `out/arm-gen-index.json` 追加 `{ arm, gen, profile, root, dshHome, ports, at, mode }`。
 - 幂等：目标 `dshhome` 已存在且非空 ⇒ 拒绝（除非 `--force`）。
+- ★ **限制**：脚本依赖现役 profile 的 `node_modules` 作为源（读 symlink 目标、复制 hoisted 包）。
+  若现役 profile 不可读（如 P2 护栏阻断），则 `node_modules` 建不成完整版，但 `arm-isolation`
+  symlink 仍会加入（目标指向 dsh-brain 仓库）。
 
 ## 八、已知限制
 
