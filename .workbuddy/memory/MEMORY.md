@@ -415,3 +415,17 @@
      （沙箱 `E_ACCESSDENIED` + 编码 ⇒ 子agent 只好"改用 Node.js 等价实现"）⇒ **"Script 是 shell"这条假设不成立**
      ③ **`toolFilter` 指向不存在的工具**（**没有任何东西把 `ToolDef` 注册进运行时**）。
   ★ 对比：同一条派活路径，改 `--for-arm A` 前是 `toolCalls: 0`（**假**），现在是 **24**（真）。
+- ★★★★ **桥：`scripts/skill-to-preset.mjs`（规格 → preset）**（commit `49eab11`）：
+  `preset.yml` 只是元数据，**人格与工具面都在 `agent.cordis.yml`**（loader 条目列表）。
+  桥产出 `- id: persona`（**逐字**来自规格；照 `g0` 用 `complete:true`+`includeRuntimeContext:false`）
+  + **平台 gate 的 shell 组**（★ `g0` 注释里的血泪教训：只写 `tool-bash` ⇒ win32 上"壳子名字对了但跑不动"）。
+  ★ **诚实边界**：`ToolDef` 在运行时**不存在** ⇒ 对未注册工具**如实标注，不假装可用**。
+  ★ 判据 6/6 + 消融；默认 dry-run，`--yes` 才写，`--dest` 可指定。
+  ★★ **真跑验证**：落成到臂 A 的 `.agent-presets/` ⇒ **换代后 `agentPreset.list` 10→11**，出现 `skill-demo-first-line`
+  ⇒ **运行时真认桥产出的 preset**。
+- ★★★ **常驻守卫 `scripts/check-import-safe.mjs`**（同一族今天踩了**三次**：skill-sieve / arm-up / skill-factory）：
+  判据 = **被 `scripts/` 内部 import 且顶层有 CLI 派发迹象 ⇒ 必须含 `isMain`**；并报**阳性计数**防判据空转。
+  ★★ **首次运行就抓到 3 个既存违规**（不是我写的）：`eval-baseline-store.mjs`、`lib-tool-failure.mjs`、
+  **`patch-anchors.mjs`（被 7 个脚本 import！）** ⇒ **任何 import 它们的脚本都可能正被静默截断**（只报告未改）。
+- ★★ **写"消融"时，探针必须测【被撤掉的那段真正影响的东西】**：我曾测**无条件**算出的数组 ⇒ 撤了也"ok" = **假消融**；
+  要测**产物内容**才翻得动。（判据写错缩进 ⇒ 假红，也要当同一类防。）
