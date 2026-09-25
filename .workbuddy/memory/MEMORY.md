@@ -405,3 +405,13 @@
   ★ 起因：**我两次把成功的派活误判成"空跑"** —— 因为只传了 `--front` 没传 `--home` ⇒
   去**现役的库**找 sid ⇒ 找不到 ⇒ `toolCalls` 报 **0**。⇒ 已改 **fail-loud**（`missing:true` ⇒
   `toolCalls: null` + 提示；"疑似空跑"只在 `!missing` 时才允许触发）。**看不到 ≠ 没有**。
+- ★★★★ **端到端演练第一棒跑通（commit `7463b85`）**：`skill→筛→工厂→派活→spawn子agent→干活→自评回值→池→聚合`
+  七段**全有真读数**（筛=一等1；工厂出规格；派活 `toolCalls:24`；`subagent` 真被调用3次；子agent 返回 AAA/exit=0；
+  `tool-pool` 真写出2条并聚合出 `0 shell工具 / 0.3 subagent`）。
+  ★ 样本：`evals/fixtures/demo-skill/`（最小「一等」skill + 真能跑的 `first_line.sh`）。
+  ★★ **三个真缺口**：① **规格↔可执行面缺一层桥**（规格用 `provider:spawn`+`persona`+`toolFilter`，
+     而 worker 手上是 **`subagent` 工具**、吃 `{description,prompt,run_in_background}` ⇒ 起"带人格+窄工具面"的子 agent
+     **不是一次工具调用能做的**，得落成 **preset/编排**）② **⭐ shell 脚本在 worker 里跑不了**
+     （沙箱 `E_ACCESSDENIED` + 编码 ⇒ 子agent 只好"改用 Node.js 等价实现"）⇒ **"Script 是 shell"这条假设不成立**
+     ③ **`toolFilter` 指向不存在的工具**（**没有任何东西把 `ToolDef` 注册进运行时**）。
+  ★ 对比：同一条派活路径，改 `--for-arm A` 前是 `toolCalls: 0`（**假**），现在是 **24**（真）。
