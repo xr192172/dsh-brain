@@ -437,3 +437,11 @@
 - ★★ **派活给 DSH 的标准参数**：`dsh-delegate --for-arm A --cwd D:/project_develop/dsh-brain --prompt <任务书>`
   （`--for-arm` 同时定 front 与库 ⇒ 读数可信；`--cwd` 指仓库 ⇒ 沙箱里能改文件）。
   ★ 任务书里**必须写逃生门**（例："若本来就没有该问题 ⇒ **如实说明，不要硬塞**"）—— 本轮 T1 正是靠它才没白改。
+- ★★★ **123 批次（commit `d0d5b2d`）全部派给 DSH 臂 A 并逐件核验**：T1 消债（★ 它自己发现 `lib-tool-failure` 的守卫是**弱校验**
+  并升级；且按任务书逃生门**如实跳过** `patch-anchors`；还**主动报了一条预存在 FAIL** 18/19）；
+  T2 脚本可跑性标注（★ 真实测：`spawnSync('bash')`=**EPERM** ⇒ `not-runnable-here`；两个自测 15/15、9/9 + 各 2 消融）；
+  T3 `docs/tooldef-registration-plan.md`（抽查引用 **4/4 准确**；要点：**装插件走 `ctx.inject(['tools'])`**、
+  **win32 ConstrainedLanguage ⇒ shell 脚本工具跑不了 ⇒ 优先 Node 内联**）。
+- ★★ **派活产物目录的真实位置** = **`<任务书所在目录>/_delegate-<tag>/`**（不是 `out/_delegate-<tag>`；我找错过一次）。
+- ★★ **"我的判据错" ≠ "被派的人无价值"**：本批里我派 T1 的依据（坏尺子的 2 个假阳性）是错的，
+  但 T1 在那 2 个文件里**真的找到一处弱点**（弱守卫）⇒ **两者分开记账**。
