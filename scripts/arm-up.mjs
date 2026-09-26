@@ -286,11 +286,29 @@ if (hasFlag('--selftest')) process.exit(await selftest())
  */
 const LIVE_MODE = hasFlag('--live')
 const armName = LIVE_MODE ? LIVE_SPEC.arm : argv.find((a) => !a.startsWith('--'))
+// ★★★ 2026-09-26 R2：把"准备训练场"与"起一代"**拆成两个动词**（旁路就是它们被绑在一起长出来的）。
+//   · `arm-up A`            确保训练场可用（不存在才建；已跑就只自检；**不覆盖**）
+//   · `arm-up A --gen`      换一代（**只打 ?cmd=handover**；绝不碰 isolated-instance）
+//   · `arm-up A --rebuild`  结构性变更（换 profile/preset/node_modules 布局）⇒ **唯一允许 --force 的路径**
+//   用户裁决（2026-09-26）：保持 `arm-up A` 原义 + 新增 `--gen`（只加不覆盖，铁律 22）。
+//   设计依据：docs/r2-handover-only-design-2026-09-26.md
+const GEN_MODE = hasFlag('--gen')
+const REBUILD_MODE = hasFlag('--rebuild')
+if (GEN_MODE && REBUILD_MODE) {
+  console.error('[失败] `--gen`（换一代）与 `--rebuild`（重建训练场）是互斥的两件事 ⇒ 只能选一个。')
+  process.exit(2)
+}
+if (LIVE_MODE && (GEN_MODE || REBUILD_MODE)) {
+  console.error('[失败] `--gen` / `--rebuild` 是**臂模式**的动词；现役模式请直接用 `--live`。')
+  process.exit(2)
+}
 if (!LIVE_MODE && !armName) {
   console.error(
     '[用法]\n' +
       '  node scripts/arm-up.mjs --live                 # 起现役（无参，最常用）\n' +
-      '  node scripts/arm-up.mjs <臂名>                 # 起某个训练场（如 A / B）\n' +
+      '  node scripts/arm-up.mjs <臂名>                 # 确保某个训练场可用（不存在才建；已跑就只自检）\n' +
+      '  node scripts/arm-up.mjs <臂名> --gen           # ★ 换一代（走 ?cmd=handover；不碰训练场骨架）\n' +
+      '  node scripts/arm-up.mjs <臂名> --rebuild       # ★ 结构变更：重建训练场骨架（唯一允许 --force 的路径）\n' +
       '  可选：[--port-base <n>] [--no-start] [--open] [--json]\n' +
       '  ★ 双击 `scripts\\dsh-up.cmd` 等价于 `--live --open`（桌面图标的做法见该文件注释）。',
   )
@@ -472,9 +490,81 @@ if (LIVE_MODE && !hasFlag('--no-start')) {
 }
 
 // ① 准备（复用 isolated-instance，端口只传 base）—— **仅臂模式**
-if (!hasFlag('--no-start') && !LIVE_MODE) {
-  console.log('\n-- ① 准备（复用 isolated-instance --port-base）--')
-  const r = spawnSync(NODE, [path.join(HERE, 'delegation', 'isolated-instance.mjs'), '--arm', armName, '--root', root, '--port-base', String(ports.base), '--force'], { encoding: 'utf8', timeout: 600000 })
+//   ★★★ 2026-09-26 R2：**只有 `--rebuild` 才允许 `--force`**。
+//     原来这里是无条件 `--force` ⇒ 每次"起代"都被迫走"准备+覆盖"这条路
+//     ⇒ `--force` 从"结构变更的应急阀"长成了常规路径 = **那条旁路**。
+//     现在：① 训练场已存在且没给 `--rebuild` ⇒ **根本不跑准备**（幂等路径省掉）；
+//           ② 不存在 ⇒ 不带 `--force`（本来就不冲突）；
+//           ③ 只有 `--rebuild` 才带 `--force`，且**记账留痕**。
+const dshHomePath = path.join(root, 'dshhome')
+const homeExists = fs.existsSync(dshHomePath) && fs.readdirSync(dshHomePath).length > 0
+const needPrepare = REBUILD_MODE || !homeExists
+if (GEN_MODE) {
+  // ★ 换一代：绝不碰训练场骨架。控制面活着 ⇒ 打 handover；死了 ⇒ 明确报错（不偷偷重建）。
+  if (!isAlreadyRunning) {
+    console.error(
+      `[失败] --gen 要求**控制面正在跑**（换代是控制面的职责，不是重新起实例）。\n` +
+        `  现在 ${adminUrl} 无应答、且没有活着的 activeGen.pid ⇒ 没有可换代的协调器。\n` +
+        `  ⇒ 先用 \`node scripts/arm-up.mjs ${armName}\` 把它拉起来，再 \`--gen\`。\n` +
+        `  ★ --gen **不会**去重建训练场（那是 --rebuild 的事）。`,
+    )
+    process.exit(1)
+  }
+  console.log('\n-- ① 准备 —— **跳过**（--gen 只换代，不碰训练场骨架）--')
+  console.log('\n-- ② 换代 —— 走控制面的 ?cmd=handover（★ 不经 isolated-instance）--')
+  const profileOverride = argv[argv.indexOf('--profile') + 1]
+  const hasProfile = argv.includes('--profile') && profileOverride && !profileOverride.startsWith('--')
+  const hoUrl =
+    `${adminUrl}/?cmd=handover` + (hasProfile ? `&profile=${encodeURIComponent(profileOverride)}` : '')
+  const ho = await get(hoUrl)
+  console.log(`  handover -> http=${ho.http}  ${ho.text.slice(0, 200)}`)
+  if (ho.http !== 200) {
+    console.error(`[失败] handover 未被接受（http=${ho.http}）⇒ 不谎报成功。`)
+    process.exit(1)
+  }
+  // ★ 必须轮询：handover 是异步的（立即回 stage:"started"）——铁律 20
+  console.log('  轮询 ?cmd=status 直到 result 出现（最多 120s）...')
+  let ok = false
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 3000))
+    const st = await get(`${adminUrl}/?cmd=status`)
+    let j = null
+    try { j = JSON.parse(st.text) } catch {}
+    if (j?.result?.result === 'success') {
+      console.log(`  ✓ 换代成功：${j.result.note ?? ''}  gen=${j.result.gen}  resumeSession=${j.result.resumeSession || '(无)'}`)
+      ok = true
+      break
+    }
+    if (j?.result?.result && j.result.result !== 'success') {
+      console.error(`  ✗ 换代失败：${JSON.stringify(j.result)}`)
+      break
+    }
+    process.stdout.write('.')
+  }
+  console.log('')
+  if (!ok) {
+    console.error('[失败] 轮询窗口内没等到 result=success ⇒ 不谎报成功。请查 handover-status.jsonl。')
+    process.exit(1)
+  }
+}
+if (!hasFlag('--no-start') && !LIVE_MODE && needPrepare && !GEN_MODE) {
+  const forceFlag = REBUILD_MODE ? ['--force'] : []
+  const modeLabel = REBUILD_MODE ? '结构变更 ⇒ 允许 --force（会记账留痕）' : '幂等：不带 --force'
+  console.log(`\n-- ① 准备（${modeLabel}）--`)
+  if (REBUILD_MODE) {
+    // ★ 逃生阀要留痕：`--force` 是本项目里"从应急阀长成旁路"的先例 ⇒ 每次使用都记一条。
+    try {
+      fs.appendFileSync(
+        path.join(WT, 'out', 'arm-rebuild-journal.jsonl'),
+        JSON.stringify({ t: Date.now(), arm: armName, root, by: 'arm-up --rebuild' }) + '\n',
+        'utf8',
+      )
+      console.log('  （已记账：out/arm-rebuild-journal.jsonl）')
+    } catch (e) {
+      console.warn(`  （警告：重建台账写入失败，不阻断：${e?.message ?? e}）`)
+    }
+  }
+  const r = spawnSync(NODE, [path.join(HERE, 'delegation', 'isolated-instance.mjs'), '--arm', armName, '--root', root, '--port-base', String(ports.base), ...forceFlag], { encoding: 'utf8', timeout: 600000 })
   const tail = (r.stdout ?? '').split('\n').filter((l) => /自建 preset|端口覆盖|自进化两席|arm-isolation:|准备完成/.test(l))
   for (const l of tail) console.log('  ' + l.trim())
   if (r.status !== 0) {

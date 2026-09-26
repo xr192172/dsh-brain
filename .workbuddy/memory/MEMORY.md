@@ -124,6 +124,16 @@
     `p95=0.66s` 但 **`max=8.23s`**）⇒ 探针落进窗口就全 `http:0`。
     ⇒ **"探不通"的最常见原因是探查者与被查者共用了那个正在忙的进程**，不是被查者坏了。
     ★ 消融法：**同代码、同探针、只换"谁拉起的"**（出带 shell vs 入带 `spawnSync`）⇒ 出带 7/7 全过、入带 ⑦ 红。
+35. **★★★ 问设计岔路之前，必须先把【当前命令面/现状】摆出来**：2026-09-26 我拿两个方案问用户
+    "`arm-up A` 该保持原义还是改成换一代"，用户回*"我不能理解，我不知道现在有哪些命令，起什么效果"*。
+    ⇒ 用户**没法裁决**不是因为问题难，是因为**我没先给现状**。
+    **纪律**：凡是"该选甲还是乙"，先摆 ① 现在有哪些动词 ② 各起什么效果 ③ 改了会动到什么，
+    **再**问选哪个。**这是"问问题的方式"错了，不是"问题的内容"错了。**
+    ★ 同族：铁律 24（自变量取值选错）、13（对照选错）—— 都属于"**判据/提问的坐标系没摆正**"。
+36. **★★ 逃生阀必须有台账**：`isolated-instance --force` 就是从"给结构变更用的应急阀"
+    **长成了常规路径**（一条旁路、六个症状）。⇒ 任何"平时不该用"的开关，
+    ① 默认关闭且**要显式动词**触发 ② **每次使用记账留痕** ③ 上线时就要能被审计。
+    ★ 与铁律 9（静默坏最坏）、21（消融自证）同族：**无声的例外 = 未来的旁路。**
 
 > ★★ **27–34 的全文与实证细节** ⇒ `topics/lessons-learned.md` 尾部的「铁律 27–34 全文与证据」一节。
 
@@ -180,11 +190,11 @@
   ★ 桌面那份**必须打绝对仓库路径**（`%~dp0..` 位置相关会崩）。
 - `scripts/task-bank.mjs` — **题库（agent-agnostic）**：`refresh/list/show/pick/score/stats/verdict`。
   ★ **场 ≠ 实验**：题在 `evals/tasks/`，成绩在 `evals/runs/`。
-- `scripts/run-experiment.mjs` — **闭环**：取题 → 起一代 → 发题 → 收卷 → 判定 → **报警则 exit 1**。`--from <result.json>` 重收卷。
-- `scripts/self-dev-brief.mjs` — **自开发简报**：纯函数产 `{docs, tasks, tools, mgmt, missingDocs}` + `renderBrief()`。
-  · **每条 BRIEF_SPEC 带 `role`**（"为什么读它"）**路径不存在 ⇒ 标 `missing` 显形**；**管理面 URL 派生**（不手抄）。
-  · ★★ 回退过一版：DSH 曾改成"扫 `scripts/` 全目录 ⇒ 列 165 条"（159 条 role 空）⇒ **已回退为【精选入口 9 条 + 存在性核验】**（铁律 28）。
-  · 经管理面 `action=brief[&arm=]` 暴露（**只有 `brief` 不校验臂存在** —— 它是说明书；会 spawn 的 `experiment` 才必须校验）。
+- `scripts/run-experiment.mjs` — **闭环**：取题 → 起一代 → 发题 → 收卷 → 判定 → **报警则 exit 1**。`--from` 重收卷。
+- `scripts/self-dev-brief.mjs` — **自开发简报**：纯函数产 `{docs,tasks,tools,mgmt,missingDocs}` + `renderBrief()`。
+  · 每条 BRIEF_SPEC 带 `role`（"为什么读它"）；路径不存在 ⇒ 标 `missing` 显形；管理面 URL **派生**（不手抄）。
+  · ★ 回退过一版："扫 `scripts/` 全目录 ⇒ 列 165 条"（159 条 role 空）⇒ 已回退为**【精选入口 9 条 + 存在性核验】**（铁律 28）。
+  · 经 `action=brief[&arm=]` 暴露（**只有 `brief` 不校验臂存在**；会 spawn 的 `experiment` 才必须校验）。
 - `scripts/skill-sieve.mjs` / `skill-factory.mjs` / `skill-to-preset.mjs` — 筛 → 工厂 → 桥（三级公民口径见下）。
 - `scripts/tool-pool.mjs` — 工具池 + 回值（append-only JSONL、幂等、fail-closed 校验、读不写盘）。
 - `packages/subagent-council` — 两席 **dev/review**（`evo-dev` / `evo-review`）；★ code 在、**profile 未设 seats ⇒ 未上线**。
