@@ -1227,3 +1227,119 @@ seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户消息"设计画布
 **纪律增补（本次踩到的）**：判"某机制有没有在工作"**不许读注释、不许读代码意图** ——
 要去历史记录里**数"判据为真的次数"**（这条案子就是靠"`waitedTurnEnd=true` 计数 = 0"破的）。
 **一个从未为真的判据 = 假绿**；同理，"看不到"（服务缺失/列表为空）也不能当成"没有"。
+
+
+---
+
+## 附录：MEMORY.md 2026-09-26 第四次瘦身前的正文（**逐字，只读，不作为入口**）
+
+> 来源：`.workbuddy/memory/MEMORY.md` 的「★★★ 当前主线」细节段。
+> **一条都没删**，只是搬家 —— 本文件仍是这些细节的**唯一存放处**。
+> 瘦身原因：MEMORY.md 到 38,144 B（40 KB 注入截断线只剩 1.9 KB），且该节违背了本文件自身定位（索引 ≠ 细节仓库）。
+
+★★ **R2 的重要更正（别把正当能力当罪状，铁律 17/36）**：`isolated-instance --force` **本身不是旁路**
+—— 它是一把**正当工具**（`test-oldshape-guard.mjs:37` 正当地用它测"旧产物重跑"）。
+**旁路是那个【耦合】**（`arm-up` 每次起代都无条件带上它）⇒ **删的是耦合，不是 flag。**
+★ R2 后的命令面：`arm-up --live` / `arm-up A`（确保可用）/ `arm-up A --gen`（换代走 handover）/
+`arm-up A --rebuild`（结构变更，唯一允许 `--force`，记账）。
+★ 门：`scripts/delegation/test-r2-handover-only.mjs`(10)，带 2 条消融 + 1 条正交正向对照。
+
+★ **R1 核心语义（必须钉死）**：`DSH_HOME` = **"这一代能看见哪些会话"的根**
+（会话存储 = `<DSH_HOME>/sessions/<cwd编码>/<sessionId>/`）。
+⇒ R1 的意思是「**控制面把它自己的 `DSH_HOME` 显式往下传**」，**不是**「每代一个不同的 home」。
+后者会让新代看不到旧代会话 ⇒ **中继器静默失效**（症状：换代报成功、会话列表变空）。
+★ **R1.5 为什么必须跟 R1 一起做**：`coordDir`/`workDir`/`genAssembly` 默认也从 `home` 派生
+⇒ 只改 home 不改 `WORK_DIR` ⇒ **脑裂混合体**。★ 实测真相：**"今天一致"靠的是没人设过 `WORK_DIR`**。
+★ 判据：`spawn-dshhome.test.mjs`(5) + `placement-consistency.test.mjs`(6)，均带**消融自证**。
+中继器在 R1 代码下已**实测 3/3**（日更 §13.3）。
+
+### 已落地的件（**在哪 / 是什么 / 什么状态**）
+
+- `scripts/arm-ports.mjs` — 端口/根目录的**唯一定义**（纯模块、import-safe）。臂 idx ⇒ `33080+idx*40`；池 `=base+21` 必须在段内。
+- `scripts/arm-up.mjs` — **唯一启动入口**（三动词见上）。★ **"起来了" = 自检全过**（臂模式 7 条；现役只判服务可用）。
+  · ★★ 三修（均消融自证）：① ⑦ 探针**太脆 ⇒ 假红** ⇒ 超时 + 有界重试 + **分类**（铁律 30）。
+  ② **僵尸 lease** ⇒ `pidAlive()` 活体探测（`docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`）。
+  ③ "是否已在跑"改成**控制面优先**（先问活着的 `?cmd=status`；拿不到才退看**只读** `lease.json`；**绝不写它**，铁律 31）。
+- `packages/switchboard/src/mgmt.ts` — 控制面管理面 `?cmd=mgmt`。
+  ★ **安全三前提**：具名动作白名单 + 参数先校验 + **绝不经 shell**（spawn 数组）。
+  · ★★ 修：**"臂身份"env 会泄漏** ⇒ `ARM_IDENTITY_ENV_KEYS`(8) + 纯函数 `childEnv()` 让子进程回到**现役语境**。
+  ★ **`childEnv()` 归"控制面→脚本"，R1 的 `spawnGen` 必须【显式给】home，两者不可混用。**
+  · 判据 `scripts/delegation/test-mgmt-surface.mjs`（**19/19 + 单因子消融**）。
+- `scripts/dsh-up.cmd` + `scripts/install-desktop-icon.mjs` — 桌面一键（双击 = 起现役 + 自检 + 开界面）。
+  ★ 桌面那份**必须打绝对仓库路径**（`%~dp0..` 位置相关会崩）。★ 桌面已有 `DSH 启动 (双击).cmd`。
+- `scripts/relaunch-switchboard.mjs`/`.cmd` — 走**计划任务**起控制面 ⇒ **跨工具调用存活**（唯一可用通道）。
+- `scripts/task-bank.mjs` — **题库（agent-agnostic）**：`refresh/list/show/pick/score/stats/verdict`。
+  ★ **场 ≠ 实验**：题在 `evals/tasks/`，成绩在 `evals/runs/`。
+- `scripts/run-experiment.mjs` — **闭环**：取题 → 起一代 → 发题 → 收卷 → 判定 → **报警则 exit 1**。
+- `scripts/self-dev-brief.mjs` — **自开发简报**：`{docs,tasks,tools,mgmt,missingDocs}` + `renderBrief()`。
+  ★ 回退过一版："扫 `scripts/` 全目录 ⇒ 列 165 条"⇒ 已回退为**【精选入口 9 条 + 存在性核验】**（铁律 28）。
+- `scripts/skill-sieve.mjs` / `skill-factory.mjs` / `skill-to-preset.mjs` — 筛 → 工厂 → 桥。
+- `scripts/tool-pool.mjs` — 工具池 + 回值（append-only JSONL、幂等、fail-closed、读不写盘）。
+- `packages/subagent-council` — 两席 dev/review；★ code 在、**profile 未设 seats ⇒ 未上线**。
+- `scripts/check-import-safe.mjs` — 常驻判据：`scripts/` 内部被 import 且顶层派发 CLI ⇒ 必须有 `isMain`。
+
+**★ 三份核验报告**：`docs/verify-self-dev-first-leg-2026-09-26.md` / `docs/verify-self-dev-second-leg-2026-09-26.md`
+/ `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`。
+
+### 已固化的语义裁决（**别再当未决问题重开**）
+
+- **"另起一个 agent" = "另起一代 + 不 flip"**：spawn 新进程 + 不同 `DSH_HOME` + 自己端口段 ⇒ 独立实例；
+  `3080` 只是"前门指向谁"的开关 ⇒ **不需要新机制**。
+- **题 = 【目标】+【环境】**（`meta.env`，默认 `{inherit:true}`）；**题面该说"在什么条件下做"，不该说"谁来做"**。
+- **题 = 回归基准，不设"退役"**；下一代**对自己重放**。★ **"可以理解"必须落成可测条件**：
+  分数降 ∧ 功能面变大 ⇒ `tolerable-regression`；分数降 ∧ 功能面不增 ⇒ `regression`。
+  功能面代理 = 该臂 DSH_HOME 下能力库条目数（**读不到 ⇒ null 不是 0**）。
+- **判据松紧写在【题】里**：`expect.mode='functional-only'`（默认；`ran` ⇒ `unjudged`，**未判 ≠ 通过**）
+  ／ `score-band`。**不许强制一刀切**。
+- **训练场 = 题库（agent-agnostic）**：**场**（不认识 agent）‖ **实验**（谁考/什么身份/能否碰别的臂）。
+- **自进化 = 在【子 agent】上进化**；路径 = 取 skill → 安全审批 → 做成子 agent → 与同方向已有 agent **比工具、择优、迭代**。
+  **来源驱动，不是定期全量**。
+- **筛的三级公民**：一等（`Principle` ∧ `Script` ∧ `Tools[]` 齐）⇒ 建 agent；二等（缺一项/需我们补，常见"有脚本无 Tools"
+  ⇒ **人工**包成 `ToolDef`）⇒ 也能建；三等（只有指导）⇒ **不建**，用于优化同方向**已有** agent 的 persona。
+- **能力的粒度是【链路工具】不是【元工具】**；★ 现有判据数不出 ⇒ **口径等用户给，不自己发明**。
+- **DSH 侧不做商城、不做检索**：只做**工具池 + 回值**；**回值作者 = 用它的那个子 agent 自己**。
+- **独立性**：**跨模型 > 跨会话 > 同会话换 prompt**；★ **能强制独立性的地方是【编排层】**。
+- **记忆宿主形态**：Go 侧保留（存储/图/检索/睡眠/技能树）；**provider 注册/工具声明/委派/注入 = TS**；
+  **两者之间 = MCP 首选**。别把"DSH 插件内重写"当候选。
+
+### 未闭合（**开放式，每次接手看一眼**；细节见 `topics/current-status.md`）
+
+- **★ 启动器（launcher）**：用户 2026-09-26 定的**新主线** —— "像游戏启动器那样、本身能管代数"的入口。
+  ★ **顺序由用户定死**：**先做好启动器** ⇒ 再把 `?cmd=` API **反向包成工具**（我能用 + 可注册进 DSH 工具表）。
+  ★ 文档（按读序）：① `docs/launcher-function-list-2026-09-26.md`（**F0–F5 功能清单**，铁律 37 首个样本）；
+  ② `docs/launcher-sentinel-model-2026-09-26.md`（用户三裁决逐字 + 哨兵形式化 + 施工图纸确定性实测）；
+  ③ `docs/launcher-sentinel-impl-2026-09-26.md`（实现范围 + 诚实清单）。
+- **★★ 哨兵模型**：`POOL = {primary, sentinel, others}`；三动作 **立哨 / 选定 / 提拔**；
+  **提拔仅由"主代退役"触发** —— 模型里**没有**"算哪个最好"。
+  ★ 不变量：**I-a** 只有一个 primary；**I-b** `stand` **绝不 flip**（哨兵不占前门，只留自己的端口）；
+  **I-c** `promote` **绝不 spawn**。
+  ★★ **已实现并落地**（`6c2520a`）：`packages/switchboard/src/pool.ts`（`PoolStore`，独立 `pool.json`，
+  不碰 `lease.json` 的 fencing 语义）+ coordinator `stand`/`promoteSentinel`/`spawnStaging`/`poolView`
+  + main.ts 三条命令 `?cmd=pool|stand|promote`。
+  ★ 判据：`scripts/delegation/test-sentinel-pool.mjs` **16 ok/0 FAIL**（含消融自证）、
+  `test-pool-command-contract.mjs` **10 ok/0 FAIL**。
+  ★ 端口裁决：**3080 = 唯一主端**（供收藏/将来 Electron）；其余代**保留端口信息即可**、可直接 `:<port>` 打开
+  ⇒ **不要求**强制提拔到 3080 前门。
+  ★ 待办：**页面（"皮"）未做**（有意推迟到语义层验完）；`?cmd=stand` 的**陈旧哨兵 `pidAlive` 守卫未闭合**（与 R3 同族）。
+  ★ 纪律：判据只许落在**结构层**（确定性）；`project_docs`/`llm_decider`（**193 个工具文件里仅这 2 个调 LLM**）
+  出来的东西**一律标非确定性、不得当判据**。仪器 `scripts/canvas-determinism-probe.mjs`
+  （实测 `design-canvas/src` **308 文件 → 17 功能，两遍逐字节相同**）。
+- **接线 ≠ 上线**：两席（dev/review）代码在、**profile 未设 `seats` ⇒ 没上线**；`arm-isolation` overlay 代码在、**端到端未验**。
+- **"只差真跑一次"**：筛 → 工厂 → 两脑 → 池**纸面齐**，缺一次真跑（起隔离实例只能用户终端）。
+- **判据缺口**：能力库**门只跑到 L1**（L2/L3/L4 未实施 ⇒ 标"通过"就是假绿），G1 是 P0。
+- **既存红**：`test-patch-anchors.mjs` 12/17、`lib-tool-failure.mjs --self-test` 18/19、`key-pool-proxy/src/test.ts` TS2835。
+- **skill store 真实落点未确认**（本机无任何 `*skill*` 文件）⇒ 筛只能跑自测。
+- **经管理面发的全部实验（7 次）从未真正把题派给臂A** ⇒ `action=experiment` 的**后半段（真发题 + 判卷）仍是未验证代码**。
+  ★ 诚实表述：**"它对了" 我说不了 —— 我只知道"我还没看到它跑"**。
+- **池的"退避重试"支路**：★ 已观测到（臂 A `boot.log`：`33101 被占 ⇒ 退避重试` → `⚠️ 连续 9 次拿不到 ⇒ 本代没有池`）
+  ⇒ **顺带证明这条支路没能把臂救回来**（只是如实报"本代没有池"）。
+- **R2–R5 影响面未盘查**；"服务多训练场"的**并发安全未测**（`lease.json` 在 `coordDir` 下，两场共用 ⇒ 可能租约互踩）。
+- ⚠️ **待办**：`sessions/` 分片键**只有 `cwd`、不含 home 身份** ⇒ 两 home 同 `cwd` 会撞同一分片
+  （已核实现役 home 里的 `_abA-wt` 分片**不是串场**）⇒ **若一控制面真去服务另一训练场，必须保证 cwd 也不同**。
+- ⚠️ **`HANDOVER_CONTROL` 无"子代必须向本控制面报到"的断言**（当前臂A对只因 `arm-up.mjs:524` 传了 `ports.env`）。
+- `_arms/a.bak-from-cancelled-session-1441` 残留目录。
+
+★ **"一条旁路 ⇒ 六个症状"**（EADDRINUSE / 僵尸 lease / 复活死 pid / 现役也撞 / ⑦ 假红 / `poolPort=none`）
+⇒ 这解释了"逐个修症状越修越多"。★ **R1/R1.5/R2 已把根因修掉** ⇒ 该表留作**判据依据**（为什么当初不该逐条修）。
+★★★ **纪律（用户 2026-09-26 点破）**：*"我不在乎什么最小可行修法或者是最大可行修法，
+**我只要你干净的**……我哪怕你重写都无所谓"* ⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。
