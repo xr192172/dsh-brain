@@ -1,4 +1,21 @@
-# 当前状态 / 下一步（更新至 2026-09-14 15:44）
+# 当前状态 / 下一步
+
+> ## ⚠️ 本文件正文停在 2026-09-14（**已滞后**）—— 找"现在到哪了"请先看下面这几处
+>
+> | 要找什么 | 看哪 |
+> |---|---|
+> | **每次都要遵守的铁律 / 环境约束** | `.workbuddy/memory/MEMORY.md`（**权威**；2026-09-26 瘦身至 ~30KB） |
+> | **接手：下一项、未闭合、验证命令** | `.workbuddy/memory/topics/next-task-handover.md`（顶部 = 回执） |
+> | **日更（尾部即最新）** | `.workbuddy/memory/2026-09-26.md`（§13 R1 / §14 R1.5 / §15 R2 / **§17 启动器+canvas 评估**） |
+> | **R1–R5 旁路拆除棒次表** | `MEMORY.md` 的「当前施工棒次」小节 |
+> | **★★ 启动器（新主线）功能清单** | `docs/launcher-function-list-2026-09-26.md`（F0–F5；**待用户裁决 Q1–Q3**） |
+> | 旁路根因全文 / 僵尸 lease 因果链 | `docs/handover-bypass-structural-diagnosis-2026-09-26.md` / `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md` |
+>
+> **2026-09-26 快照**：R1/R1.5/R2 已落地并消融自证；**R3–R5 未做**；
+> 现役健康（`:3080` 200 / `:31800` `generation:15` `activeGen=gen-3082` `stage=idle`）；
+> **新主线 = 启动器，卡在用户裁决 → 未写代码**。
+>
+> ---
 
 > 2026-09-14 从 `MEMORY.md` 拆出。**只记还在生效的状态**；完整过程见 `.workbuddy/memory/2026-09-14.md`。
 
