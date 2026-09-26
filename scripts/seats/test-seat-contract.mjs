@@ -237,6 +237,106 @@ console.log('\n-- W7 ★消融自证：解析失败必须 fail-closed（绝不�
   fs.rmSync(tmp, { force: true })
 }
 
+// ── W10–W13 ★ 编造判据（G8/G9）：用【真实席位产出】当验收样本 ─────────────────
+console.log('\n-- W10–W13 ★编造判据：新名词必须带坐标，坐标必须对得上 --')
+{
+  const { verifyVocabulary } = await import('./vocabulary-check.mjs')
+  const bundle = fs.readFileSync('out/handover-to-review-seat.md', 'utf8')
+  const realOut = fs.existsSync('out/review-seat-output.md') ? fs.readFileSync('out/review-seat-output.md', 'utf8') : ''
+
+  // W10 ★★★ 真实产出里那句「check-all.mjs 里 shell:true …」必须被抓住
+  let r10 = { problems: [], unlocated: [] }
+  if (realOut) {
+    r10 = verifyVocabulary(realOut, bundle)
+    const hitG9 = r10.problems.some((p) => p.code === 'G9-SYMBOL-NOT-IN-CITED-FILE' && p.msg.includes('shell:true'))
+    t('W10 真实产出的「check-all.mjs 里 shell:true」必须被 G9 抓住（该符号在文件里零命中）', hitG9,
+      hitG9 ? '' : JSON.stringify(r10.problems.map((p) => p.code)))
+    // ★ 同时：它那条**诚实**的引用 `(r.status ?? 1) === 0`（第 259 行确有此行）**不许**被误报
+    const falsePos = r10.problems.some((p) => p.msg.includes('r.status'))
+    t('W10b 它那条【真的】引用 `(r.status ?? 1) === 0` 不得被误报（防噪音机）', !falsePos,
+      falsePos ? '★ 误报了！' : '')
+  } else {
+    bad('W10 前置：找不到 out/review-seat-output.md（真实样本缺失）')
+  }
+
+  // W11 阳性对照：引用**真实存在**的符号 ⇒ 必须 PASS
+  const goodCite = `## 1. 被审对象
+
+门。
+
+## 2. 独立复算
+
+我读了 \`scripts/seats/seat-contract.mjs\`，确认里面确实有 \`parseSeatContracts\` 这个导出。
+
+## 3. 裁决：通过
+
+无阻塞。
+
+## 4. 下一步
+
+无。
+
+## 5. 我可能错在哪
+
+独立性档位：跨会话（未到跨模型），可能共享盲区。`
+  const r11 = verifyVocabulary(goodCite, bundle)
+  t('W11 阳性对照：引用真实存在的符号 ⇒ PASS', r11.ok, r11.ok ? '' : JSON.stringify(r11.problems.map((p) => p.code)))
+
+  // W12 阴性：新符号 + 无引证 ⇒ **只报告（unlocated），不判红**
+  //   ★ 为什么改成"不判红"：我第一版判红了，实测 **6 条发现里 5 条是误报**
+  //     （把【命令】【它自己调用的函数】【返回字面量】全算成"该文件里没有"）⇒ **噪音机**。
+  //     按三态纪律：显式记 `unknown`、不判红、也不放过。
+  const noCoord = `## 1. 被审对象
+
+门。
+
+## 2. 独立复算
+
+它内部用了 \`someInventedHelper\` 来解析。
+
+## 3. 裁决：通过
+
+无阻塞。
+
+## 4. 下一步
+
+无。
+
+## 5. 我可能错在哪
+
+独立性档位：跨会话。`
+  const r12 = verifyVocabulary(noCoord, bundle)
+  t('W12 新符号无引证 ⇒ 进 unlocated（报告），**不判红**', r12.unlocated.includes('someInventedHelper') && r12.problems.length === 0,
+    `unlocated=${JSON.stringify(r12.unlocated)} problems=${JSON.stringify(r12.problems.map((p) => p.code))}`)
+
+  // W14 ★★★ 防误报（本轮最该有的一条）：真实产出里那 5 个"看着像新符号其实不是"的，
+  //   **一个都不许**被判红。它们分别是：命令、它自己调用的函数、返回字面量、我材料里的命令。
+  const FALSE_POS = ['check-all --only seats', "validateSeatOutput('dev', content)", 'ok=true, problems=[]']
+  const flagged = r10.problems.map((p) => p.msg).join('\n')
+  const bad1 = FALSE_POS.filter((t2) => flagged.includes(t2))
+  t('W14 防误报：命令 / 自调函数 / 返回字面量 不得被判红（第一版这里错了 5 条）', bad1.length === 0,
+    bad1.length ? `★ 误报了：${JSON.stringify(bad1)}` : '')
+
+  // W13 ★ 消融：把"真的去比对被引内容"这一步撤掉 ⇒ W10 必须**不再**红
+  //   （证明抓住 shell:true 的**就是**那一步，而不是别的什么顺手命中了）
+  const ablated = (() => {
+    const src = fs.readFileSync('scripts/seats/vocabulary-check.mjs', 'utf8')
+    const mutated = src.replace('if (target.includes(id)) continue', 'if (true) continue /* ★消融：永远认为命中 */')
+    return mutated === src ? null : mutated
+  })()
+  if (!ablated) bad('W13 前置：消融没生效（没匹配到要改的那一句）')
+  else {
+    const tmp = path.join(os.tmpdir(), `vocab-ablate-${Date.now()}.mjs`)
+    fs.writeFileSync(tmp, ablated, 'utf8')
+    const mod = await import(`file://${tmp.replace(/\\/g, '/')}`)
+    const r13 = mod.verifyVocabulary(realOut, bundle)
+    const stillCaught = r13.problems.some((p) => p.code === 'G9-SYMBOL-NOT-IN-CITED-FILE')
+    t('W13 消融：撤掉"真的比对被引内容"⇒ 必须抓不到了（证明是那一步在起作用）', !stillCaught,
+      stillCaught ? '★ 撤了还能抓到 ⇒ 说明抓住它的不是这一步' : '')
+    fs.rmSync(tmp, { force: true })
+  }
+}
+
 // ── 汇总 ─────────────────────────────────────────────────────────────────────
 const failed = results.filter((r) => !r.pass)
 console.log('\n' + '='.repeat(60))
