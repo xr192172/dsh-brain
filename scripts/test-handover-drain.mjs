@@ -190,18 +190,50 @@ function stripComments(src) {
  */
 function checkSealOrdering(src) {
   const problems = []
+  // ★★ 2026-09-26 修（**判据错，不是代码错** —— 铁律 7：见假红先证明判据错了）：
+  //   旧写法 `const iUnlock = src.indexOf('this.front.setLocked(false)')` 取**全局第一次出现**，
+  //   而本文件里 `setLocked(false)` 有 **两处**：360 行（**另一个方法**）与 843 行（本方法的 finally）。
+  //   ⇒ `iKill(804) > iUnlock(360)` 恒为真 ⇒ **在完全正确的源码上报假红**
+  //     （"封口被挪到解锁之后"）。实测：代码里 804 封口 → 810 `await stop(1500)` → 843 finally 解锁，
+  //     顺序本来就是对的，805-808 的注释还专门写了"必须在释放前门锁之前把它杀到 PID 消失"。
+  //   ★ 危害不只是"多一条红"：**一条长期假红的门会被人当噪音，进而被整体绕过**（比没有门更糟）。
+  //
+  //   ⇒ 修正：**作用域限定到交接流程**
+  //     ① 用 `this.stage = 'retire'`（全文件唯一）标定交接阶段；
+  //     ② 解锁取「**强杀之后**的第一个」`setLocked(false)`；
+  //     ③ 真正要防的是「**提前放锁**」⇒ 断言 retire 阶段开始到封口之间**没有任何解锁**。
+  const iRetire = src.indexOf("this.stage = 'retire'")
   const iKill = src.indexOf('if (seal.killNow) {')
+  const iAwait = iKill >= 0 ? src.indexOf('await old.spawned.stop(', iKill) : -1
   const iRetain = src.indexOf('setTimeout(() => void old.spawned.stop(), cfg.retainMs)')
-  const iUnlock = src.indexOf('this.front.setLocked(false)')
+  // ★ 解锁：只看强杀**之后**那一个（= 本方法的 finally）
+  const iUnlock = iAwait >= 0 ? src.indexOf('this.front.setLocked(false)', iAwait) : -1
+
+  if (iRetire < 0) problems.push("找不到 `this.stage = 'retire'`（交接流程被改写？）")
   if (iKill < 0) problems.push('找不到 `if (seal.killNow) {` —— 封口分支被删了？')
   if (iRetain < 0) problems.push('找不到 retainMs 分支（已确认停写时的优雅退役）')
-  if (iUnlock < 0) problems.push('找不到 `this.front.setLocked(false)`（finally 解锁）')
+  if (iRetire >= 0 && iKill >= 0 && iKill < iRetire) problems.push('封口分支出现在 retire 阶段之前 —— 顺序反了')
   if (iKill >= 0) {
     const killBlock = src.slice(iKill, src.indexOf('} else {', iKill) > 0 ? src.indexOf('} else {', iKill) : iKill + 2000)
     if (!/await old\.spawned\.stop\(/.test(killBlock)) problems.push('killNow 分支里没有 `await old.spawned.stop(` —— 强杀没落地（或没等它）')
-    if (iUnlock >= 0 && iKill > iUnlock) problems.push('封口被挪到解锁之后 —— 前门先放锁，等于没封')
+  }
+  if (iAwait >= 0 && iUnlock < 0) problems.push('强杀之后找不到 `this.front.setLocked(false)` —— 前门锁没人放（会永久 503）')
+  // ★★ 真正的判据：retire 阶段内、封口之前的**任何**解锁都是 bug（"前门先放锁 = 等于没封"）
+  if (iRetire >= 0 && iKill >= 0) {
+    const iEarly = src.indexOf('this.front.setLocked(false)', iRetire)
+    if (iEarly >= 0 && iEarly < iKill) problems.push('retire 阶段内、封口之前就放了前门锁 —— 前门先放锁，等于没封')
   }
   return problems
+}
+
+/**
+ * ★ 旧写法（**故意保留在测试里**，用来钉死"为什么改"）：全局取第一个解锁。
+ * 在**正确**的源码上它会报假红 ⇒ 自证④ 断言这一点，防止有人"改回去"。
+ */
+function checkSealOrderingOldGlobalIndexOf(src) {
+  const iKill = src.indexOf('if (seal.killNow) {')
+  const iUnlock = src.indexOf('this.front.setLocked(false)')
+  return iKill >= 0 && iUnlock >= 0 && iKill > iUnlock
 }
 
 if (!fs.existsSync(COORD)) {
@@ -211,21 +243,40 @@ if (!fs.existsSync(COORD)) {
   const probs = checkSealOrdering(src)
   if (probs.length) { bad('B1 真实源码通过顺序判据', probs.join('；')) } else { ok('B1 真实源码通过顺序判据（封口在解锁之前，且 await 了强杀）') }
 
-  // ★ 判据自证：两份植错必须被同一判据抓出来（否则 B1 只是"关键词在场"）
+  // ★ 判据自证：三份植错必须被同一判据抓出来（否则 B1 只是"关键词在场"）
   const plantedNoKill = src.replace(/if \(seal\.killNow\) \{/, 'if (false) {')
-  const plantedLate = (() => {
-    const i = src.indexOf('this.front.setLocked(false)')
-    return src.slice(0, i) + '/* unlock-early */\n' + src.slice(i)
+  // ★ 2026-09-26 重写：旧版自证② 是把**第一个**解锁（别的方法里的）挪到封口之前 ——
+  //   那个变异体在旧判据下"能报红"，但它**根本不是本次要防的形状**（跨方法挪）。
+  //   真正要防的是：**在同一个交接方法里、封口之前放锁**。按这个形状重植。
+  const plantedEarlyUnlock = (() => {
+    const RETIRE = "this.stage = 'retire'"
+    const iRetire = src.indexOf(RETIRE)
+    if (iRetire < 0) return src
+    // ★ 插在 retire 行**之后**、封口**之前** —— 才是"交接方法内提前放锁"的形状
+    //   （我第一版插到了 retire **之前**，被判据正确地从作用域外忽略了 ⇒ 自证② 假红）
+    const at = iRetire + RETIRE.length
+    return src.slice(0, at) + '\n    this.front.setLocked(false) /* unlock-early */' + src.slice(at)
   })()
   truthy('B1-自证①「去掉强杀」必须报红', checkSealOrdering(plantedNoKill).length > 0, JSON.stringify(checkSealOrdering(plantedNoKill)))
-  truthy('B1-自证②「强杀挪到解锁之后」必须报红（畸形源码：先解锁后强杀）', (() => {
-    // 构造"解锁在前、封口在后"的顺序：把 finally 块整段前移
-    const iUnlock = src.indexOf('this.front.setLocked(false)')
-    const iKill = src.indexOf('if (seal.killNow) {')
-    if (iUnlock < 0 || iKill < 0) return false
-    const moved = src.slice(0, iKill) + src.slice(iUnlock, iUnlock + 40) + src.slice(iKill, iUnlock) + src.slice(iUnlock + 40)
-    return checkSealOrdering(moved).length > 0
-  })())
+  truthy(
+    'B1-自证②「交接方法内、封口之前提前放锁」必须报红',
+    checkSealOrdering(plantedEarlyUnlock).length > 0,
+    JSON.stringify(checkSealOrdering(plantedEarlyUnlock)),
+  )
+  truthy(
+    'B1-自证③「强杀不 await」必须报红',
+    (() => {
+      const planted = src.replace('await old.spawned.stop(1500)', 'old.spawned.stop(1500)')
+      return planted !== src && checkSealOrdering(planted).length > 0
+    })(),
+  )
+  // ★★ 自证④ —— 把"为什么改判据"钉死在测试里（防止有人改回旧写法）：
+  //   旧写法（全局取第一个解锁）在**这份正确的源码**上会报假红，而新判据不报。
+  truthy(
+    'B1-自证④「旧写法(全局indexOf)在正确源码上报假红，新判据不报」—— 记录判据修正的理由',
+    checkSealOrderingOldGlobalIndexOf(src) === true && checkSealOrdering(src).length === 0,
+    `旧=${checkSealOrderingOldGlobalIndexOf(src)} 新problems=${JSON.stringify(checkSealOrdering(src))}`,
+  )
 }
 
 if (!fs.existsSync(IDX)) {
