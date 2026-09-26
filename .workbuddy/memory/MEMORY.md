@@ -135,27 +135,46 @@
 | 训练场 + Agent 工厂 | `docs/training-ground-and-skill-sieve-2026-09-25.md` | 筛网口径（三级公民）/ 自进化的定义 / 完整流程 |
 | **闭环现状与命令** | `.workbuddy/memory/topics/next-task-handover.md` | **接手先读**；顶部 = 本轮回执 |
 
+### ★★ 当前施工棒次：R1–R5 根因链条（**旁路拆除**，见 `docs/handover-bypass-structural-diagnosis-2026-09-26.md` §4）
+
+> 总背景：**换代机制本身是好的、而且真的在跑**；是一条**旁路**（`arm-up` → `isolated-instance --force`）
+> 绕过了整台机器 ⇒ 逐个修症状越修越多（一条旁路、六个症状）。**根因修法，不是补丁。**
+
+| 棒 | 内容 | 状态 |
+|---|---|---|
+| **R1** | `spawnGen` 的 `DSH_HOME` 从"继承 `process.env`"⇒ **显式必填入参** | ✅ `06739e4`（R0，封条 `pa-20260926-f6875c`） |
+| **R1.5** | 摆放（`WORK_DIR`/`coordDir`/`genAssembly`）**必须与 home 同源** ⇒ 影子依赖变被检查约束 | ✅ `92449dd`（R0，封条 `pa-20260926-2f5c08`） |
+| R2 | `--force` 只用于"臂不存在/结构性变更"；换代一律走 `?cmd=handover` ⇒ **然后删旁路** | ⬜ 未做 |
+| R3 | `ensureActiveLease()` 加 `pidAlive` 活体守卫 | ⬜ 未做 |
+| R4 | `mgmt.ts:159` 的 `spawnSync` ⇒ 异步 spawn + 轮询 | ⬜ 未做 |
+| R5 | ⑦ 的 `ok` 三值化（`ok`/`slow`/`unreachable`，铁律 30） | ⬜ 未做 |
+
+★ **R1 核心语义（必须钉死，别再搞错）**：`DSH_HOME` = **"这一代能看见哪些会话"的根**
+（实测会话存储 = `<DSH_HOME>/sessions/<cwd编码>/<sessionId>/`）。
+⇒ R1 的意思是「**控制面把它自己的 `DSH_HOME` 显式往下传**」，**不是**「每代一个不同的 home」。
+后者会让新代看不到旧代会话 ⇒ **中继器静默失效**（症状：换代报成功、会话列表变空）。
+- ★ **R1.5 为什么要跟 R1 一起做**：`main.ts` 的 `coordDir`/`workDir`/`genAssembly` **默认也从 `home` 派生**
+  ⇒ 只改 home 不改 `WORK_DIR` ⇒ **脑裂混合体**（代的 home 指向臂A、控制面的 genDir 还在原处）。
+  ★ 实测真相：**"今天一致"靠的是没人设过 `WORK_DIR`**，不是约束 ⇒ R1.5 把它变成**单一求值点 + 分裂拒启动 + 四值指纹**。
+- ★ 判据（不是断言）：`packages/switchboard/test/spawn-dshhome.test.mjs`(5) + `placement-consistency.test.mjs`(6)，
+  两条都带**消融自证**（撤掉修复必须变红）。中继器在 R1 代码下已**实测 3/3**（见日更 §13.3）。
+
 ### 已落地的件（**在哪 / 是什么 / 什么状态**）
 
 - `scripts/arm-ports.mjs` — 端口/根目录的**唯一定义**（纯模块、import-safe）。臂 idx ⇒ `33080+idx*40`；池 `=base+21` 必须在段内。
 - `scripts/arm-up.mjs` — **唯一启动入口**。`--live`（现役零参）/ `<臂名>`（训练场，不 flip）；`--open` 起完开界面。
   ★ **"起来了" = 自检全过**（臂模式 7 条；现役模式只判服务可用，不硬套臂专属条）。
-  · ★★ 2026-09-26 三修（真事故，均消融自证）：① ⑦ 探针**太脆 ⇒ 假红**（原 `rpc()` 无超时/无重试；
-    30 并发压 `:3080` ⇒ 5/6 次 `http:0`；而现役正在跑"发起实验的那个会话"⇒ **自干扰** ⇒ 整条链自锁）
-    ⇒ 修：超时 20s + 有界重试 5 次 + **分类** `ok`/`slow`/`unreachable`（见铁律 30）。
-    ② **僵尸 lease**（见铁律 32 + 下方"未闭合"）⇒ 修：`pidAlive()` 活体探测。
-    ③ 把"是否已在跑"改成**控制面优先** —— 先问活着的控制面（`?cmd=status` 的
-    `lease.activeGen.pid` + `pidAlive`），拿得到且活着 ⇒ **视作已在跑 ⇒ 跳过 ①②**
-    （`isolated-instance --force` 才是砸坏健康实例的动作）；拿不到才退看 **只读**的 `lease.json`；
-    **绝不写 lease.json**（铁律 31）；"无人应答 + 无 lease"仍**维持拒跑**。
-    ★ 报错里加**日志指针**（`logs/switchboard-run.log` 看 `lease recovery`/`gen EXIT`；
-    `switchboard/<gen>/boot.log` 看 `EADDRINUSE`/`连续 N 次拿不到`）而**不解析**它们。
+  · ★★ 2026-09-26 三修（真事故，均消融自证）：① ⑦ 探针**太脆 ⇒ 假红** ⇒ 超时 20s + 有界重试 5 次 +
+    **分类** `ok`/`slow`/`unreachable`（见铁律 30）。② **僵尸 lease** ⇒ `pidAlive()` 活体探测
+    （因果链见 `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`）。③ "是否已在跑"改成**控制面优先**
+    （先问活着的 `?cmd=status`；拿不到才退看**只读** `lease.json`；**绝不写它**，铁律 31）。
+    ★ 报错只加**日志指针**（`logs/switchboard-run.log` / `<gen>/boot.log`）而**不解析**它们。
+  ⚠️ **它调 `isolated-instance --force` 启动 ⇒ 这就是那条旁路**（R2 要拆的对象）。
 - `packages/switchboard/src/mgmt.ts` — 控制面管理面 `?cmd=mgmt`（`brief/tasks/verdict/experiment/result`）。
   ★ **安全三前提**：具名动作白名单 + 参数先校验 + **绝不经 shell**（spawn 数组）。
-  · ★★ 2026-09-26 修：**派子进程时"臂身份"env 会泄漏** —— `spawnSync` 默认继承 `process.env`，
-    而**臂模式起的控制面**自己 env 里就有 `DSH_HOME=<该臂>/dshhome` ⇒ 泄漏进 `run-experiment → isolated-instance`
-    ⇒ 它（**正确地**）拒跑。⇒ 修法**不是放宽那道拒绝**（它拦的正是"拿隔离实例当现役源"），
-    而是新增 `ARM_IDENTITY_ENV_KEYS`（8 个）+ 纯函数 `childEnv()` ⇒ 子进程回到**现役语境**。
+  · ★★ 修：**派子进程时"臂身份"env 会泄漏**（`spawnSync` 默认继承 `process.env`，臂模式控制面自带
+    `DSH_HOME=<该臂>`）⇒ 修法**不是放宽拒绝**，而是 `ARM_IDENTITY_ENV_KEYS`(8) + 纯函数 `childEnv()`
+    让子进程回到**现役语境**。★ **`childEnv()` 归"控制面→脚本"，R1 的 `spawnGen` 必须【显式给】home，两者不可混用。**
   · 判据 `scripts/delegation/test-mgmt-surface.mjs`（**19/19 + 单因子消融**，含 ⑨/⑨b/⑨c）。
 - `scripts/dsh-up.cmd` + `scripts/install-desktop-icon.mjs` — 桌面一键（双击 = 起现役 + 自检 + 开界面）。
   ★ 桌面那份**必须打绝对仓库路径**（`%~dp0..` 位置相关会崩）。
@@ -163,11 +182,9 @@
   ★ **场 ≠ 实验**：题在 `evals/tasks/`，成绩在 `evals/runs/`。
 - `scripts/run-experiment.mjs` — **闭环**：取题 → 起一代 → 发题 → 收卷 → 判定 → **报警则 exit 1**。`--from <result.json>` 重收卷。
 - `scripts/self-dev-brief.mjs` — **自开发简报**：纯函数产 `{docs, tasks, tools, mgmt, missingDocs}` + `renderBrief()`。
-  · **13 条 BRIEF_SPEC 每条带 `role`**（"为什么读它"）**路径不存在 ⇒ 标 `missing` 显形**；
-    **管理面 URL 派生**（不手抄）。判据 **13/13 + 消融**；经管理面 `action=brief[&arm=]` 暴露
-    （**只有 `brief` 不校验臂存在** —— 它是说明书；会 spawn 的 `experiment` 才必须校验）。
-  · ★★ 2026-09-26 回退过一版：DSH 曾改成"扫 `scripts/` 全目录 ⇒ 列 165 条"（159 条 role 空、硬拼 `<args>`）
-    ⇒ **已回退为【精选入口 9 条 + 存在性核验】**（见铁律 28 的"扫全目录 ≠ 精选入口"）。
+  · **每条 BRIEF_SPEC 带 `role`**（"为什么读它"）**路径不存在 ⇒ 标 `missing` 显形**；**管理面 URL 派生**（不手抄）。
+  · ★★ 回退过一版：DSH 曾改成"扫 `scripts/` 全目录 ⇒ 列 165 条"（159 条 role 空）⇒ **已回退为【精选入口 9 条 + 存在性核验】**（铁律 28）。
+  · 经管理面 `action=brief[&arm=]` 暴露（**只有 `brief` 不校验臂存在** —— 它是说明书；会 spawn 的 `experiment` 才必须校验）。
 - `scripts/skill-sieve.mjs` / `skill-factory.mjs` / `skill-to-preset.mjs` — 筛 → 工厂 → 桥（三级公民口径见下）。
 - `scripts/tool-pool.mjs` — 工具池 + 回值（append-only JSONL、幂等、fail-closed 校验、读不写盘）。
 - `packages/subagent-council` — 两席 **dev/review**（`evo-dev` / `evo-review`）；★ code 在、**profile 未设 seats ⇒ 未上线**。
