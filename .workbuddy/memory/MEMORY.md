@@ -140,12 +140,12 @@
 - `scripts/arm-ports.mjs` — 端口/根目录的**唯一定义**（纯模块、import-safe）。臂 idx ⇒ `33080+idx*40`；池 `=base+21` 必须在段内。
 - `scripts/arm-up.mjs` — **唯一启动入口**。`--live`（现役零参）/ `<臂名>`（训练场，不 flip）；`--open` 起完开界面。
   ★ **"起来了" = 自检全过**（臂模式 7 条；现役模式只判服务可用，不硬套臂专属条）。
-  · ★★ 2026-09-26 修（真事故，均消融自证）：① ⑦ 探针**太脆 ⇒ 假红**（原 `rpc()` 无超时/无重试；
+  · ★★ 2026-09-26 三修（真事故，均消融自证）：① ⑦ 探针**太脆 ⇒ 假红**（原 `rpc()` 无超时/无重试；
     30 并发压 `:3080` ⇒ 5/6 次 `http:0`；而现役正在跑"发起实验的那个会话"⇒ **自干扰** ⇒ 整条链自锁）
     ⇒ 修：超时 20s + 有界重试 5 次 + **分类** `ok`/`slow`/`unreachable`（见铁律 30）。
     ② **僵尸 lease**（见铁律 32 + 下方"未闭合"）⇒ 修：`pidAlive()` 活体探测。
-    ③ **2026-09-26 下午（第三棒）**：把"是否已在跑"改成**控制面优先** —— 先问活着的控制面
-    （`?cmd=status` 的 `lease.activeGen.pid` + `pidAlive`），拿得到且活着 ⇒ **视作已在跑 ⇒ 跳过 ①②**
+    ③ 把"是否已在跑"改成**控制面优先** —— 先问活着的控制面（`?cmd=status` 的
+    `lease.activeGen.pid` + `pidAlive`），拿得到且活着 ⇒ **视作已在跑 ⇒ 跳过 ①②**
     （`isolated-instance --force` 才是砸坏健康实例的动作）；拿不到才退看 **只读**的 `lease.json`；
     **绝不写 lease.json**（铁律 31）；"无人应答 + 无 lease"仍**维持拒跑**。
     ★ 报错里加**日志指针**（`logs/switchboard-run.log` 看 `lease recovery`/`gen EXIT`；
@@ -163,10 +163,10 @@
   ★ **场 ≠ 实验**：题在 `evals/tasks/`，成绩在 `evals/runs/`。
 - `scripts/run-experiment.mjs` — **闭环**：取题 → 起一代 → 发题 → 收卷 → 判定 → **报警则 exit 1**。`--from <result.json>` 重收卷。
 - `scripts/self-dev-brief.mjs` — **自开发简报**：纯函数产 `{docs, tasks, tools, mgmt, missingDocs}` + `renderBrief()`。
-  · **13 条 BRIEF_SPEC 每条带 `role`**（"为什么读它"），**路径不存在 ⇒ 标 `missing` 显形**；
+  · **13 条 BRIEF_SPEC 每条带 `role`**（"为什么读它"）**路径不存在 ⇒ 标 `missing` 显形**；
     **管理面 URL 派生**（不手抄）。判据 **13/13 + 消融**；经管理面 `action=brief[&arm=]` 暴露
     （**只有 `brief` 不校验臂存在** —— 它是说明书；会 spawn 的 `experiment` 才必须校验）。
-  · ★★ **2026-09-26 回退过一版**：DSH 曾改成"扫 `scripts/` 全目录 ⇒ 列 165 条"（159 条 role 空、硬拼 `<args>`）
+  · ★★ 2026-09-26 回退过一版：DSH 曾改成"扫 `scripts/` 全目录 ⇒ 列 165 条"（159 条 role 空、硬拼 `<args>`）
     ⇒ **已回退为【精选入口 9 条 + 存在性核验】**（见铁律 28 的"扫全目录 ≠ 精选入口"）。
 - `scripts/skill-sieve.mjs` / `skill-factory.mjs` / `skill-to-preset.mjs` — 筛 → 工厂 → 桥（三级公民口径见下）。
 - `scripts/tool-pool.mjs` — 工具池 + 回值（append-only JSONL、幂等、fail-closed 校验、读不写盘）。
@@ -209,31 +209,57 @@
   `33101 被占（多半是上一代还没退）⇒ 退避重试（每 1.5s，最多 8 次）` → `⚠️ 连续 9 次拿不到 ⇒ 本代没有池`。
   ⇒ 观测已存在，**顺带证明这条"退避重试"没能把臂救回来**（只是如实报"本代没有池"）。
 - ★★★ **`arm-up` 对"已在跑的臂"会造【僵尸 lease】⇒ 臂永久卡死**（2026-09-26，**本棒真拦路虎**）。
-  **完整因果链（三份证据交叉，见 `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`）**：
-  `switchboard-run.log` 的行序 = 决定性证据：
-  `lease recovery OK … pid=16520 alive`（健康）→ `lease recovery OK … pid=9224 alive`（**又起一代**）
-  → `gen EXIT … pid=9224 code=1`（**新代当场死**）。死因见 `boot.log`：
-  `33101 被占` + `EADDRINUSE 127.0.0.1:33191` ⇒ **crash(exit 1)**。
-  机制：`arm-up` 走 `isolated-instance … --force` ⇒ 每次**重新准备+起代**，但**旧代从不被停** ⇒
-  新代绑不上池/端口 ⇒ 当场死，**而 lease 已被改写成新代（死掉的）pid** ⇒ **自我延续**。
-  ⇒ ★ **已修**：`pidAlive()` + **控制面优先**（拿得到活 pid ⇒ 真跳过启动）+ 指名拒跑（见 `arm-up` 条目）。
-  ⇒ ★★★ **2026-09-26 根因已定位（用户点破，`docs/handover-bypass-structural-diagnosis-2026-09-26.md`）**：
-  **"旧代谁来停"不是【缺】—— 机制 `coordinator.ts:568-597` 的 `retire` 阶段【早就写好了】，
-  而且【实测在工作】**：`_arms/a/.../handover-status.jsonl` **5 条全 success**；
-  `state.jsonl` 里 `retire` 执行 **6 次**、`KILL-OLD` 1 次；3 个 `resumeSession` **都真实存在**于臂A 会话列表
-  （`blank=false`，`updatedAt` 跨代递增）⇒ **"下一代跑上一代的任务"我验过，不只是台账说的**。
-  ⇒ ★★★ **真根因 = 一条【绕开整台机器】的旁路**：`arm-up.mjs:477` 每次都跑
-  `isolated-instance --force`（其定义 =「`<root>/dshhome` 已存在且非空时**强制覆盖**」）
-  ⇒ 它**不走协调器**：不切流量、不自证、**不 retire 旧代**、不回滚，还把 `dshhome` **推倒重建**。
-  ⇒ ★★ **旁路存在的真实约束**：`spawner.ts:76-86` 起新代 `env={...process.env}` 且**不设 `DSH_HOME`**
-  ⇒ **新代继承控制面的 `DSH_HOME`** ⇒ **一个协调器只能服务一个训练场** ⇒ 臂的 `_arms/a/dshhome`
-  **够不着协调器** ⇒ `arm-up` 只好自己重建 ⇒ 顺手绕过全部机制。
-  ⇒ ★ **未闭合 = 待实施的根因修法（不是补丁）**：**R1 `spawner.ts` 把 `DSH_HOME` 显式入参化**
-  （唯一让"一个协调器只能服务一个训练场"这个约束消失的改动 ⇒ 改完**旁路可整条删掉**）；
-  R2 `--force` 只留给"臂不存在/结构变更"，起代一律走 `?cmd=handover`；
-  R3 `ensureActiveLease()` 加 `if (!pidAlive(this.active.inst.pid)) return`；
-  R4 `mgmt.ts:159` `spawnSync` → 异步 spawn + 轮询；R5 ⑦ 的 `ok` 三分（铁律 33）。
-  ⚠️ **R1 实施前必须先做【影响面盘查】**（是否影响 `HANDOVER_CONTROL`／owner 判定／日志落点）—— 我没测。
+  **完整因果链**（三份证据交叉：`switchboard-run.log` 行序 `lease recovery OK(pid=16520)` →
+  `lease recovery OK(pid=9224)` → `gen EXIT code=1`；死因 `boot.log` 的 `33101 被占` +
+  `EADDRINUSE 127.0.0.1:33191`）⇒ **见 `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`**。
+  ⇒ ★ **已修**：`pidAlive()` + **控制面优先**（拿得到活 pid ⇒ 真跳过启动）+ 指名拒跑。
+  ⇒ ★★★ **根因 = 一条【绕开整台机器】的旁路**（用户点破，见
+  `docs/handover-bypass-structural-diagnosis-2026-09-26.md`）：**"旧代谁来停"不缺** ——
+  `coordinator.ts:568-597` 的 `retire` **早就写好且实测在工作**（`handover-status.jsonl` 5/5 success；
+  `state.jsonl` `retire` 6 次、`KILL-OLD` 1 次；3 个 `resumeSession` 真实存在于臂A）。真问题是
+  `arm-up.mjs:477` 每次跑 `isolated-instance --force`（=「强制覆盖 `<root>/dshhome`」）⇒ **不走协调器**：
+  不切流量、不自证、**不 retire 旧代**、不回滚、还把 `dshhome` 推倒重建。
+  ⇒ **旁路存在的约束**：`spawner.ts:76-86` 起新代 `env={...process.env}` 且**不设 `DSH_HOME`**
+  ⇒ **一个协调器只能服务一个训练场** ⇒ 臂的 `_arms/a/dshhome` 够不着它 ⇒ 只好自己重建 ⇒ 绕过全部机制。
+  ⇒ ★ **待实施的根因修法（不是补丁）**：**R1 `spawner.ts` 把 `DSH_HOME` 显式入参化**（唯一让
+  "一个协调器只能服务一个训练场"消失的改动 ⇒ 改完**旁路可整条删掉**）；R2 `--force` 只留给
+  "臂不存在/结构变更"，起代走 `?cmd=handover`；R3 `ensureActiveLease()` 加
+  `if (!pidAlive(this.active.inst.pid)) return`；R4 `mgmt.ts:159` `spawnSync` → 异步 spawn + 轮询；
+  R5 ⑦ 的 `ok` 三分（铁律 33）。
+  ★★ **R1 影响面盘查已完成** ⇒ **全文见 `docs/r1-dshhome-param-impact-audit-2026-09-26.md`**（264 行）。
+  三条必须记住的：
+  1. ★★★ **R1 语义 = "控制面把【它自己的】`DSH_HOME` 显式传给子代"**，**不是"每代一个 home"**。
+     判据：**会话存储 = `<DSH_HOME>/sessions/<cwd 编码>/<sessionId>/`**（实测）⇒ 各代 home 不同 ⇒
+     新代**看不到**旧代会话 ⇒ `reissuePrompt` **HTTP 200 但 resume 到空** ⇒ **中继器静默失效**
+     （换代成功、会话列表变空、用户以为会话丢了）。**别做这个错误类推。**
+  2. ★★★ **中继器已实证（铁律 11 数"判据为真的次数"）**：臂A `gen-33084→85→86→87` **三次连续跨代中继**
+     `resume ok:true "resumed persisted session"` **3/3**；★ **阳性对照**：三个 sessionId 各有实体、
+     体量递增 `62,885 → 137,679 → 254,360 B` ⇒ **会话跨代真增长**（不是"发了个 200"）。
+     ⇒ **跨代续同一会话成立**；R1 对现役是**行为保持**的。
+     ★ **R1 真正收益**不是"让中继器能工作"（它已经能），而是**"让一个协调器能服务【别的】训练场"**。
+  3. ⚠️ **`WORK_DIR`/`coordDir`/`genAssembly` 是 R1 的"影子依赖"**（`main.ts:392-395` 默认值从 `home` 推）
+     ⇒ **只改 home 不改 `WORK_DIR`** = 子代 home 指A臂、控制面 `genDir` 仍在现役 ⇒ **代的数据与日志分家**
+     ⇒ **必须一起参数化**。（读 `spawner.ts` 一处**看不出**这条。）
+  4. ⚠️ **`mgmt.childEnv`（剔 `DSH_HOME`）不许用在 `spawnGen` 上**：前者对"控制面→**脚本**"对
+     （脚本要回现役语境当源）；后者是"控制面→**代**"（要**显式给**）。混用 ⇒ 代失去 home ⇒
+     **隔离实例的代写进现役会话库**（最坏串场）。
+  5. ⚠️ **身份（`DSH_ARM_SELF/DENY`）保持【控制面级】**，不许 per-spawn。
+  6. ➖ **不受 R1 触及**：端口分配／日志落点（`relaunch-switchboard.mjs:89` 判的是**启动器自己**的 home）／
+     `HANDOVER_CONTROL`（从 `process.env` 来）—— ★ 但 `HANDOVER_CONTROL` **无"子代必须向本控制面
+     报到"的断言**（当前臂A对只因 `arm-up.mjs:524` 传了 `ports.env`）⇒ 未闭合。
+  7. ⚠️ **待办**：`sessions/` 分片键**只有 `cwd`、不含 home 身份** ⇒ 两 home 同 `cwd` 会撞同一分片。
+     ★ 已核实现役 home 里的 `_abA-wt` 分片**不是串场**（`arms.json:17` 定义臂A `cwd=_abA/wt`；两 home
+     都有；该目录已不存在 ⇒ 是"同一 cwd 不同时间不同 home"）⇒ 但**若一控制面真去服务另一训练场，
+     必须保证 cwd 也不同**。
+  8. **未闭合**：R2–R5 影响面**未盘查**；"服务多训练场"的**并发安全未测**（`lease.json` 在 `coordDir`
+     下，两场共用 ⇒ 可能租约互踩）；盘查**未改代码** ⇒ R1 实施完**必须重跑真换代复验**（铁律 21）。
+  - ⚠️ **新发现（待办）**：`sessions/` 的**分片键只有 `cwd`、不含 home 身份**
+    ⇒ 两个 home 用同一 `cwd` 会撞同一分片。★ 已核实现役 home 里的 `_abA-wt` 分片
+    **不是串场**（`arms.json:17` 定义臂A `cwd=_abA/wt`；两 home 都有；该目录已不存在
+    ⇒ 是"同一 cwd 不同时间不同 home"）⇒ 但**若一个控制面真去服务另一训练场，必须保证 cwd 也不同**。
+  - **未闭合**：R2–R5 影响面**未盘查**；"服务多训练场"的**并发安全未测**
+    （`lease.json` 在 `coordDir` 下，两场共用 ⇒ 可能租约互踩）；**本文未改代码**
+    ⇒ R1 实施完**必须重跑一次真换代复验**（消融自证，铁律 21）。
   ★ **一条旁路 ⇒ 六个症状**（EADDRINUSE / 僵尸 lease / 复活死 pid / 现役也撞 / ⑦ 假红 / `poolPort=none`）
   ⇒ 这解释了"逐个修症状越修越多"。
   ★★★ **纪律（用户 2026-09-26 点破）**：*"我不在乎什么最小可行修法或者是最大可行修法，
