@@ -86,10 +86,15 @@ t('④ ★ 语义：main.ts 传 config.dshHome，且 config.dshHome = 控制面�
   const m = rd(join(SRC, 'main.ts'))
   // 必须传下去
   assert.match(m, /\bdshHome:\s*config\.dshHome\b/, 'main.ts 应把 config.dshHome 传给 spawnGen')
-  // 必须是"控制面自己的 home"：dshHome: home（home 由 main.ts:378 的 envStr('DSH_HOME', …) 推）
-  assert.match(m, /\bdshHome:\s*home\b/, 'config.dshHome 应 = main.ts 里的 home（控制面自己的 home）')
-  // 而 home 的来源必须是 envStr('DSH_HOME', …) —— 即"和现役同一个 home"
+  // 必须是"控制面自己的 home"。★ R1.5 起 home 的派生收进了 resolvePlacement（单一求值点），
+  //   所以 config 里是 `dshHome: placement.home`；而 placement 必须由**控制面自己的 home**喂进去。
+  //   ⇒ 判据落在"语义链条"上（home 的来源 + placement 的入参），不落在某一种写法上。
+  assert.match(m, /\bdshHome:\s*(home|placement\.home)\b/, 'config.dshHome 应 = 控制面自己的 home（或由它派生的 placement.home）')
   assert.match(m, /const home = envStr\('DSH_HOME'/, 'home 应由 envStr(\'DSH_HOME\', …) 推出')
+  if (/\bdshHome:\s*placement\.home\b/.test(m)) {
+    // placement 必须是用 home 算出来的，而不是"每代一个 home"
+    assert.match(m, /const placement = resolvePlacement\(home\)/, 'placement 必须由控制面自己的 home 推出')
+  }
 })
 
 // ── ⑤ 防误用：不许把 childEnv 用在 spawnGen 上（盘查 §2.6） ──

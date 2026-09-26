@@ -14,7 +14,9 @@
  *   GEN_PORT_BASE       代端口基址，默认 3081
  *   HANDOVER_ADMIN_PORT_BASE 代内 handover-agent admin 基址，默认 31810
  *   DSH_HOME           （默认 %USERPROFILE%/.dsh）
- *   WORK_DIR            工作目录（协调+gen 底座），默认 {DSH_HOME}/switchboard
+ *   WORK_DIR            工作目录（协调+gen 底座），默认 {DSH_HOME}/switchboard。
+ *                       ★ R1.5：它必须落在 DSH_HOME 之下，否则**拒绝启动**（会话与协调状态会分家）。
+ *                       确要分开摆 ⇒ 显式设 ALLOW_SPLIT_WORK_DIR=1（会警告留痕）。
  *   WEB_PROFILE         ★ **控制剖面**：控制面自己的最小集所钉的那个 dsh profile（默认 web）。
  *                       ★ 它**不再**是"代的装配"：代跑哪个剖面由「代装配清单」的 `profile` 声明
  *                       （清单没声明才回落到这里）。见 `gen-assembly.ts` / `docs/gen-assembly.md`。
@@ -62,6 +64,69 @@ function envStr(k: string, d: string): string {
 function envInt(k: string, d: number): number {
   const v = process.env[k]
   return v && /^\d+$/.test(v) ? Number(v) : d
+}
+
+/**
+ * ★★★ 2026-09-26 R1.5：控制面自己的**摆放**（placement）—— 四个必须同源的值。
+ *
+ * 为什么要有这个函数（而不是像以前那样在 config 字面量里各自 `envStr` 推默认值）：
+ *   原来 `coordDir` / `workDir` / `genAssembly` 三个**各自**以 `home` 为默认值，
+ *   且 `envStr('WORK_DIR')` 被求值 **3 次**。⇒ "四个值一致"靠的是**没人设过 `WORK_DIR`**；
+ *   一旦有人设了指向别处的 `WORK_DIR`，就会出现
+ *     会话在 `<home>/sessions/`、租约/台账/boot.log 在 `WORK_DIR`
+ *   的**分裂态**，而两边各自都"正常"（沉默，最难查）。
+ *   ⇒ 这里把它变成**被检查的约束**：单一求值点 + 分裂则拒启动（可显式豁免）+ 打印指纹。
+ *
+ * ★ `ALLOW_SPLIT_WORK_DIR=1` 的立场：**默认禁止静默分裂**。逃生阀只给"我知道我在干什么"的
+ *   专家用，而且**必须在日志里留痕**（同门的先例：`isolated-instance --force` 就是从"逃生阀"
+ *   长成旁路的 ⇒ 这个阀要被审计，不能无声）。
+ */
+export function resolvePlacement(home: string): {
+  home: string
+  coordDir: string
+  workDir: string
+  genAssembly: string
+} {
+  const defBase = join(home, 'switchboard')
+  // ★ 单一求值点：`WORK_DIR` 全文件只在这里读一次。
+  const workDirBase = envStr('WORK_DIR', defBase)
+  const splitEnv = process.env.WORK_DIR
+  // 显式设了 WORK_DIR 且**不落在 home 之下** ⇒ 会话与协调状态会分家 ⇒ 默认拒启动。
+  const isSplit =
+    splitEnv !== undefined &&
+    splitEnv !== '' &&
+    !isUnder(workDirBase, home)
+  if (isSplit && process.env.ALLOW_SPLIT_WORK_DIR !== '1') {
+    console.error(
+      `[switchboard] ★★ 摆放不一致，拒绝启动：\n` +
+        `    DSH_HOME = ${home}\n` +
+        `    WORK_DIR = ${workDirBase}\n` +
+        `  ⇒ 会话落在 DSH_HOME/sessions/，而租约/台账/boot.log 落在 WORK_DIR\n` +
+        `  ⇒ "代的数据与日志分家"（两边各自都正常 ⇒ 沉默的最坏形态）。\n` +
+        `  如你确实要这样摆，请显式设 ALLOW_SPLIT_WORK_DIR=1（会在日志里留痕）。\n` +
+        `  设计依据：docs/r1.5-placement-shadow-dependency-design-2026-09-26.md`,
+    )
+    process.exit(1)
+  }
+  if (isSplit) {
+    console.warn(
+      `[switchboard] ★ 提醒：ALLOW_SPLIT_WORK_DIR=1 生效 —— WORK_DIR(${workDirBase}) 不在 DSH_HOME(${home}) 之下。`,
+    )
+  }
+  const genAssembly = envStr('GEN_ASSEMBLY', join(workDirBase, 'gen-assembly.json'))
+  // ★ 指纹：让"这代到底看的哪份 home/workDir"**不再靠推**（铁律 12/15：读数要有效）。
+  console.log(
+    `[switchboard] placement: home=${home} workDir=${workDirBase} genAssembly=${genAssembly}`,
+  )
+  return { home, coordDir: workDirBase, workDir: workDirBase, genAssembly }
+}
+
+/** `child` 是否落在 `parent` 之下（含相等）。用于判断 WORK_DIR 是否与 home 同源。 */
+export function isUnder(child: string, parent: string): boolean {
+  const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const c = norm(child)
+  const p = norm(parent)
+  return c === p || c.startsWith(p + '/')
 }
 
 function boot(config: CoordinatorConfig): void {
@@ -386,6 +451,15 @@ if (isMain) {
   process.on('uncaughtException', (e) => console.error('[switchboard] uncaughtException:', e?.message))
   process.on('unhandledRejection', (e) => console.error('[switchboard] unhandledRejection:', String((e as Error)?.message ?? e)))
 
+  // ★★★ 2026-09-26 R1.5：**摆放（placement）必须同源**。
+  //   四个值（home / coordDir / workDir / genAssembly）原来**各自**从 home 推默认值，
+  //   且 `envStr('WORK_DIR')` 被求值 3 次 ⇒ "今天一致"靠的是**没人设过 `WORK_DIR`**，不是约束。
+  //   一旦有人设了指向别处的 `WORK_DIR`：会话在 `<home>/sessions/`，而租约/台账/boot.log 在
+  //   `WORK_DIR` ⇒ **数据与日志分家**，且两边各自都"正常"（沉默的最坏形态）。
+  //   ⇒ 这里做三件事：① 单一求值点 ② 分裂则**拒启动**（可显式豁免）③ 打印四值指纹。
+  //   详见 docs/r1.5-placement-shadow-dependency-design-2026-09-26.md
+  const placement = resolvePlacement(home)
+
   const config: CoordinatorConfig = {
     nodeBin: existsSync(nodeBin) ? nodeBin : join(homedir(), '.dsh', '.tools', 'node', 'node.exe'),
     dshBin,
@@ -393,14 +467,14 @@ if (isMain) {
     portBase: envInt('GEN_PORT_BASE', 3081),
     adminBase: envInt('HANDOVER_ADMIN_PORT_BASE', 31810),
     // ★★ R1：控制面自己的 home，显式下传（原来是"靠继承 process.env"）。
-    //   ★ 与 workDir 同源（下面的 workDir 默认也从 home 推）⇒ 换训练场时两者**必须一起换**，
-    //     否则"代的数据与日志分家"。见 CoordinatorConfig.dshHome 的注释。
-    dshHome: home,
+    //   ★ 与 workDir 同源（R1.5 起由 resolvePlacement 保证，见上）⇒ 换训练场时
+    //     四个值**一起换**，不会出现"代的数据与日志分家"。
+    dshHome: placement.home,
     inspectPortBase: envInt('SWITCH_INSPECT_PORT_BASE', 32810),
-    coordDir: envStr('WORK_DIR', join(home, 'switchboard')),
-    workDir: envStr('WORK_DIR', join(home, 'switchboard')),
+    coordDir: placement.coordDir,
+    workDir: placement.workDir,
     // ★ 模型接入/key 池的**唯一入口**：一份清单文件。控制面自己不持有它。
-    genAssembly: envStr('GEN_ASSEMBLY', join(envStr('WORK_DIR', join(home, 'switchboard')), 'gen-assembly.json')),
+    genAssembly: placement.genAssembly,
     ttlMs: envInt('SWITCH_LEASE_TTL_MS', 10_000),
     readyTimeoutMs: envInt('SWITCH_READY_TIMEOUT_MS', 40_000),
     freezeTimeoutMs: envInt('SWITCH_FREEZE_TIMEOUT_MS', 20_000),
