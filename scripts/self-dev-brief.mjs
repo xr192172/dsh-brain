@@ -91,9 +91,76 @@ export const BRIEF_SPEC = [
 export const BANK_DIR_REL = 'evals/tasks'
 
 /**
- * ★ 扫描 scripts/ 下所有 .mjs 脚本，作为**事实来源**（比手抄清单可靠）。
- * 返回 `[relative, id]` 对数组（relative 去掉 scripts/ 前缀，id = 文件名去掉 .mjs）。
- * ★ 调用方必须对每个相对路径做真实存在检查——**"报了的必须真有"**与 docs 段纪律一致。
+ * ★★ **精选入口清单**（**不是** `scripts/` 目录倾倒）。
+ *
+ * ⚠️ 2026-09-26 回退说明：DSH 曾把它改成"扫 `scripts/` 全部 `.mjs` 并列出 165 条"
+ *   ⇒ **退回**。理由（三条，写在 `out/_verify-self-dev-1.md`）：
+ *   ① 用户要的是"**我们写的有意义的那些**"，不是目录列表；
+ *   ② 165 条里 159 条无 role ⇒ 对 agent 是**噪音**（它得先过滤 165 条才找到 8 条有用的）；
+ *   ③ `cmd` 里被硬拼了 `<args>` ⇒ **凭空造出命令形状**（`check-all` 根本不接参数）。
+ * ★ 但**保留**它那条真有益的机制：**每条 cmd 指向的脚本必须真实存在，缺的显形 `missing`**
+ *   —— 这才是候选 A 真正要的（"手抄清单会静默过期"的解药）。
+ */
+export const TOOL_SPEC = [
+  {
+    id: 'task-bank',
+    cmd: 'node scripts/task-bank.mjs list',
+    role: '列题库（agent-agnostic）',
+    script: 'scripts/task-bank.mjs',
+  },
+  {
+    id: 'task-bank-show',
+    cmd: 'node scripts/task-bank.mjs show <题id>',
+    role: '看一道题的题面 + 判据口径',
+    script: 'scripts/task-bank.mjs',
+  },
+  {
+    id: 'task-bank-verdict',
+    cmd: 'node scripts/task-bank.mjs verdict <题id>',
+    role: '该题的重放轨迹 + 报警数',
+    script: 'scripts/task-bank.mjs',
+  },
+  {
+    id: 'arm-up',
+    cmd: 'node scripts/arm-up.mjs <臂名>',
+    role: '★ 另起一代（自己的 DSH_HOME + 端口，**不 flip**）—— "另起一个 agent"的原语',
+    script: 'scripts/arm-up.mjs',
+  },
+  {
+    id: 'run-experiment',
+    cmd: 'node scripts/run-experiment.mjs <题id> --arm <臂名>',
+    role: '★ 闭环：取题→起一代→发题→收卷→判定（报警则 exit 1）',
+    script: 'scripts/run-experiment.mjs',
+  },
+  {
+    id: 'skill-sieve',
+    cmd: 'node scripts/skill-sieve.mjs --in <skill_tree.json>',
+    role: '筛：给 skill 分级 + 出融合候选（只判定 + 记账，绝不删）',
+    script: 'scripts/skill-sieve.mjs',
+  },
+  {
+    id: 'skill-factory',
+    cmd: 'node scripts/skill-factory.mjs --in <skill_tree.json>',
+    role: '工厂：一等 skill ⇒ agent 规格（只出规格，不注册）',
+    script: 'scripts/skill-factory.mjs',
+  },
+  {
+    id: 'self-dev-brief',
+    cmd: 'node scripts/self-dev-brief.mjs [--json] [--for-arm <臂名>]',
+    role: '★ 本简报自身（**这就是"文档在哪"的入口**）',
+    script: 'scripts/self-dev-brief.mjs',
+  },
+  {
+    id: 'check-all',
+    cmd: 'node scripts/check-all.mjs',
+    role: '常驻守卫总入口',
+    script: 'scripts/check-all.mjs',
+  },
+]
+
+/**
+ * ★ 扫描 `scripts/` 下所有 `.mjs`（**事实来源**，用于核验精选清单、以及报告"仓库里到底有多少脚本"）。
+ * ★ 它**不直接进 `tools` 段**（那会变成目录倾倒）；它只服务于**存在性核验**。
  */
 export function scanActualTools(wt) {
   const scriptsDir = path.join(wt, 'scripts')
@@ -101,45 +168,24 @@ export function scanActualTools(wt) {
   if (!fs.existsSync(scriptsDir)) return rels
   for (const name of fs.readdirSync(scriptsDir).sort()) {
     if (!name.endsWith('.mjs')) continue
-    const id = name.slice(0, -4)
-    rels.push({ relative: `scripts/${name}`, id })
+    rels.push({ relative: `scripts/${name}`, id: name.slice(0, -4) })
   }
   return rels
 }
 
 /**
- * 从事实扫描结果派生出简报里看到的 `tools` 段。
- * 每条 cmd 从 relative 派生（不再手抄），role 来自 BRIEF_ROLE_MAP（如缺则用空字符串占位）。
- * ★ 与 BRIEF_SPEC 同类纪律：**报告的内容必须真实存在**，而不是凭空造出来的。
+ * ★★ **精选清单 + 存在性核验**（候选 A 的正解）：
+ *   每条 `TOOL_SPEC` 原样输出（cmd 是人手写的、**含真实参数形状**），
+ *   **只补一个 `missing` 标记**：它指向的脚本不存在 ⇒ 显形（"我报了的必须真有"）。
  */
-export function makeTools(actualTools, wt) {
-  return actualTools.map(({ relative, id }) => ({
-    id,
-    cmd: `node ${relative} <args>`,
-    role: TOOL_ROLE_MAP[id] ?? '',
-  }))
+export function makeTools(wt) {
+  return TOOL_SPEC.map((t) => {
+    const p = path.join(wt, t.script)
+    const exists = fs.existsSync(p)
+    return { id: t.id, cmd: t.cmd, role: t.role, script: t.script, missing: !exists }
+  })
 }
 
-/**
- * BRIEF_ROLE_MAP：让自动派生路径的 role 与手写 BRIEF_SPEC 的 role 保持一致，
- * 避免"同一功能两份 role"漂移。
- * ★ 缺项的 id 会拿到空字符串——这是故意的（显形"还没写 role"），不是静默忽略。
- */
-export const TOOL_ROLE_MAP = {
-  'task-bank': '列题库（agent-agnostic）',
-  'task-bank-show': '看一道题的题面 + 判据口径',
-  'task-bank-verdict': '该题的重放轨迹 + 报警数',
-  'arm-up': '★ 另起一代（自己的 DSH_HOME + 端口，**不 flip**）—— "另起一个 agent"的原语',
-  'run-experiment': '★ 闭环：取题→起一代→发题→收卷→判定（报警则 exit 1）',
-  'skill-sieve': '筛：给 skill 分级 + 出融合候选（只判定 + 记账，绝不删）',
-  'skill-factory': '工厂：一等 skill ⇒ agent 规格（只出规格，不注册）',
-  'check-all': '常驻守卫总入口',
-}
-
-/** ★ 原手抄清单退化为 TOOL_ROLE_MAP 的 seed：自动派生时，role 从 map 来；
- * 新增脚本时，scanActualTools 自动纳入、makeTools 自动填 role（缺项显形为空字符串）。
- * 这份 map 只用于 role 派生，cmd 一律从实际文件名派生——**这样脚本改名或新增时 brief 自动跟上**。 */
-const TOOL_SPEC = Object.entries(TOOL_ROLE_MAP).map(([id, role]) => ({ id, role }))
 
 /**
  * ★★ **纯函数**：产出自开发简报。**不 spawn、不写盘**（判据才能直接测）。
@@ -226,18 +272,11 @@ export function buildBrief({ wt = WT, arm = null, allArms = null, docsFile = nul
     docs: sections,
     tasks,
     bank: { dir: BANK_DIR_REL, count: tasks.length, missing: bankMissing },
-    // ★ 工具段从实际 scripts/ 目录扫描 + 存在性检查派生（不是手抄）——
-    //   任何新脚本会自动纳入、任何删除/改名会自动显形 missing。
-    tools: (() => {
-      const actual = scanActualTools(wt)
-      const tools = makeTools(actual, wt)
-      // 逐条检查存在：缺的标 missing（与 docs 段同一纪律："报了的必须真有"）
-      for (const t of tools) {
-        const abs = path.join(wt, t.cmd.replace(/^node /, '').split(' ')[0])
-        t.missing = !fs.existsSync(abs)
-      }
-      return tools
-    })(),
+    // ★★ 工具段 = **精选入口清单 + 存在性核验**（**不是** `scripts/` 目录倾倒，见 `TOOL_SPEC` 注释）。
+    //   任何一条指向不存在的脚本 ⇒ 显形 `missing`（"我报了的必须真有"）。
+    tools: makeTools(wt),
+    // ★ 顺带报"仓库里到底有多少脚本"（**读数，不是清单**）——防"精选清单过期"时无从察觉。
+    scriptsOnDisk: scanActualTools(wt).length,
     mgmt,
     // ★ 显形：哪几份文档实际上没写（**不是错误，是事实**）
     missingDocs,
@@ -268,8 +307,9 @@ export function renderBrief(b) {
   L.push(`- 目录：\`${b.bank.dir}/\`　共 **${b.tasks.length}** 道`)
   for (const t of b.tasks) L.push(`- \`${t.id}\`　⇒ ${t.taskMd}`)
   L.push('')
-  L.push('## 三、手在哪（工具入口）')
-  for (const t of b.tools) L.push(`- \`${t.cmd}\`　—— ${t.role}`)
+  L.push('## 三、手在哪（**精选入口**，不是目录清单）')
+  L.push(`> 仓库里现有 **${b.scriptsOnDisk}** 个脚本；下面只列**真正会被你用到**的 ${b.tools.length} 个入口。`)
+  for (const t of b.tools) L.push(`- \`${t.cmd}\`${t.missing ? '　⇒ **★ 脚本不存在（missing）**' : ''}　—— ${t.role}`)
   L.push('')
   L.push('## 四、管理面（绕开 Shell 的那条路）')
   L.push(`- 臂：**${b.mgmt.arm}**　管理面：\`${b.mgmt.admin}\``)
@@ -323,24 +363,40 @@ function selftest() {
   const frozen = { ...bB, mgmt: { ...bB.mgmt, admin: bA.mgmt.admin } }
   check('⑨ 消融：端口写死 ⇒ ④ 变红', frozen.mgmt.admin === bA.mgmt.admin, '写死即失去派生')
 
-  // ⑩ ★★ 消融：清空 TOOL_ROLE_MAP（role 全部退化为空字符串）⇒ ⑦ 的 role 必须消失
-  const origMap = { ...TOOL_ROLE_MAP }
-  for (const k of Object.keys(TOOL_ROLE_MAP)) delete TOOL_ROLE_MAP[k]
-  const bNoRole = buildBrief({})
-  const roleStripped = bNoRole.tools.every((t) => t.role === '')
-  // 恢复
-  Object.assign(TOOL_ROLE_MAP, origMap)
-  check('⑩ 消融：清空 role map ⇒ 所有 cmd role 必须为空字符串', roleStripped, `${bNoRole.tools.filter((t) => t.role === '').length}/${bNoRole.tools.length} 条`)
+  // ═══ ⑩⑪：**回归判据**（2026-09-26 回退后新增）═══
+  // ⚠️ 说明：DSH 做的⑩（"清空 role map ⇒ role 为空"）与⑪b（"扫空目录 ⇒ 空数组"）是**同义反复**
+  //   —— 输入被清空时输出当然为空，**不含信息量**（铁律 21 的"假消融"同族）。
+  //   已替换为下面两条**真会翻**的判据。
 
-  // ⑪ 消融：造一个不存在的脚本名 ⇒ 必须显形 missing（与 docs 段同一纪律："报了的必须真有"）
-  const fakeTool = { id: 'fake-nonexistent-script', cmd: 'node scripts/fake-nonexistent-script.mjs <args>', role: '', missing: true }
-  check('⑪ 消融：假脚本名必须显形 missing', fakeTool.missing === true, 'missing=true 是预期行为')
-  // ⑪b 真正验证"brief 的工具段来自扫描，不是手抄清单"：扫描一个没有 .mjs 的空目录 ⇒ tools=[]
-  const emptyDir = path.join(WT, 'evals', '__brief_test_empty__')
-  try { if (!fs.existsSync(emptyDir)) fs.mkdirSync(emptyDir, { recursive: true }) } catch {}
-  const bEmpty = buildBrief({ wt: emptyDir })
-  check('⑪b 扫描空目录 ⇒ tools=[]（证明工具来自扫描而非手抄）', bEmpty.tools.length === 0, `tools.length=${bEmpty.tools.length}`)
-  try { fs.rmdirSync(emptyDir) } catch {}
+  // ⑩ ★★ **精选入口不许退化成目录倾倒**（这正是 DSH 那版犯的错，必须被这条挡住）
+  const tools = b.tools
+  const curatedOk = tools.length > 0 && tools.length <= 20 && tools.every((t) => t.role && t.role.trim().length > 0)
+  check(
+    '⑩ ★★ tools 必须【精选且每条有 role】（防"目录倾倒"+防"空 role 噪音"）',
+    curatedOk,
+    `${tools.length} 条，全部有 role（仓库里共 ${b.scriptsOnDisk} 个脚本）`,
+  )
+  // ⑩b 消融：把 tools 换成"扫全目录" ⇒ ⑩ 必须变红（证明⑩真能挡住那个退化）
+  {
+    const dumped = scanActualTools(b.repo).map((x) => ({ id: x.id, cmd: `node ${x.relative}`, role: '' }))
+    const dumpedPasses = dumped.length <= 20 && dumped.every((t) => t.role.trim().length > 0)
+    check('⑩b ★ 消融：改成"扫全目录" ⇒ ⑩ 变红（证明⑩挡得住那个退化）', dumped.length > 20 && dumpedPasses === false, `倾倒 ${dumped.length} 条、且 role 全空`)
+  }
+  // ⑪ ★★ **cmd 里不许凭空造 `<args>`**（DSH 那版给每条都硬拼 `<args>`，`check-all` 根本不接参数）
+  const argsOk = tools.every((t) => !/<args>/.test(t.cmd) || /<题id>|<臂名>|<skill_tree|<runId|\[--/.test(t.cmd))
+  check('⑪ ★ cmd 不许凭空拼 `<args>`（占位符必须说清是什么）', argsOk, tools.map((t) => t.cmd).join(' | ').slice(0, 140))
+  // ⑪b ★ **精选清单过期必须显形**：造一份指向不存在脚本的清单 ⇒ makeTools 必须标 missing
+  {
+    const abs = path.join(b.repo, 'scripts', '__no_such_script__.mjs')
+    const saved = TOOL_SPEC.push({ id: '__probe__', cmd: 'node scripts/__no_such_script__.mjs', role: '探针', script: 'scripts/__no_such_script__.mjs' })
+    const probed = makeTools(b.repo).find((t) => t.id === '__probe__')
+    TOOL_SPEC.pop()
+    check(
+      '⑪b ★★ 精选清单指向不存在的脚本 ⇒ 必须显形 missing（这才是候选 A 的解药）',
+      !!probed && probed.missing === true && !fs.existsSync(abs),
+      `missing=${probed?.missing}`,
+    )
+  }
 
   const pass = res.filter((x) => x.ok).length
   const total = pass === res.length
