@@ -248,7 +248,29 @@ const selftest = async () => {
   const badAlive = pidAlive(0) && pidAlive(-1) && pidAlive('abc')
   const pidOk = selfAlive === true && ghostAlive === false && badAlive === false
   console.log(`  ${pidOk ? 'ok  ' : 'FAIL'} 僵尸 lease 判据：pidAlive(自己)=${selfAlive}（须 true）/ pidAlive(99999999)=${ghostAlive}（须 false）/ 非法输入=${badAlive}（须 false）`)
-  const total = ok && !row4.ok && !row1.ok && !r7u.ok && !r7s.ok && kindDistinguished && pidOk
+
+  // ★★ 2026-09-26 加：**控制面优先**消融测试（真事故：磁盘 lease 陈旧，但控制面内存正确）
+  //   ★ 输入必须自合成，不许引用外部真实 pid（否则测试依赖机器状态，一但外部进程死就假红）。
+  //   真实读数（仅用于报告说明，不作为判据输入）：arm A 现场 adminPid=16520（活）/ filePid=9224（死）。
+  const LIVE_PID = process.pid     // ★ 测试自己，保证活着 —— 不依赖机器上其他进程的状态
+  const DEAD_PID = 99999999        // ★ 保证不存在（与 pidAlive(99999999) 同一惯例）
+
+  // 消融 A（绿）：控制面答得到 + 控制面 pid 活着 ⇒ running=true（source=admin）
+  const greenA = alreadyRunning({ someoneThere: true, adminHttp: 200, adminPid: LIVE_PID, filePid: DEAD_PID })
+  const greenAMsg = `  ${greenA.running && greenA.source === 'admin' ? 'ok  ' : 'FAIL'} 消融A（绿）：adminHttp=200+adminPid=live ⇒ running=${greenA.running}(source=${greenA.source})`
+  console.log(greenAMsg)
+
+  // 消融 A（红）：去掉控制面优先（adminHttp=0）+ 文件 pid 已死 ⇒ 必须 running=false
+  const redA = alreadyRunning({ someoneThere: true, adminHttp: 0, adminPid: null, filePid: DEAD_PID })
+  const redAMsg = `  ${!redA.running ? 'ok  ' : 'FAIL'} 消融A（红）：去掉控制面优先 + filePid 死 ⇒ running=${redA.running}（须 false）`
+  console.log(redAMsg)
+
+  // 消融 B（治"误杀"）：判据不输出"去停某 pid"（source 不是 stop-*）
+  const noStopAction = !['stop-admin', 'stop-file'].includes(greenA.source)
+  const bMsg = `  ${noStopAction ? 'ok  ' : 'FAIL'} 消融B：source 不是 "stop-*"（本棒不输出"去停谁"）`
+  console.log(bMsg)
+
+  const total = ok && !row4.ok && !row1.ok && !r7u.ok && !r7s.ok && kindDistinguished && pidOk && greenA.running && greenA.source === 'admin' && !redA.running && noStopAction
   console.log(`\n结果：${total ? 'PASS' : 'FAIL'}`)
   return total ? 0 : 1
 }
@@ -340,6 +362,26 @@ export function pidAlive(pid) {
   }
 }
 
+/**
+ * ★★ 控制面优先判定：是否"视作已在跑"。
+ *
+ * 输入全是"读数"（数字/布尔/null），不读 fs、不发包，是纯函数。
+ * 判定优先级：
+ *   1. 控制面答得到（http=200）且控制面说的 pid 活着 ⇒ source='admin'，running=true
+ *   2. 控制面拿不到，退而看磁盘 lease：文件里 pid 活着 ⇒ source='lease-file'，running=true
+ *   3. 都不满足 ⇒ source 区分"端口被占（别人）"和"真正空闲"
+ *
+ * ★ 这一条的消融测试在 `selftest()` 里：把优先级 1 去掉（只看 filePid），
+ *   真实读数下 `running` 必须从 true 变 false（治"误拒"）。
+ */
+export function alreadyRunning({ someoneThere, adminHttp, adminPid, filePid }) {
+  // 控制面优先：答得到且 pid 活着 ⇒ 权威来源
+  if (adminHttp === 200 && adminPid != null && pidAlive(adminPid)) return { running: true, source: 'admin' }
+  // 控制面拿不到 ⇒ 才看文件（只读）：文件里 pid 活着 ⇒ 也算已在跑
+  if (filePid != null && pidAlive(filePid)) return { running: true, source: 'lease-file' }
+  return { running: false, source: someoneThere ? 'port-busy-no-owner' : 'free' }
+}
+
 const leaseInfo = (() => {
   // ★ 2026-09-25 修：lease 在 **`<root>/dshhome/switchboard/lease.json`**（**不在** `<gen>/lease.json`）。
   //   我第一版找 `<gen>/lease.json` ⇒ 恒 false ⇒ **把自己的实例误判成"别人占着"⇒ 误拒**。
@@ -355,6 +397,18 @@ const leaseInfo = (() => {
 const rootHasLease = !!leaseInfo.gen
 const preFront = await rpc(frontUrl, 'session.list')
 const preAdmin = await get(`${adminUrl}/?cmd=status`)
+// ★★ 控制面优先：读控制面自己说的那个 activeGen.pid（权威来源）。
+//   如果控制面答得到 + pid 活着 ⇒ 这就是"活着的人"，不管磁盘 lease 说什么。
+//   为什么优先于磁盘：实测臂 A 的 lease.json 写 pid=9224（死），但控制面内存里的 pid=16520（活）⇒
+//   磁盘是陈旧副本，控制面才是真相。
+const adminInfo = (() => {
+  try {
+    const j = JSON.parse(preAdmin.text)
+    const pid = j?.lease?.activeGen?.pid ?? null
+    return { http: preAdmin.http, ok: preAdmin.http === 200, pid }
+  } catch { return { http: preAdmin.http, ok: false, pid: null } }
+})()
+const adminPid = adminInfo.pid ?? null
 const someoneThere = preFront.http === 200 || preAdmin.http === 200
 if (!LIVE_MODE && someoneThere && !rootHasLease) {
   console.error(
@@ -364,27 +418,51 @@ if (!LIVE_MODE && someoneThere && !rootHasLease) {
   )
   process.exit(2)
 }
-// ★★★ 僵尸 lease：有 lease，但**它指的 pid 已经不在跑** ⇒ 拒跑并**指名道姓**（别让它默默继续）。
-//   为什么必须拒：继续下去会"重新起一代"，而端口实际被**另一个还活着的进程**握着 ⇒
-//   新代绑不上池、当场死掉、lease 又被改写成新的尸体 ⇒ **僵尸状态自我延续**（实测如此）。
-if (!LIVE_MODE && leaseInfo.exists && rootHasLease && !leaseInfo.alive) {
-  const holder = leaseInfo.pid ? `（lease 说 pid=${leaseInfo.pid}）` : ''
-  console.error(
-    `[失败] **僵尸 lease**：${path.join(sbDir, 'lease.json')} 指向 gen=${leaseInfo.gen}${holder}，\n` +
-      `  但**那个进程已经不在运行** ⇒ 若继续"起一代"，新代多半绑不上端口（旧代还没退）⇒ 又留一个尸体。\n` +
-      `  ⇒ 先收拾干净再跑：把仍在监听本段端口的进程停掉（本段的 front=${ports.front} pool=:${ports.pool}），\n` +
-      `     或删掉 ${path.join(sbDir, 'lease.json')} 后重跑（★ 只在确认没有活着的旧代时才这么做）。`,
-  )
-  process.exit(2)
-}
-if (someoneThere) {
-  const aliveNote = LIVE_MODE ? '' : `，且本 root 有 lease${leaseInfo.alive ? '（pid 活着）' : ''}`
-  console.log(`  （前置：已在应答${aliveNote} ⇒ 确认是**本实例**，将继续；② 会跳过启动）`)
+// ★★★ 控制面优先：不再以磁盘 lease 的 pid 死活作为拒跑判据。
+//   原因（实测臂 A 真实事故）：
+//   · 磁盘 lease.json 写 pid=9224（已死），但控制面内存里 pid=16520（活着）
+//   · 旧判据把"文件陈旧"误判成"实例坏了"，拒跑并叫人去杀健康进程
+//   → 新判据：控制面答得到 + pid 活着 ⇒ 视作已在跑，跳过启动（不管磁盘说什么）
+//   ★ 用纯函数 alreadyRunning() 计算，避免内联 if 链无法消融的问题。
+const runningStatus = alreadyRunning({
+  someoneThere,
+  adminHttp: adminInfo.http,
+  adminPid: adminInfo.pid,
+  filePid: leaseInfo.pid,
+})
+const isAlreadyRunning = runningStatus.running
+
+// 前置诊断输出（仅臂模式）
+if (!LIVE_MODE && someoneThere) {
+  if (runningStatus.source === 'admin') {
+    // 控制面权威：活着的就是活着的，跳过准备+启动
+    console.log(`  （前置：控制面应答且 pid=${adminInfo.pid} 活着 ⇒ 视作**本实例已在跑**，跳过①②，只做自检）`)
+  } else if (runningStatus.source === 'lease-file') {
+    console.log(`  （前置：控制面未应答，但磁盘 lease pid=${leaseInfo.pid} 活着 ⇒ 视作**本实例已在跑**，跳过①②，只做自检）`)
+  } else if (runningStatus.source === 'port-busy-no-owner') {
+    const logHint = `★ 根因诊断线索（读这两份日志就能确认）：\n` +
+      `    · ${path.join(root, 'dshhome', 'logs', 'switchboard-run.log')}  看「lease recovery」和「gen EXIT」\n` +
+      `    · ${path.join(sbDir, leaseInfo.gen ?? 'gen-???', 'boot.log')}  看「EADDRINUSE」或「连续 N 次拿不到」\n` +
+      `    ★ arm-up 不触碰 lease.json（单一写者职责归 switchboard，见 lease.ts:6）。\n` +
+      `    新起的一代会在 main.ts:178-189 的 stale-lease recovery 里清理这个文件。`
+    if (adminInfo.ok && adminPid && !pidAlive(adminPid)) {
+      // 控制面答得到但 pid 已死：控制面自己状态脏
+      console.warn(`  （警告：控制面应答但 activeGen.pid=${adminPid} 已不在运行 ⇒ 控制面内部状态陈旧）\n` +
+        `    ★ arm-up 不触碰 lease.json。建议走 switchboard 内部的 handover/clear 通道清理状态。\n` +
+        `    ${logHint}`)
+    } else {
+      // 控制面无应答 + 文件 pid 也死：真正的"无人区"，但文件陈旧
+      console.warn(`  （警告：端口被占但租约陈旧（admin 无应答 + file.pid=${leaseInfo.pid} 已死）⇒ ${logHint}`)
+    }
+  } else {
+    // free
+    console.log(`  （前置：无应答 + 无 lease ⇒ 正常准备+启动）`)
+  }
 }
 
 // ── 现役：不需要"准备"（不复制 profile、不带臂身份）⇒ 已在跑就跳过，否则 relaunch ──
 if (LIVE_MODE && !hasFlag('--no-start')) {
-  if (someoneThere) {
+  if (isAlreadyRunning) {
     console.log('\n-- 起 —— **跳过**：现役已在应答（只做自检）--')
   } else {
     console.log('\n-- 起（现役：relaunch，不带臂身份）--')
@@ -409,10 +487,10 @@ if (!hasFlag('--no-start') && !LIVE_MODE) {
   }
 
   // ② 起（★ 用派生出的 env 起，不经人手）
-  //    ★★ 用**已核过 lease 的** `someoneThere`（上面那段前置断言），不再自己重新探一遍 ——
-  //    语义差别很大：只有"本 root 有 lease"才算"本实例已在跑"。
-  if (someoneThere) {
-    console.log('\n-- ② 起 —— **跳过**：本实例已在应答（lease 已核 ⇔ 是它自己；只做自检，不重启）--')
+  //    ★★ 用**控制面优先**的 `isAlreadyRunning`：控制面答得到 + pid 活着 = 已在跑。
+  //    旧判据只看 "someoneThere && lease.alive"，磁盘陈旧时会误拒（见事故）。
+  if (isAlreadyRunning) {
+    console.log('\n-- ② 起 —— **跳过**：控制面确认已在应答（pid=' + adminPid + '；只做自检，不重启）--')
   } else {
     console.log('\n-- ② 起（用**准备阶段吐出的**身份/端口 env 起，不经人手）--')
     // ★★ 身份与端口**只信准备阶段那一处**（本脚本不再自己算一遍 deny —— 两套算法必然漂移）。
