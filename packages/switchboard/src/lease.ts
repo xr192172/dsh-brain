@@ -10,6 +10,19 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { LeaseState } from './handover-protocol.js'
 
+/**
+ * 空租约模板。
+ *
+ * ⚠️ ⚠️ **不要往里加数组 / 会被就地 mutate 的对象字段。**
+ * `load()` 用 `{ ...EMPTY }` **浅拷贝**返回它 ⇒ 任何数组字段都会在**同进程所有实例间共享**
+ * （pool.ts 就因此被咬过：`others: []` 被浅拷贝共享 ⇒ 每次 `new` 就多出幻影条目，见 pool.ts 头注）。
+ *
+ * ★ 当前安全的**唯一原因**是 `LeaseState` 全是原始值，且 `activeGen` 每次都是
+ *   **整体替换**（`s.activeGen = { gen, port, pid }`）而**从不就地改写** ——
+ *   所以浅拷贝即使共享到 `activeGen`，也没有任何一处会往共享对象里塞东西。
+ * ⇒ **这个"安全"是脆的**：一旦有人把 `activeGen` 改成 `s.activeGen.port = x`，或加一个数组字段，
+ *   就会立刻复现 pool.ts 那类跨实例污染。加字段前请先改成 `freshEmpty()` 工厂形态。
+ */
 const EMPTY: LeaseState = {
   generation: 0,
   activeGen: { gen: '', port: 0, pid: 0 },

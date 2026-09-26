@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { LeaseStore } from './lease.js'
+import { PoolStore, type GenRef, type PoolState } from './pool.js'
 import { sealPlan } from './drain.js'
 import type { FrontDoor } from './proxy.js'
 import { spawnGen, type SpawnedGen, type SpawnOptions } from './spawner.js'
@@ -142,6 +143,14 @@ export class Coordinator {
   private stage: HandoverStage = 'idle'
   private genCounter = 0
   private lastResult: HandoverResult | null = null
+  /**
+   * ★★ 哨兵池（用户裁决 2026-09-26）：`primary` / `sentinel` / `others`。
+   * 与 `lease.json` **同族但分开**：`primary` 的真相在 `lease.json`（只读派生），
+   * 池自己只持 `sentinel` / `others`（见 `pool.ts` 头部为什么另立文件的说明）。
+   */
+  private readonly pool: PoolStore
+  /** ★ 立哨建立但**尚未提拔**的待命代（`sentinel` 的进程句柄；提拔时用它走 flip 流程）。 */
+  private pending: Cage | null = null
 
   constructor(
     private readonly cfg: CoordinatorConfig,
@@ -150,6 +159,7 @@ export class Coordinator {
   ) {
     mkdirSync(cfg.coordDir, { recursive: true })
     this.lease = new LeaseStore(cfg.coordDir)
+    this.pool = new PoolStore(cfg.coordDir)
     const stateFile = join(cfg.coordDir, 'state.jsonl')
     this.stateLog = (r: StateRecord) => appendFileSync(stateFile, JSON.stringify(r) + '\n', 'utf8')
     this.front = front
@@ -160,6 +170,8 @@ export class Coordinator {
     if (!this.lease.isHeld()) {
       this.lease.grant(active.inst.gen, active.inst.port, active.inst.pid, cfg.ttlMs, -1, 'replay')
     }
+    // ★ 池的 `primary` 是**从 lease 只读派生**的，不在此自持真相（pool.ts 头部）。
+    this.pool.syncPrimary({ gen: active.inst.gen, port: active.inst.port, pid: active.inst.pid })
   }
 
   get stageName(): HandoverStage {
@@ -179,6 +191,175 @@ export class Coordinator {
   /** 下一次换代将使用的 slot（1 = bootstrap 代，换代从 2 起）——供 `?cmd=assembly` 预测下一代端口。 */
   get nextSlot(): number {
     return this.genCounter + 2
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // ★★★ 哨兵模型（用户裁决 2026-09-26）：`?cmd=pool` / `?cmd=stand` / `?cmd=promote`
+  //
+  // 用户原话（逐字，见 docs/launcher-sentinel-impl-2026-09-26.md §0）：
+  //   *"就是提拔当前的这个为哨兵，然后后面你开其他的哨兵，都只是下一代，
+  //     然后只有当前这一代选择退役了之后，才提拔那个当前哨兵选定的下一代哨兵作为新的主代。"*
+  //   *"立哨和提拔肯定要拆呀，不拆的话那岂不是一给他立好了他就要自动提拔了。"*
+  //   *"只有一个端口是，就是 3080 是主端……其他的页面的话保留端口信息即可……
+  //     但是不要求强制提拔到 3080 前门。"*
+  //
+  // ⇒ 三条不变量：
+  //   · **I-a** 任何时刻只有一个 `primary` 在服役；
+  //   · **I-b** `stand` **绝不 flip**（哨兵不占前门，只保留端口 —— 自己的 `:<port>` 本来就可达）；
+  //   · **I-c** `promote` **不 spawn** —— 它只把"已选定的 sentinel"换上去（不判断哪个更好）。
+  // ────────────────────────────────────────────────────────────────────────────
+
+  /** `?cmd=pool` 的只读投影：主代 / 被选定的下一代 / 其余哨兵（都带端口）。 */
+  get poolView(): Readonly<PoolState> {
+    return this.pool.current
+  }
+
+  /** `primary` 的真相在 `lease.json`（只读派生）——池不自己记，避免两处真相打架。 */
+  private syncPoolPrimary(): void {
+    const cur = this.lease.current.activeGen
+    this.pool.syncPrimary(cur && cur.gen ? { gen: cur.gen, port: cur.port, pid: cur.pid } : null)
+  }
+
+  /**
+   * ★★ **立哨**（`?cmd=stand`）：spawn 一代并**停在待命**。
+   *
+   * ★ **本方法绝不 `setActive`**（I-b）。这是用户裁决 4 的物理落点：
+   *   "不要求强制提拔到 3080 前门" ⇒ 立哨后前门指向**不变**。
+   * ★ 立哨后**必须等一个独立的 `promote`** 才会换代（裁决 5：不拆就等于自动提拔）。
+   *
+   * 与 `handover` 的关系：复用同一段 spawn + ready 逻辑（`spawnStaging`），
+   * 但**不**走 freeze/promote/flip/verify/retire —— 那半边留给 `promoteSentinel`。
+   */
+  async stand(profileOverride?: string): Promise<HandoverResult> {
+    this.stage = 'spawn'
+    try {
+      const b = await this.spawnStaging(profileOverride)
+      if (!b) {
+        const bad: HandoverResult = {
+          t: Date.now(),
+          result: 'aborted',
+          note: '立哨失败：新代未就绪（旧主代未受影响，前门未动）',
+          reason: 'b-not-ready',
+        }
+        this.recordResult(bad)
+        return bad
+      }
+      // 记进池：sentinel 空则成为"被选定的下一代"，否则进 others
+      this.pool.stand({ gen: b.inst.gen, port: b.inst.port, pid: b.inst.pid })
+      this.pending = b
+      this.stage = 'idle'
+      const r: HandoverResult = {
+        t: Date.now(),
+        result: 'success',
+        note: `已立哨 → ${b.inst.gen}（端口 :${b.inst.port}，★ 未提拔：前门仍指向 ${this.active.inst.gen}）`,
+        gen: b.inst.gen,
+      }
+      this.recordResult(r)
+      return r
+    } finally {
+      this.stage = 'idle'
+    }
+  }
+
+  /**
+   * ★★ **提拔**（`?cmd=promote`）：把池里"已选定的下一代"换上去（I-c：**不 spawn**）。
+   *
+   * ★ 只有在哨兵刚才被 `stand` 出来（`pending` 在）时才走完整 flip 流程；
+   *   若 `pending` 不在（例如控制面重启后池里还有 sentinel），**拒绝并说明**——
+   *   绝不"猜一个代去 flip"（那正是"算哪个最好"，模型里没有这一步）。
+   */
+  async promoteSentinel(): Promise<HandoverResult> {
+    if (!this.pending) {
+      const r: HandoverResult = {
+        t: Date.now(),
+        result: 'aborted',
+        note: '池里的 sentinel 不是本进程立的（可能控制面重启过）⇒ 拒绝提拔：不猜代、不 flip。请先 `?cmd=stand` 立新哨。',
+        reason: 'no-pending-sentinel',
+      }
+      this.recordResult(r)
+      return r
+    }
+    const b = this.pending
+    this.front.setLocked(true)
+    try {
+      const cfg = this.cfg
+      this.stage = 'promote'
+      if (!pidAliveFrom(b.inst.pid)) {
+        this.pool.drop(b.inst.gen)
+        this.pending = null
+        await this.abort(b, 'promote-precheck-dead')
+        return this.lastResult as HandoverResult
+      }
+      // ★ 旧代可能已不在（例如被外部退役）⇒ 按强切处理，不挂死。
+      let fr: FreezeReply | null = null
+      try {
+        fr = await this.active.client.freeze(cfg.freezeTimeoutMs)
+      } catch {
+        fr = null
+      }
+      const frRaw = fr
+      if (!fr || !fr.static) {
+        this.record('promote: freeze 未达静止点 ⇒ 走强切（旧代未停写 ⇒ 稍后 seal 强杀）')
+      }
+      const seal = sealPlan(fr?.quiesced === true)
+      this.record('seal: ' + (seal.killNow ? 'KILL-OLD' : 'keep-old') + ' — ' + seal.why)
+
+      const frontSid = this.front.lastSessionId || ''
+      const primarySid = frRaw?.primarySessionId ?? ''
+      const freezeSid = frRaw && frRaw.sessions && frRaw.sessions.length > 0 ? [...frRaw.sessions].sort((a, b2) => b2.seq - a.seq)[0].id : ''
+      const resumeId = (primarySid || frontSid || freezeSid) as string | undefined
+      this.record('resume-session=' + (resumeId ?? 'none'))
+
+      const token = (b.spawned as { leaseToken?: string }).leaseToken ?? ''
+      try {
+        await b.client.promote(token, b.inst.gen, resumeId)
+      } catch (e) {
+        this.record('promote failed: ' + (e instanceof Error ? e.message : String(e)))
+        await this.abort(b, 'promote-crash')
+        return this.lastResult as HandoverResult
+      }
+
+      this.stage = 'flip'
+      this.lease.grant(b.inst.gen, b.inst.port, b.inst.pid, cfg.ttlMs, fr?.lastSeq ?? 0, 'replay', token || undefined)
+      const old = this.swapActive(b)
+      b.inst.role = 'active'
+      b.inst.state = 'active'
+      this.record('flip to ' + b.inst.gen)
+
+      this.stage = 'verify'
+      const probe = await b.client.probe(5000)
+      if (!probe.ok) {
+        await this.rollbackFlip(old, b, cfg, '(probe 失败) 已回滚旧代 ' + old.inst.gen)
+        return this.lastResult as HandoverResult
+      }
+      const bootProbe = { readSegment: () => lastBootSegment(join(cfg.coordDir, b.inst.gen, 'boot.log')) }
+      const bootHealth = await verifyBootHealth(bootProbe, {
+        timeoutMs: cfg.bootHealthTimeoutMs ?? 6000,
+        ...(cfg.verifyStableMs !== undefined ? { stableMs: cfg.verifyStableMs } : {}),
+      } as Parameters<typeof verifyBootHealth>[1])
+      if (bootHealth.verdict !== 'healthy') {
+        await this.rollbackFlip(old, b, cfg, '(启动健康检查失败) 已回滚旧代 ' + old.inst.gen)
+        return this.lastResult as HandoverResult
+      }
+
+      // ★ 提拔完成 ⇒ 池推进：sentinel → primary（用户裁决 3 / R-c 的落点）
+      const pr = this.pool.promote()
+      this.pending = null
+      this.syncPoolPrimary()
+      this.stage = 'idle'
+      const r: HandoverResult = {
+        t: Date.now(),
+        result: 'success',
+        note: `已提拔 → ${b.inst.gen}（前门 :3080 已指向它）${pr.ok ? '' : '；★ 池未推进：' + (pr.reason ?? '')}`,
+        gen: b.inst.gen,
+        ...(resumeId ? { resumeSession: resumeId } : {}),
+      }
+      this.recordResult(r)
+      return r
+    } finally {
+      this.front.setLocked(false)
+      this.stage = 'idle'
+    }
   }
 
   /** 记录一次交接结果：落盘 handover-status.jsonl + 控制台可读横幅。 */
@@ -237,6 +418,112 @@ export class Coordinator {
       if (Date.now() > deadline) return false
       await new Promise((r) => setTimeout(r, 500))
     }
+  }
+
+  /**
+   * ★★ **spawn 一代并等它就绪**（结构性就绪：进程活 + admin 应答 + 自报 gen 名对得上）。
+   *
+   * ★ 为什么抽出来（2026-09-26 哨兵模型）：`handover`（立哨+提拔连做）与 `stand`（只立哨）
+   *   **必须共用同一份 spawn 实现** —— 否则两条路会各自演化出细微差异，
+   *   正是用户点破的"填细节填出偏离、连功能都对不上"（铁律 37）。
+   *
+   * 返回 `null` = 未就绪（已记录 abort 结果）；返回 `Cage` = 已就绪、**尚未 flip**。
+   * ★ 本方法**不碰前门**（不 `setActive`）—— flip 是调用方的事（I-b / I-c）。
+   */
+  private async spawnStaging(
+    profileOverride?: string,
+    experimentKernelDir?: string,
+    fail?: string,
+  ): Promise<Cage | null> {
+    const cfg = this.cfg
+    // slot：第几代（1 = bootstrap 代，handover 代从 2 起）。端口经 allocGenPort 分配（跳保留端口），
+    // 编号沿用既有不变量 **gen 编号 = 本代端口**，故 genId 由 port 反推而非另算一份。
+    const slot = this.genCounter + 2
+    this.genCounter += 1
+    const port = allocGenPort(cfg.portBase, slot)
+    const genId = `gen-${port}`
+    const adminPort = cfg.adminBase + slot
+    const genDir = join(cfg.workDir, genId)
+    mkdirSync(genDir, { recursive: true })
+    const overlayFile = writeOverlay(join(genDir, 'run'), {
+      // 只钉 per-gen sqlite；投影缓存保留共享（非权威，冷读走日志重建）——同脑的 overlay 修复
+      querySqlitePath: join(genDir, 'query.sqlite'),
+    })
+    const token = randomUUID()
+    // ★★ 「代装配清单」在**此刻**读盘（spawn 那一刻），**不是**控制面 boot 那一刻：
+    //   这就是"改模型/key/provider/pool ⇒ 只需换代 ⇒ 不需要重启控制面"的落点。
+    //   清单坏 ⇒ 抛错逃出本方法（由 main 的 .catch 记录）——绝不在换代里静默降级（gen-assembly INV-C）。
+    //   baseEnv 只放"本次换代"额外要注入的（实验内核目录），清单 env 在 resolve 内部覆盖其上。
+    const spec = resolveGenSpawnSpec({
+      file: cfg.genAssembly,
+      genPort: port,
+      genDir,
+      defaultProfile: cfg.profile,
+      baseEnv: experimentKernelDir ? { DESIGN_CANVAS_KERNEL_DIR: experimentKernelDir } : {},
+    })
+    // `?profile=` 是运维显式指令，优先级最高；否则用清单声明的脑剖面；再否则控制剖面。
+    const effectiveProfile = profileOverride && profileOverride.trim() ? profileOverride.trim() : spec.profile
+    this.record(
+      'assembly: ' + spec.source + ' profile=' + effectiveProfile + ' poolPort=' + (spec.poolPort ?? 'none') +
+        ' patches=' + spec.extraPatches.length + ' envKeys=' + Object.keys(spec.envExtra).length,
+    )
+    const spawned = spawnGen({
+      nodeBin: cfg.nodeBin,
+      dshBin: cfg.dshBin,
+      profile: effectiveProfile,
+      port,
+      adminPort,
+      // ★★ R1：显式传本控制面的 home（不再靠继承 ⇒ 约束消失 ⇒ 旁路可删）。
+      dshHome: cfg.dshHome,
+      gen: genId,
+      leaseToken: token,
+      mode: 'staging',
+      overlayFile,
+      genDir,
+      extraPatches: spec.extraPatches,
+      envExtra: spec.envExtra,
+      inspectPort: cfg.inspectPortBase ? cfg.inspectPortBase + (port - cfg.portBase) : undefined,
+    } satisfies SpawnOptions)
+    const b: Cage = {
+      inst: {
+        id: genId,
+        gen: genId,
+        port,
+        adminPort,
+        pid: spawned.pid,
+        role: 'staging',
+        state: 'starting',
+        lastHeartbeat: Date.now(),
+        caughtUpSeq: 0,
+      },
+      spawned,
+      client: new AdminClient(`http://127.0.0.1:${adminPort}`),
+    }
+    // ★ 把 leaseToken 附在 spawned 上，供 `promoteSentinel` 复用（不另算一份 ⇒ 不作两处真相）。
+    ;(b.spawned as SpawnedGen & { leaseToken?: string }).leaseToken = token
+    this.record('spawned ' + genId)
+
+    // 注入失败（E2E/自检：确定性触发 abort，验证失败自证与强杀闭环，不用真崩 staging gen）
+    if (fail === 'spawn') {
+      this.abort(b, 'injected-fail-spawn')
+      return null
+    }
+
+    this.stage = 'ready'
+    if (fail === 'catchup') {
+      this.abort(b, 'injected-fail-catchup')
+      return null
+    }
+    // ★ 2026-09-20：这里原先比"seq 追平"当 ready 门槛，而那个读数（`computeCaughtUpSeq`）
+    //   恒 0（它依赖的 `sessionPersistence.listSessions` 在上游**不存在**）⇒ 门槛从未量过任何东西。
+    //   现在改成**结构性就绪**：进程活着 + admin 应答 + 自报 gen 名对得上。
+    //   为什么不再比 seq：新代是**按需懒加载**会话的，被 promote 之前根本不持有会话 ⇒ "追平"对它没有定义
+    //   （见 `preseed.ts` 头部与 `docs/handover-vs-restart.md` §8.4）。
+    if (!(await this.waitReady(b))) {
+      this.abort(b, 'b-not-ready')
+      return null
+    }
+    return b
   }
 
   /**
@@ -313,82 +600,11 @@ export class Coordinator {
     }
 
     this.stage = 'spawn'
-    // slot：第几代（1 = bootstrap 代，handover 代从 2 起）。端口经 allocGenPort 分配（跳保留端口），
-    // 编号沿用既有不变量 **gen 编号 = 本代端口**，故 genId 由 port 反推而非另算一份。
-    const slot = this.genCounter + 2
-    this.genCounter += 1
-    const port = allocGenPort(cfg.portBase, slot)
-    const genId = `gen-${port}`
-    const adminPort = cfg.adminBase + slot
-    const genDir = join(cfg.workDir, genId)
-    mkdirSync(genDir, { recursive: true })
-    const overlayFile = writeOverlay(join(genDir, 'run'), {
-      // 只钉 per-gen sqlite；投影缓存保留共享（非权威，冷读走日志重建）——同脑的 overlay 修复
-      querySqlitePath: join(genDir, 'query.sqlite'),
-    })
-    const token = randomUUID()
-    // ★★ 「代装配清单」在**此刻**读盘（spawn 那一刻），**不是**控制面 boot 那一刻：
-    //   这就是"改模型/key/provider/pool ⇒ 只需换代 ⇒ 不需要重启控制面"的落点。
-    //   清单坏 ⇒ 抛错逃出本方法（由 main 的 .catch 记录）——绝不在换代里静默降级（gen-assembly INV-C）。
-    //   baseEnv 只放"本次换代"额外要注入的（实验内核目录），清单 env 在 resolve 内部覆盖其上。
-    const spec = resolveGenSpawnSpec({
-      file: cfg.genAssembly,
-      genPort: port,
-      genDir,
-      defaultProfile: cfg.profile,
-      baseEnv: experimentKernelDir ? { DESIGN_CANVAS_KERNEL_DIR: experimentKernelDir } : {},
-    })
-    // `?profile=` 是运维显式指令，优先级最高；否则用清单声明的脑剖面；再否则控制剖面。
-    const effectiveProfile = profileOverride && profileOverride.trim() ? profileOverride.trim() : spec.profile
-    this.record(
-      'assembly: ' + spec.source + ' profile=' + effectiveProfile + ' poolPort=' + (spec.poolPort ?? 'none') +
-        ' patches=' + spec.extraPatches.length + ' envKeys=' + Object.keys(spec.envExtra).length,
-    )
-    const spawned = spawnGen({
-      nodeBin: cfg.nodeBin,
-      dshBin: cfg.dshBin,
-      profile: effectiveProfile,
-      port,
-      adminPort,
-      // ★★ R1：显式传本控制面的 home（不再靠继承 ⇒ 约束消失 ⇒ 旁路可删）。
-      dshHome: cfg.dshHome,
-      gen: genId,
-      leaseToken: token,
-      mode: 'staging',
-      overlayFile,
-      genDir,
-      extraPatches: spec.extraPatches,
-      envExtra: spec.envExtra,
-      inspectPort: cfg.inspectPortBase ? cfg.inspectPortBase + (port - cfg.portBase) : undefined,
-    } satisfies SpawnOptions)
-    const b: Cage = {
-      inst: {
-        id: genId,
-        gen: genId,
-        port,
-        adminPort,
-        pid: spawned.pid,
-        role: 'staging',
-        state: 'starting',
-        lastHeartbeat: Date.now(),
-        caughtUpSeq: 0,
-      },
-      spawned,
-      client: new AdminClient(`http://127.0.0.1:${adminPort}`),
-    }
-    this.record('spawned ' + genId)
-
-    // 注入失败（E2E/自检：确定性触发 abort，验证失败自证与强杀闭环，不用真崩 staging gen）
-    if (fail === 'spawn') return this.abort(b, 'injected-fail-spawn')
-
-    this.stage = 'ready'
-    if (fail === 'catchup') return this.abort(b, 'injected-fail-catchup')
-    // ★ 2026-09-20：这里原先比"seq 追平"当 ready 门槛，而那个读数（`computeCaughtUpSeq`）
-    //   恒 0（它依赖的 `sessionPersistence.listSessions` 在上游**不存在**）⇒ 门槛从未量过任何东西。
-    //   现在改成**结构性就绪**：进程活着 + admin 应答 + 自报 gen 名对得上。
-    //   为什么不再比 seq：新代是**按需懒加载**会话的，被 promote 之前根本不持有会话 ⇒ "追平"对它没有定义
-    //   （见 `preseed.ts` 头部与 `docs/handover-vs-restart.md` §8.4）。
-    if (!(await this.waitReady(b))) return this.abort(b, 'b-not-ready')
+    // ★★ 2026-09-26 哨兵模型：spawn + ready 这一段**抽成 `spawnStaging`**，供 `handover`（立哨+提拔连做）
+    //   与 `stand`（只立哨）**共用同一份实现** —— 避免两条路各写一遍（那正是"细节偏离"的经典成因，铁律 37）。
+    const b = await this.spawnStaging(profileOverride, experimentKernelDir, fail)
+    // ★ `spawnStaging` 已在返回 null 前 `recordResult`（含 boot 错因）⇒ 这里只把 stage 交回。
+    if (!b) return this.stage
 
     this.stage = 'freeze'
     if (fail === 'freeze') return this.abort(b, 'injected-fail-freeze')
@@ -459,6 +675,8 @@ export class Coordinator {
     // 自愈：health 通过后 gen 仍可能在两次 poll 之间崩溃（ACCESS_VIOLATION 等 native crash），
     // 在 promote 前最后探活一次，避免对已死进程发请求导致未捕获异常。
     if (!pidAliveFrom(b.inst.pid)) return this.abort(b, 'b-promote-precheck-dead')
+    // ★ 哨兵模型：token 现由 `spawnStaging` 附在 `b.spawned.leaseToken` 上（不再本地变量 ⇒ 单一来源）
+    const token = (b.spawned as SpawnedGen & { leaseToken?: string }).leaseToken ?? ''
     try {
       await b.client.promote(token, b.inst.gen, resumeId) // B 绑定 key-pool + 确认写权 token + 携带 resume 会话
     } catch (e) {
@@ -468,11 +686,13 @@ export class Coordinator {
     }
 
     this.stage = 'flip'
-    this.lease.grant(b.inst.gen, b.inst.port, spawned.pid, cfg.ttlMs, (fr?.lastSeq ?? 0), 'replay', token)
+    this.lease.grant(b.inst.gen, b.inst.port, b.inst.pid, cfg.ttlMs, (fr?.lastSeq ?? 0), 'replay', token)
     const old = this.swapActive(b)
     b.inst.role = 'active'
     b.inst.state = 'active'
     this.record('flip to ' + b.inst.gen)
+    // ★ 哨兵模型：`handover` 等价于"立哨 + 提拔连做" ⇒ 一并推进池（`primary` 从 lease 只读派生）。
+    this.syncPoolPrimary()
 
     this.stage = 'verify'
     const probe = await b.client.probe(5000)

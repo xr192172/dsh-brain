@@ -367,6 +367,35 @@ function boot(config: CoordinatorConfig): void {
         const r = mgmt.execAction(V.v, wt, process.execPath)
         res.end(JSON.stringify({ ok: r.code === 0, cmd: 'mgmt', action: V.v.action, code: r.code, stdout: r.stdout.slice(-20000), stderr: r.stderr.slice(-4000) }))
       }
+    } else if (cmd === 'pool') {
+      // ★★ 2026-09-26 哨兵模型（用户裁决，见 docs/launcher-sentinel-impl-2026-09-26.md）：
+      //   **只读投影** —— `{primary, sentinel, others}`，每一项都带 `port`。
+      //   ★ 用户裁决 4：「只有一个端口是 3080 是主端……其他的页面的话**保留端口信息即可**，
+      //     就是说也可以**复制端口到浏览器上面自己去打开**」⇒ 这就是那条"端口信息"的出口。
+      const pv = coord.poolView
+      res.end(
+        JSON.stringify({
+          ok: true,
+          cmd: 'pool',
+          ...pv,
+          /** ★ 主端（前门）：唯一"稳定定向"的入口（供收藏 / 以后包 Electron）。 */
+          mainPort: switchPort,
+        }),
+      )
+    } else if (cmd === 'stand') {
+      // ★★ **立哨**：spawn 一代但**不提拔**（绝不 flip ⇒ 前门不动）。
+      //   ★ 用户裁决 5：*"立哨和提拔肯定要拆呀，不拆的话那岂不是一给他立好了他就要自动提拔了。"*
+      //   与 handover 同款：**立即回 started**，后台异步执行，结果落 handover-status.jsonl 供轮询。
+      res.end(JSON.stringify({ ok: true, cmd: 'stand', stage: 'started' }))
+      void coord
+        .stand(url.searchParams.get('profile') ?? undefined)
+        .catch((e) => console.error('[switchboard] stand error:', e instanceof Error ? e.message : String(e)))
+    } else if (cmd === 'promote') {
+      // ★★ **提拔**：把池里"已选定的下一代"换上去（**不 spawn**；不判断哪个更好）。
+      res.end(JSON.stringify({ ok: true, cmd: 'promote', stage: 'started' }))
+      void coord
+        .promoteSentinel()
+        .catch((e) => console.error('[switchboard] promote error:', e instanceof Error ? e.message : String(e)))
     } else if (cmd === 'status') {
       const lease = coord.getLease()
       res.end(JSON.stringify({ ok: true, stage: coord.stageName, result: coord.lastHandoverResult, lease: lease?.current, locked: coord.switchLocked }))
