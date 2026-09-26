@@ -74,6 +74,27 @@ const GATES = [
     cmd: ['node', 'scripts/check-bom.mjs'],
   },
   {
+    id: 'cmd-lineendings',
+    // ★ 2026-09-26 新增（真事故）。两条判据：
+    //   A 纯 LF 行 = 0 —— LF-only 会让 cmd.exe **吃掉 `rem` 前缀**、把注释里的英文单词
+    //     当命令执行（实测出现 `'-click'` / `'icon'` / `'equired'` / 甚至 `TIME` 提示）。
+    //   B 非 ASCII 字节 = 0 —— cmd.exe 按**当前 OEM 码页**流式读取，而 `chcp` 生效更晚
+    //     ⇒ 非 ASCII 会让它偶发切错行（实测 ~4% 概率，**窗口一闪而过时根本发现不了**）。
+    //   消融自证：改回 LF ⇒ A 必红；塞一个 `★` ⇒ B 必红（见脚本头注释）。
+    what: '.cmd/.bat 必须【全 CRLF】且【纯 ASCII】（否则 cmd.exe 吃 rem 前缀 / 切错行）',
+    cmd: ['node', 'scripts/check-cmd-lineendings.mjs', '.'],
+  },
+  {
+    id: 'desktop-launcher',
+    // ★★ 2026-09-26 新增（**本次事故的正主**）。
+    //   形状最坏的一种：**被检查的都干净，用户双击的那个没人管**。
+    //   `dsh-up.cmd` 修好了，但桌面那份 `DSH 启动 (双击).cmd` 从没重新生成
+    //   （实测 243 非 ASCII + 66 纯 LF，与源 0/0 脱节）⇒ 用户双击就是满屏报错。
+    //   本门用**指纹重算 + 逐字节比较**（不看名字/不看是否存在），三态 PASS/FAIL/SKIP。
+    what: '桌面那份启动器必须与仓库源文件【逐字一致】（派生物不许陈旧）',
+    cmd: ['node', 'scripts/check-desktop-launcher.mjs'],
+  },
+  {
     id: 'plugin-hygiene',
     what: '插件卫生：包完整性 / 残留 / deps 与 bundles / lock 一致 / 遗留物',
     cmd: ['node', 'scripts/check-plugin-hygiene.mjs'],

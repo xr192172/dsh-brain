@@ -2,32 +2,44 @@
 rem ============================================================================
 rem  dsh-up.cmd -- DSH one-click launcher (double-click this file).
 rem
-rem  ★ Why it exists (user, 2026-09-25):
-rem    "Can we unify the launch into something like a desktop app -- click the
-rem     icon and the backend just starts? I don't ask you to package it as
-rem     Electron (too heavy), but at least make it ONE simple trigger.
-rem     All this parameter fiddling, and it differs every time -- it makes us
-rem     look very disorganized."
-rem  ⇒ So: ONE entry (scripts/arm-up.mjs), this file is only its skin:
-rem    no parameters required, and "started" means "self-check all green".
-rem
-rem  ★ ASCII-only on purpose: cmd/Task Scheduler choke on non-ASCII code pages
-rem    (same reason as scripts/relaunch-switchboard.cmd).
+rem  See scripts/README-dsh-up.md for the full rationale (Chinese).
+rem  This file stays PURE ASCII on purpose:
+rem    cmd.exe reads and slices this file in the OEM codepage BEFORE the
+rem    "chcp 65001" line takes effect, so any non-ASCII byte (a star glyph, an
+rem    arrow, a Chinese character) can make it cut a line at the wrong byte and
+rem    execute a stray ASCII fragment. Measured 2026-09-26: ~4% of runs
+rem    (1 in 25, same path, same args) printed
+rem        The system cannot find the path specified.
+rem        'll-desktop-icon.mjs' is not recognized ...
+rem    Guarded by scripts/check-cmd-lineendings.mjs (criterion B).
+rem  Also: every line must end with CRLF (criterion A) -- LF-only lines make
+rem  cmd.exe eat the "rem" prefix and run comment words as commands.
 rem
 rem  Usage:
 rem    double-click            -> start the LIVE instance (3080) and open the UI
-rem    dsh-up.cmd A            -> start training-ground A (its own port segment)
+rem    dsh-up.cmd --stop       -> stop only THIS project's set (switchboard + the
+rem                               generations it spawned). Never touches other node.
+rem    dsh-up.cmd A            -> start training ground A (its own port segment)
+rem
 rem  Desktop icon:
 rem    copy this file to your Desktop, or run
-rem    `node scripts\install-desktop-icon.mjs --yes`
+rem    node scripts\install-desktop-icon.mjs --yes
+rem
+rem  2026-09-26: added the missing "stop" verb. This machine runs ~16 node
+rem  processes; only 6 belong to this project (and that was THREE separate
+rem  switchboards). taskkill /IM node.exe would kill other people's work.
+rem  So --stop is PATH-scoped (see scripts/arm-stop.mjs) and refuses to act at
+rem  all if it cannot read the process list.
 rem ============================================================================
 chcp 65001 >nul
 setlocal
 rem ---------------------------------------------------------------------------
-rem  ★★ 2026-09-25 修（**双击桌面那份才暴露的 bug**）：原来写 `cd /d "%~dp0.."`，
-rem     而 `%~dp0` 是"**这个 .cmd 自己所在的目录**" ⇒ 本文件在 scripts\ 里时 `..` = 仓库根 ✓
-rem     但**拷到桌面**后 `..` = `C:\Users\Admin\` ⇒ 去找 `C:\Users\Admin\scripts\arm-up.mjs` ✗
-rem  ⇒ 正解：留一个**标记行**，由 `install-desktop-icon.mjs` 把**绝对仓库路径**写进桌面那份。
+rem  2026-09-25 fix: the desktop copy of this file exposed a bug. It used to do
+rem  cd /d "%~dp0.." -- but %~dp0 is THIS file's own directory, so from
+rem  scripts\ the ".." is the repo root (fine), while from the Desktop the ".."
+rem  is C:\Users\Admin and it looked for C:\Users\Admin\scripts\arm-up.mjs.
+rem  Fix: keep one marker line, and let install-desktop-icon.mjs stamp the
+rem  ABSOLUTE repo path into the desktop copy.
 rem ---------------------------------------------------------------------------
 set "DSH_REPO_OVERRIDE="
 if not "%DSH_REPO_OVERRIDE%"=="" (
@@ -46,7 +58,10 @@ if not exist "%REPO%\scripts\arm-up.mjs" (
 )
 cd /d "%REPO%"
 
-if "%~1"=="" (
+if "%~1"=="--stop" (
+  echo [dsh-up] stopping THIS project's set ^(switchboard + its generations^) ...
+  node scripts\arm-up.mjs --stop
+) else if "%~1"=="" (
   echo [dsh-up] starting LIVE instance ^(3080^) ...
   node scripts\arm-up.mjs --live --open
 ) else (

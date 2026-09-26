@@ -94,6 +94,44 @@ if (/^set "DSH_REPO_OVERRIDE=[^"\r\n]*"[ \t]*\S/m.test(stamped)) {
   process.exit(2)
 }
 
+// ============================================================================
+// ★★★ 2026-09-26 补（真事故：用户投诉满屏弹窗 + 满屏"不是内部或外部命令"）：
+//
+//   病因 = **桌面那份是旧版本，而安装器照单全收地把它拷了过去**。
+//   实测指纹：桌面 `DSH 启动 (双击).cmd` 一直是 243 个非 ASCII + 66 个纯 LF，
+//   而仓库 `scripts/dsh-up.cmd` 已经修好了（0 / 0）—— **两者脱节了整整一段时间**。
+//   症状（用户逐字贴回来的）：
+//       '-click' 不是内部或外部命令      ← "double-click" 被切成 '-click'
+//       'icon'  不是内部或外部命令      ← "icon"
+//       'equired' …                     ← "required"
+//       'witchboard.cmd).' …            ← "relaunch-switchboard.cmd)."
+//       '-25' …                         ← "2026-09-25"
+//       系统无法接受输入的时间。输入新时间:  ← "every time" 里的 `time` 当成 TIME 命令执行
+//
+//   ⇒ **安装器必须自己把关**，不能"源文件是什么就照抄什么"：
+//     ① **纯 LF** ⇒ 直接**归一到 CRLF**（纯机械动作：不改语义，只改行尾）。
+//        这一条**不拒绝**，因为拒绝会让桌面上留着那个**更坏的旧版**（正是本次事故）。
+//     ② **非 ASCII** ⇒ **拒绝安装**。这一条**不能**自动修（要去改注释文字，属内容修改），
+//        自动剥字符会毁掉原文 ⇒ 必须让人看见并去改。
+//        （`.cmd` 里任何 >0x7F 的字节都可能被 cmd.exe 按 OEM 码页切错行。）
+//   ★ 判据出处：`scripts/check-cmd-lineendings.mjs`（判据 A / B）。
+// ============================================================================
+const preNonAscii = Buffer.from(stamped, 'utf8').filter((b) => b > 0x7f).length
+const prePureLf = (stamped.match(/\n/g) || []).length - (stamped.match(/\r\n/g) || []).length
+
+if (prePureLf > 0) {
+  console.log(`  ⚠ 源文件有 ${prePureLf} 个纯 LF 行 ⇒ **自动归一到 CRLF**（.cmd 必须 CRLF，否则 cmd.exe 会吃掉 rem 前缀）`)
+  stamped = stamped.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n')
+}
+if (preNonAscii > 0) {
+  console.error(`\n[失败] 源文件含 ${preNonAscii} 个非 ASCII 字节 ⇒ **拒绝装到桌面**。`)
+  console.error('       原因：cmd.exe 按**当前 OEM 代码页**流式读取 .cmd，chcp 生效更晚，')
+  console.error('       非 ASCII 字节会让它偶发切错行、执行注释里的碎片（实测 4% 概率）。')
+  console.error('       修法：把 dsh-up.cmd 注释里的非 ASCII 全换成 ASCII（中文说明写进 README-dsh-up.md）。')
+  console.error('       自查：node scripts/check-cmd-lineendings.mjs .')
+  process.exit(2)
+}
+
 console.log(`源文件 : ${SRC}`)
 for (const d of desks) {
   const t = path.join(d, FILENAME)
@@ -106,7 +144,20 @@ if (!yes) {
 for (const d of desks) {
   const t = path.join(d, FILENAME)
   fs.writeFileSync(t, stamped, 'utf8')
-  console.log(`  ✅ 已放好：${t}`)
+  // ★ 写完**立刻复验**（不信 writeFileSync 的返回；铁律 15：写入类要当场校验）
+  const rb = fs.readFileSync(t)
+  const rt = rb.toString('utf8')
+  const rbNonAscii = rb.filter((b) => b > 0x7f).length
+  const rbPureLf = (rt.match(/\n/g) || []).length - (rt.match(/\r\n/g) || []).length
+  const ok = rbNonAscii === 0 && rbPureLf === 0 && rt.includes(`set "DSH_REPO_OVERRIDE=${REPO}"`)
+  console.log(`  ${ok ? '✅' : '✗✗'} 已放好：${t}`)
+  console.log(`      指纹 bytes=${rb.length} 非ASCII=${rbNonAscii} 纯LF=${rbPureLf} 绝对路径=已写入`)
+  if (!ok) {
+    console.error('      ★ 复验不通过 ⇒ 桌面那份可能是坏的，请立刻报告（不要双击它）')
+    process.exitCode = 1
+  }
 }
 console.log('\n★ 以后**双击桌面那个图标**即可：起服务 → 自检 → 自动打开界面（不需要任何参数）。')
 console.log('★ 想删掉：右键删除即可，或 `node scripts/install-desktop-icon.mjs --remove --yes`。')
+console.log('★ ★ 改过 scripts/dsh-up.cmd 之后，**必须重跑本脚本**，否则桌面那份还是旧的。')
+console.log('   此刻不会再靠记性：`node scripts/check-desktop-launcher.mjs` 会比对两者指纹。')
