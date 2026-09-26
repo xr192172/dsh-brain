@@ -294,6 +294,120 @@ const armName = LIVE_MODE ? LIVE_SPEC.arm : argv.find((a) => !a.startsWith('--')
 //   设计依据：docs/r2-handover-only-design-2026-09-26.md
 const GEN_MODE = hasFlag('--gen')
 const REBUILD_MODE = hasFlag('--rebuild')
+
+// ★★★ 2026-09-26：补上**与 --live 对称的"停"**（`--stop`）。
+//   用户点破：*"我要把所有的那些任务，就是 Node js 的窗口……全都关掉是吗？"*
+//   —— **不该全关**。这台机器上同时跑着十几个 node，`taskkill /IM node.exe` 会误杀别人的东西。
+//   ⇒ 所以 `--stop` **只停本项目这一套**（switchboard 本体 + 它拉起的代），
+//     判据是**命令行里含本仓库路径**（见 scripts/arm-stop.mjs 的安全不变量）。
+//   ★ 它**不需要**臂身份、也不看注册表 ⇒ 必须在下面那段"臂注册表校验"**之前**分流，
+//     否则 `--stop` 会被当成臂名去查注册表 ⇒ 报"臂不在注册表里"（自己把自己挡住）。
+if (hasFlag('--stop')) {
+  const { stopAll, selectDsBrainProcs } = await import('./arm-stop.mjs')
+  const { spawnSync: sp } = await import('node:child_process')
+
+  /**
+   * 取全机 node 进程快照。
+   *
+   * ★ 为什么不能只写 `spawnSync('powershell', …)`：本机**`powershell` 不在 PATH 上**
+   *   （实测 `spawnSync('powershell')` = `ENOENT`）⇒ 必须用**绝对路径**
+   *   `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`。
+   *   （★ 顺带：从 bash 里提这个路径会被安全策略拦 ⇒ 本脚本由 node 自己 spawn，不经 bash。）
+   * ★ 兜底：`wmic`（本机实测可用，能出 CommandLine）—— 两个都试，都拿不到就**拒跑**（不猜着杀）。
+   */
+  const sysRoot = process.env.SystemRoot || 'C:\\Windows'
+  const psAbs = `${sysRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  const wmicAbs = `${sysRoot}\\System32\\wbem\\WMIC.exe`
+
+  const snapshot = async () => {
+    /** 解析成 {pid, ppid, cmd}；拿不到一行就返回 null（**不许返回空数组冒充"没有"**，铁律 12）。 */
+    const parse = (stdout) => {
+      const rows = (stdout ?? '')
+        .split(/\r?\n/)
+        .map((l) => l.split('\t'))
+        .filter((a) => a.length >= 3 && /^\d+$/.test(String(a[0]).trim()))
+        .map((a) => ({ pid: Number(String(a[0]).trim()), ppid: Number(String(a[1]).trim()), cmd: a.slice(2).join('\t') }))
+      return rows.length ? rows : null
+    }
+
+    // ① PowerShell 绝对路径（首选：字段干净）
+    const psCmd =
+      'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | ' +
+      'ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.CommandLine)" }'
+    const r1 = sp(psAbs, ['-NoProfile', '-NonInteractive', '-Command', psCmd], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+    const p1 = parse(r1.stdout)
+    if (p1) return p1
+
+    // ② wmic 兜底（CSV：Node,CommandLine,ParentProcessId,ProcessId）
+    const r2 = sp(wmicAbs, ['process', 'where', "name='node.exe'", 'get', 'ProcessId,ParentProcessId,CommandLine', '/format:csv'], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    if (r2.status === 0 && r2.stdout) {
+      const lines = r2.stdout.split(/\r?\n/).filter((l) => l.includes(',') && !/^Node,/i.test(l))
+      const rows = []
+      for (const l of lines) {
+        // CommandLine 里可能含逗号 ⇒ 从**右侧**固定切：…,PPID,PID
+        const m = l.match(/^(.*),(\d+),(\d+)\s*$/)
+        if (!m) continue
+        // 最左是 hostname，去掉
+        const cmd = m[1].replace(/^[^,]*,(?="|[A-Za-z]:)/, '')
+        rows.push({ pid: Number(m[3]), ppid: Number(m[2]), cmd })
+      }
+      if (rows.length) return rows
+    }
+
+    // ★ 两条通道都拿不到 ⇒ 返回 null（调用方必须**拒绝执行**，不许当成"没有进程"）
+    return null
+  }
+
+  const alive = (pid) => {
+    try { process.kill(pid, 0); return true } catch { return false }
+  }
+  const kill = async (pid) => {
+    // ★ 先温和（SIGTERM）；给窗口让它自己收尾（生代自己也要退）
+    try { process.kill(pid, 'SIGTERM') } catch { /* 可能已经没了 */ }
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 250))
+      if (!alive(pid)) return true
+    }
+    // ★ 还不走 ⇒ 强制。**仅对本项目这两个 pid**（选择集已在上游钉死）。
+    const k = sp('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' })
+    return k.status === 0
+  }
+
+  console.log('\n===== arm-up · 停（--stop）=====')
+  const procs = await snapshot()
+  // ★ 铁律 14：通道"不可用" ≠ 读数"为 0"。取不到快照 ⇒ **拒绝执行**，不许当成"没有进程要停"。
+  if (procs === null) {
+    console.error('  [失败] 两条进程快照通道（PowerShell 绝对路径 / wmic）都拿不到读数 ⇒ **拒绝执行**。')
+    console.error('          ★ 这不是"没有进程要停"，是"我看不见" ⇒ 不许当作停干净。')
+    console.error('          ⇒ 请手工确认后停：Task Manager，或 `taskkill /PID <pid> /T /F`。')
+    process.exit(3)
+  }
+  const preview = selectDsBrainProcs(procs, WT)
+  if (preview.all.length === 0) {
+    console.log('  没有发现属于本仓库这一套的 node 进程 ⇒ 已经是停的（什么都不做）。')
+  } else {
+    console.log(`  将停 ${preview.all.length} 个（先子后父）：${preview.all.join(', ')}`)
+    for (const pid of preview.all) {
+      const p = procs.find((x) => x.pid === pid)
+      console.log(`    · ${pid}  ${String(p?.cmd ?? '').slice(0, 120)}`)
+    }
+    // ★ 不停别人的：把"没被选中的 node 总数"如实报出来，让用户一眼看到我们没碰它们
+    console.log(`  （机器上另有 ${procs.length - preview.all.length} 个无关 node 进程 —— **一个都不碰**）`)
+  }
+
+  const r = await stopAll({ snapshot, kill, alive }, WT)
+  if (r.found.length === 0) { console.log('  ✓ 无进程需停。'); process.exit(0) }
+  if (r.survivors.length) {
+    console.error(`  ✗ **没停干净**：pid ${r.survivors.join(', ')} 仍在 ⇒ 不谎报成功。`)
+    process.exit(1)
+  }
+  console.log(`  ✓ 已停干净（${r.killed.join(', ')}）`)
+  process.exit(0)
+}
+
 if (GEN_MODE && REBUILD_MODE) {
   console.error('[失败] `--gen`（换一代）与 `--rebuild`（重建训练场）是互斥的两件事 ⇒ 只能选一个。')
   process.exit(2)
@@ -309,6 +423,7 @@ if (!LIVE_MODE && !armName) {
       '  node scripts/arm-up.mjs <臂名>                 # 确保某个训练场可用（不存在才建；已跑就只自检）\n' +
       '  node scripts/arm-up.mjs <臂名> --gen           # ★ 换一代（走 ?cmd=handover；不碰训练场骨架）\n' +
       '  node scripts/arm-up.mjs <臂名> --rebuild       # ★ 结构变更：重建训练场骨架（唯一允许 --force 的路径）\n' +
+      '  node scripts/arm-up.mjs --stop                 # ★ 停：只停本仓库这一套（本体+它拉起的代），不碰别的 node\n' +
       '  可选：[--port-base <n>] [--no-start] [--open] [--json]\n' +
       '  ★ 双击 `scripts\\dsh-up.cmd` 等价于 `--live --open`（桌面图标的做法见该文件注释）。',
   )
