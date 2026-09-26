@@ -60,7 +60,10 @@ A 能做到且可逆；B 代价是源必须干净，但可逆性更好。
 推荐 B。它会坏在：源里有非 ASCII 时安装直接失败，用户看到红字 —— 这是好事，能立刻发现。
 
 **5. 我可能错在哪**
-如果团队的源长期有中文注释，B 会让安装频繁失败，可能需要放宽为只检查非 ASCII 之外的项。`,
+如果团队的源长期有中文注释，B 会让安装频繁失败，可能需要放宽为只检查非 ASCII 之外的项。
+
+**6. 独立性档位**
+本次的档位：不适用（本席位不做独立复核）。`,
   dev: `**1. 链路图**
 读源 → 校验行尾 → 校验字节 → 写桌面 → 复验指纹。
 
@@ -77,7 +80,10 @@ A 能做到且可逆；B 代价是源必须干净，但可逆性更好。
 成功率 1/1；调用次数 1。
 
 **6. 我可能错在哪**
-我只在 Windows 上验过，POSIX 上的换行语义不同，可能不适用。`,
+我只在 Windows 上验过，POSIX 上的换行语义不同，可能不适用。
+
+**7. 独立性档位**
+本次产出的档位：跨会话（未到跨模型）。`,
   review: `**1. 被审对象**
 启动器加固：桌面那份重新生成 + 两道门。
 
@@ -91,7 +97,10 @@ A 能做到且可逆；B 代价是源必须干净，但可逆性更好。
 无需改动；建议把同样的指纹检查加到 CI。
 
 **5. 我可能错在哪**
-独立性档位：同会话（跨会话/跨模型都没用上）。若作者与我是同一模型，某些盲区会共享。`,
+若作者与我是同一模型，某些盲区会共享。
+
+**6. 独立性档位**
+本次裁决的档位：跨会话（未到跨模型）。`,
 }
 
 for (const seat of Object.keys(GOOD)) {
@@ -154,9 +163,93 @@ console.log('\n-- W5/W6 review 席的额外契约 --')
   //   我第一版写成"作者与我是不同会话。"—— 那是测试写错了：`不同会话` 里含 `同会话` 子串，
   //   于是 G5 仍匹配 ⇒ 这条测试**自己**制造不了阴性条件。
   //   （★ 顺带：这也证明了模块原来用裸 `同会话` 是**假绿**风险，已收紧为 `同会话换`。）
-  const noIndep = GOOD.review.replace(/独立性档位：同会话（跨会话\/跨模型都没用上）。/, '作者与我不在同一台机器上。')
+  const noIndep = GOOD.review.replace(/本次裁决的档位：跨会话（未到跨模型）。/, '作者与我不在同一台机器上。')
   const r = validateSeatOutput('review', noIndep, contracts)
-  t('W6 缺独立性档位 ⇒ FAIL', !r.ok && r.problems.some((p) => p.code === 'G5-NO-INDEPENDENCE'), JSON.stringify(r.problems.map((p) => p.code)))
+  t(
+    'W6 档位值不合规 ⇒ FAIL（G11 非法值 + G5 无档位词）',
+    !r.ok && r.problems.some((p) => p.code === 'G11-INVALID-VALUE') && r.problems.some((p) => p.code === 'G5-NO-INDEPENDENCE'),
+    JSON.stringify(r.problems.map((p) => p.code)),
+  )
+}
+
+// ── W15–W17 ★ G10 探针自证（信号驱动，不依赖自评）────────────────────────────
+console.log('\n-- W15–W17 G10 探针自证：发现对不上的读数时，必须先自证探针 --')
+{
+  const base = (tail) => `**1. 被审对象**
+门。
+
+**2. 独立复算**
+我在 \`scripts/check-all.mjs\` 里 grep \`shell\`，**零命中**。
+
+${tail}
+
+**4. 下一步**
+无。
+
+**5. 我可能错在哪**
+独立性档位：跨会话（未到跨模型）。`
+
+  // W15 阴性：在做归因，但全文没有阳性对照 ⇒ 红
+  const noProof = base('**3. 裁决**\n通过。')
+  const r15 = validateSeatOutput('review', noProof, contracts)
+  t('W15 阴性：归因了但全文无阳性对照 ⇒ G10 红', r15.problems.some((p) => p.code === 'G10-NO-PROBE-SELF-PROOF'),
+    JSON.stringify(r15.problems.map((p) => p.code)))
+
+  // W16 阳性对照：同一份产出 + 一条阳性对照 ⇒ G10 必须放行（防噪音机）
+  const withProof = base('**3. 裁决**\n通过。\n\n阳性对照：`node scripts/seats/test-seat-contract.mjs` exit=0，全绿。')
+  const r16 = validateSeatOutput('review', withProof, contracts)
+  t('W16 ★阳性对照：补一条阳性对照后 G10 必须放行', !r16.problems.some((p) => p.code === 'G10-NO-PROBE-SELF-PROOF'),
+    JSON.stringify(r16.problems.map((p) => p.code)))
+
+  // W17 消融：把"负面信号"这一半触发条件去掉 ⇒ G10 必须**不再触发**
+  //   （证明触发它的是"文件引用 + 负面结果"这个组合，而不是别的什么）
+  const noSignal = `**1. 被审对象**
+门。
+
+**2. 独立复算**
+我在 \`scripts/check-all.mjs\` 里看到 \`shell\` 相关的调用。
+
+**3. 裁决**
+通过。
+
+**4. 下一步**
+无。
+
+**5. 我可能错在哪**
+独立性档位：跨会话（未到跨模型）。`
+  const r17 = validateSeatOutput('review', noSignal, contracts)
+  t('W17 消融：无负面信号 ⇒ G10 不触发（证明触发条件是那个组合）', !r17.problems.some((p) => p.code === 'G10-NO-PROBE-SELF-PROOF'),
+    JSON.stringify(r17.problems.map((p) => p.code)))
+
+  // W18 ★ scope 泄漏：**代码块里引用的契约原文**不算"产出了该段落"
+  //   （实测：architect 轮 1/2 引用了拟议的 persona 片段 ⇒ 旧产出被误判为合格 = 假绿）
+  const quoted = `**1. 被审对象**
+
+下面是我**建议**加的那一段（注意这是引用，不是我产出的）：
+
+\`\`\`
+6. **独立性档位** —— 不适用（本席位不做独立复核）。
+\`\`\`
+
+**2. 独立复算**
+
+无。
+
+**3. 裁决**
+
+通过。
+
+**4. 下一步**
+
+无。
+
+**5. 我可能错在哪**
+
+档位：跨会话（未到跨模型）。`
+  const r18 = validateSeatOutput('architect', quoted, contracts)
+  t('W18 代码块里引用的契约原文 ⇒ 不得当成"产出了该段落"（否则旧产出被误放行）',
+    r18.problems.some((p) => p.code === 'G1-MISSING') || r18.problems.some((p) => p.code === 'G11-MISSING'),
+    JSON.stringify(r18.problems.map((p) => p.code)))
 }
 
 // ── W9 ★ 假红回归：段名【先出现在正文里】，标题在后面 ─────────────────────────

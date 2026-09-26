@@ -41,6 +41,17 @@ export const SEAT_SOURCE = path.join(REPO, 'packages/subagent-council/src/index.
 /** 契约解析失败时抛这个 —— 调用方**必须**让它冒出去（fail-closed）。 */
 export class SeatContractParseError extends Error {}
 
+/**
+ * ★★ G11（独立性档位）对各席位的**区分度**声明。
+ *
+ * 依据 2026-09-26 与 architect 席讨论的**反驳 2**：
+ *   architect 的 persona 里**写死了**"填不适用"，而 G11 对 architect 只检查是否含「不适用」
+ *   ⇒ 席位**照抄就过** ⇒ 该判据对 architect **恒真、区分度为 0**。
+ * architect 主张保留（结构对称），我要求**必须显式声明它没有区分度** —— 不许让它看起来像一道门。
+ * ★ 项目纪律：**判据与信号不可混。**
+ */
+export const G11_DISCRIMINATIVE = { architect: false, dev: true, review: true }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // G0 · 解析（从源码，不手抄）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,8 +238,18 @@ function findSectionHeads(output, sections) {
     let start = -1
     let afterName = -1
 
+    let inFence = false
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
+      // ★★ 代码块内的内容**不算段落**（同族 scope 修正）。
+      //   实测：architect 轮 1/2 的产出里**引用了拟议的 persona 片段**：
+      //       （architect 第 6 段）
+      //       6. **独立性档位** —— 不适用（本席位不做独立复核）。
+      //   ⇒ 该行命中"行首标题形" ⇒ 被判成"它真的产出了这一段" ⇒ **假绿（旧产出被放行）**。
+      //   席位经常引用契约原文/示例，所以这个洞必须堵。
+      if (/^\s*```/.test(line)) { inFence = !inFence; continue }
+      if (inFence) continue
+
       const stripped = stripHeadingMarkers(line)
       const { text: nStripped, map } = normalizeWithMap(stripped)
       if (!nStripped.startsWith(nName)) continue
@@ -240,9 +261,16 @@ function findSectionHeads(output, sections) {
     }
 
     if (start < 0) {
-      // 回退：裸出现（无标题形的紧凑样本）
-      const at = output.indexOf(name)
-      if (at >= 0) { start = at; afterName = at + name.length }
+      // ★★ 2026-09-26 删掉了"裸出现"兜底（原实现：`output.indexOf(name)`）——
+      //   它是**又一处铁律 41 式的 scope 泄漏**：
+      //   段名出现在**正文散文**里也会被当成"该段落存在"。
+      //   实测：review 样本的第 6 段写着「本次**裁决**的档位：跨会话」⇒
+      //   W2「删掉『裁决』段」那条**构造不出阴性条件**（正文里还有个"裁决"）⇒ 假绿。
+      //   ★ 检查过：紧凑写法 `**1. 问题重述**` 本来就能被上面的"行首标题形"命中
+      //     （`stripHeadingMarkers` 会循环剥掉 `**` 与 `1.`）⇒ **兜底是多余的**。
+      //   ⇒ 归零：找不到就**真的**是缺段。
+      start = -1
+      afterName = -1
     }
     heads.set(name, { start, afterName })
   }
@@ -337,6 +365,67 @@ export function validateSeatOutput(seat, output, contracts) {
   if (seat === 'review') {
     if (!/独立性无法核对|跨模型|跨会话|同会话换/.test(text)) {
       problems.push({ code: 'G5-NO-INDEPENDENCE', msg: '没标注独立性档位（跨模型/跨会话/同会话换 prompt），也没写「独立性无法核对」' })
+    }
+  }
+
+  // ── G10 探针自证（**交叉核对**：段落自述 × 全文扫描反证）───────────────────
+  // 依据：2026-09-26 与 architect 席讨论后收敛的设计（`out/architect-round3-output.md`）。
+  //
+  // ★ 为什么**不能**做成"席位自评"（讨论里最强的一条反驳）：
+  //   若让席位自己判断"我这次有没有遇到矛盾"，一个不自省的席位写「无矛盾」就绕过了
+  //   —— 而"没有怀疑自己的探针"**正是**那次真实事故的病根。
+  //   ⇒ 把举证责任放在唯一不该信的那一方，等价于"自证清白"。
+  //
+  // ★★ 实现时发现的两个洞（**我改了收敛设计，理由在此**）：
+  //   ① 收敛设计把「探针自证」声明为一个**条件性段落**（未矛盾则无需写）
+  //      ⇒ 与 G1「段落必须非空」**直接冲突**（它自己在轮 2 也承认"G1 需为此调整"）；
+  //      而若改成"总是必填且写'无矛盾'"，那内容就退化成**席位自评** = 被反驳 1 杀掉的东西。
+  //      ⇒ **干脆不新增段落**：G10 改为全文扫描，阳性对照**放在哪一段都行**（通常放「独立复算」）。
+  //   ② 因此不能只查某个段落 ⇒ 否则"要求"无处落实 = **无从合规 = 噪音机**。
+  //
+  // ⇒ 最终形状：**全文出现「文件引用 + 负面结果」= 它在做归因 ⇒ 全文必须存在一条阳性对照**。
+  //   阳性对照 = 一条**已知应通过**的操作 + 它的**真实输出**（`exit=0` / `passed` / `阳性对照` 等）。
+  //   ★ 这既不需要自评、也不需要新段落，且**可满足**。
+  //
+  // ⚠️ **已知窄触发面（如实记）**：信号词要求出现**负面**结果词（零命中/没找到/不存在…）。
+  //   而真实事故 B 那句是「…`shell:true` **导致** spawnSync 拿不到 exit code」——**不含负面词**
+  //   ⇒ **G10 抓不到事故 B**（它由 G9 抓）。G10 管的是**另一件事**：
+  //   「你**确实**发现了一个对不上的读数时，有没有先怀疑自己的探针」。
+  if (seat === 'dev' || seat === 'review') {
+    const NEG = /零命中|找不到了|没找到|没有找到|不存在|未发现|无命中|无结果|返回空|未匹配到|无一命中|对不上|不一致/
+    const HAS_FILE = /`[^`\n]+\.(?:mjs|js|cjs|ts|json|ya?ml|md|cmd|ps1)[^`\n]*`/
+    const POSITIVE = /exit\s*[=:]\s*\d+|passed|阳性对照|阴性对照|✓|仅命中|命中\s*\d|全绿/
+    const signalParas = String(text).split(/\n\s*\n/).filter((p) => HAS_FILE.test(p) && NEG.test(p))
+    if (signalParas.length > 0 && !POSITIVE.test(text)) {
+      problems.push({
+        code: 'G10-NO-PROBE-SELF-PROOF',
+        msg: `全文有 ${signalParas.length} 段「文件引用 + 负面结果」（=在做归因），但**全文找不到一条阳性对照**` +
+          `（一条已知应通过的操作 + 它的真实输出，如 \`exit=0\` / "全绿"）。★ 先证明你的探针看得见阳性，再归因给别人。`,
+      })
+    }
+  }
+
+  // ── G11 独立性档位成【必需段落】───────────────────────────────────────────
+  // ★ 与上面 G5 的区别：G5 只看"全文里有没有档位词"（弱）；G11 要求它是一个**独立必需段落**。
+  //   ⇒ G11 生效后 G5 是冗余的，但**保留 G5**：它覆盖"段落还没加"的过渡期，且历史事故 A 由它发现。
+  // ★ architect 席的 G11 合法值只有「不适用」⇒ 该判据对 architect **恒真**（照抄即过）。
+  //   这是与 architect 讨论后**明知的取舍**（它主张结构对称；我要求必须显式声明"无区分度"）。
+  //   ⇒ 见本文件下方 `G11_DISCRIMINATIVE` 常量：**architect 的 G11 不计入区分度**。
+  {
+    const INDEP = '独立性档位'
+    const body = sliced[INDEP]
+    if (body === undefined || body === null) {
+      problems.push({ code: 'G11-MISSING', msg: `必需段落「${INDEP}」缺失（persona 的产出清单里要有它）` })
+    } else {
+      const allowed = seat === 'architect'
+        ? ['不适用']
+        : ['跨模型', '跨会话', '同会话换 prompt', '无法核对']
+      if (!allowed.some((v) => body.includes(v))) {
+        problems.push({
+          code: 'G11-INVALID-VALUE',
+          msg: `「${INDEP}」的合法值是 ${allowed.join(' / ')}，实际：${JSON.stringify(body.slice(0, 50))}`,
+        })
+      }
     }
   }
 
