@@ -154,20 +154,27 @@
 |---|---|---|
 | **R1** | `spawnGen` 的 `DSH_HOME` 从"继承 `process.env`"⇒ **显式必填入参** | ✅ `06739e4`（R0，封条 `pa-20260926-f6875c`） |
 | **R1.5** | 摆放（`WORK_DIR`/`coordDir`/`genAssembly`）**必须与 home 同源** ⇒ 影子依赖变被检查约束 | ✅ `92449dd`（R0，封条 `pa-20260926-2f5c08`） |
-| R2 | `--force` 只用于"臂不存在/结构性变更"；换代一律走 `?cmd=handover` ⇒ **然后删旁路** | ⬜ 未做 |
+| **R2** | 起代一律走 `?cmd=handover`；`--force` 只由显式 `--rebuild` 触发（+记账） | ✅ `55ce17d` + `3f1a362` |
 | R3 | `ensureActiveLease()` 加 `pidAlive` 活体守卫 | ⬜ 未做 |
 | R4 | `mgmt.ts:159` 的 `spawnSync` ⇒ 异步 spawn + 轮询 | ⬜ 未做 |
 | R5 | ⑦ 的 `ok` 三值化（`ok`/`slow`/`unreachable`，铁律 30） | ⬜ 未做 |
+
+★★ **R2 的重要更正（别把正当能力当罪状，铁律 17/36）**：`isolated-instance --force` **本身不是旁路**
+—— 它是一把**正当工具**（唯一生产调用点在 `arm-up.mjs`；`test-oldshape-guard.mjs:37` 正当地用它测
+"旧产物重跑"）。**旁路是那个【耦合】**（`arm-up` 每次起代都无条件带上它）⇒ **删的是耦合，不是 flag。**
+★ R2 后的命令面：`arm-up --live` / `arm-up A`（确保可用）/ `arm-up A --gen`（换代走 handover）/
+`arm-up A --rebuild`（结构变更，唯一允许 `--force`，记账）。
+★ 门：`scripts/delegation/test-r2-handover-only.mjs`(10)，带 2 条消融 + 1 条正交正向对照。
 
 ★ **R1 核心语义（必须钉死，别再搞错）**：`DSH_HOME` = **"这一代能看见哪些会话"的根**
 （实测会话存储 = `<DSH_HOME>/sessions/<cwd编码>/<sessionId>/`）。
 ⇒ R1 的意思是「**控制面把它自己的 `DSH_HOME` 显式往下传**」，**不是**「每代一个不同的 home」。
 后者会让新代看不到旧代会话 ⇒ **中继器静默失效**（症状：换代报成功、会话列表变空）。
-- ★ **R1.5 为什么要跟 R1 一起做**：`main.ts` 的 `coordDir`/`workDir`/`genAssembly` **默认也从 `home` 派生**
+- ★ **R1.5 为什么要跟 R1 一起做**：`coordDir`/`workDir`/`genAssembly` **默认也从 `home` 派生**
   ⇒ 只改 home 不改 `WORK_DIR` ⇒ **脑裂混合体**（代的 home 指向臂A、控制面的 genDir 还在原处）。
-  ★ 实测真相：**"今天一致"靠的是没人设过 `WORK_DIR`**，不是约束 ⇒ R1.5 把它变成**单一求值点 + 分裂拒启动 + 四值指纹**。
-- ★ 判据（不是断言）：`packages/switchboard/test/spawn-dshhome.test.mjs`(5) + `placement-consistency.test.mjs`(6)，
-  两条都带**消融自证**（撤掉修复必须变红）。中继器在 R1 代码下已**实测 3/3**（见日更 §13.3）。
+  ★ 实测真相：**"今天一致"靠的是没人设过 `WORK_DIR`**，不是约束 ⇒ R1.5 改成**单一求值点 + 分裂拒启动 + 四值指纹**。
+- ★ 判据（不是断言）：`spawn-dshhome.test.mjs`(5) + `placement-consistency.test.mjs`(6)，均带**消融自证**。
+  中继器在 R1 代码下已**实测 3/3**（日更 §13.3）。
 
 ### 已落地的件（**在哪 / 是什么 / 什么状态**）
 
@@ -235,41 +242,21 @@
 - **池的"退避重试"支路**：★ 2026-09-26 **走到了** —— 臂 A `boot.log` 出现
   `33101 被占（多半是上一代还没退）⇒ 退避重试（每 1.5s，最多 8 次）` → `⚠️ 连续 9 次拿不到 ⇒ 本代没有池`。
   ⇒ 观测已存在，**顺带证明这条"退避重试"没能把臂救回来**（只是如实报"本代没有池"）。
-- ★★★ **`arm-up` 对"已在跑的臂"会造【僵尸 lease】⇒ 臂永久卡死**（2026-09-26，**本棒真拦路虎**）。
-  **完整因果链**（三份证据交叉：`switchboard-run.log` 行序 `lease recovery OK(pid=16520)` →
-  `lease recovery OK(pid=9224)` → `gen EXIT code=1`；死因 `boot.log` 的 `33101 被占` +
-  `EADDRINUSE 127.0.0.1:33191`）⇒ **见 `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`**。
-  ⇒ ★ **已修**：`pidAlive()` + **控制面优先**（拿得到活 pid ⇒ 真跳过启动）+ 指名拒跑。
-  ⇒ ★★★ **根因 = 一条【绕开整台机器】的旁路**（用户点破，见
-  `docs/handover-bypass-structural-diagnosis-2026-09-26.md`）：**"旧代谁来停"不缺** ——
-  `coordinator.ts:568-597` 的 `retire` **早就写好且实测在工作**（`handover-status.jsonl` 5/5 success；
-  `state.jsonl` `retire` 6 次、`KILL-OLD` 1 次；3 个 `resumeSession` 真实存在于臂A）。真问题是
-  `arm-up.mjs:477` 每次跑 `isolated-instance --force`（=「强制覆盖 `<root>/dshhome`」）⇒ **不走协调器**：
-  不切流量、不自证、**不 retire 旧代**、不回滚、还把 `dshhome` 推倒重建。
-  ⇒ **旁路存在的约束**：`spawner.ts:76-86` 起新代 `env={...process.env}` 且**不设 `DSH_HOME`**
-  ⇒ **一个协调器只能服务一个训练场** ⇒ 臂的 `_arms/a/dshhome` 够不着它 ⇒ 只好自己重建 ⇒ 绕过全部机制。
-  ⇒ ★ **待实施的根因修法（不是补丁）**：**R1 `spawner.ts` 把 `DSH_HOME` 显式入参化**（唯一让
-  "一个协调器只能服务一个训练场"消失的改动 ⇒ 改完**旁路可整条删掉**）；R2 `--force` 只留给
-  "臂不存在/结构变更"，起代走 `?cmd=handover`；R3 `ensureActiveLease()` 加
-  `if (!pidAlive(this.active.inst.pid)) return`；R4 `mgmt.ts:159` `spawnSync` → 异步 spawn + 轮询；
-  R5 ⑦ 的 `ok` 三分（铁律 33）。
-  ★★ **R1 影响面盘查已完成** ⇒ **全文见 `docs/r1-dshhome-param-impact-audit-2026-09-26.md`**（264 行）。
-  三条必须记住的：
-  1. ★★★ **R1 语义 = "控制面把【它自己的】`DSH_HOME` 显式传给子代"**，**不是"每代一个 home"**。
+- ★★★ **`arm-up` 对"已在跑的臂"会造【僵尸 lease】⇒ 臂永久卡死**（2026-09-26，**曾是本棒拦路虎**）。
+  ★ **已修**：`pidAlive()` + **控制面优先**（拿得到活 pid ⇒ 真跳过启动）+ 指名拒跑。
+  ★★★ **根因 = 一条【绕开整台机器】的旁路**（用户点破）⇒ 全文见
+  `docs/handover-bypass-structural-diagnosis-2026-09-26.md`；**完整因果链**见
+  `docs/arm-a-zombie-lease-causal-chain-2026-09-26.md`。
+  ★★ **修法已落地 R1/R1.5/R2**（见上"当前施工棒次"表）⇒ **这条不再是未闭合**；R3–R5 仍未做。
+  ★ 三条必须记住的（**R1 盘查全文** `docs/r1-dshhome-param-impact-audit-2026-09-26.md`）：
+  1. ★★★ **R1 语义 = "控制面把它【自己的】`DSH_HOME` 显式传给子代"**，**不是"每代一个 home"**。
      判据：**会话存储 = `<DSH_HOME>/sessions/<cwd 编码>/<sessionId>/`**（实测）⇒ 各代 home 不同 ⇒
-     新代**看不到**旧代会话 ⇒ `reissuePrompt` **HTTP 200 但 resume 到空** ⇒ **中继器静默失效**
-     （换代成功、会话列表变空、用户以为会话丢了）。**别做这个错误类推。**
-  2. ★★★ **中继器已实证（铁律 11 数"判据为真的次数"）**：臂A `gen-33084→85→86→87` **三次连续跨代中继**
-     `resume ok:true "resumed persisted session"` **3/3**；★ **阳性对照**：三个 sessionId 各有实体、
-     体量递增 `62,885 → 137,679 → 254,360 B` ⇒ **会话跨代真增长**（不是"发了个 200"）。
-     ⇒ **跨代续同一会话成立**；R1 对现役是**行为保持**的。
+     新代看不到旧代会话 ⇒ `reissuePrompt` **HTTP 200 但 resume 到空** ⇒ **中继器静默失效**。
+  2. ★★★ **中继器已实证（铁律 11）**：臂A 三次连续跨代中继 `resume ok:true` **3/3**；★ **阳性对照**：
+     三个 sessionId 各有实体、体量递增 `62,885 → 137,679 → 254,360 B` ⇒ 会话跨代**真增长**。
      ★ **R1 真正收益**不是"让中继器能工作"（它已经能），而是**"让一个协调器能服务【别的】训练场"**。
-  3. ⚠️ **`WORK_DIR`/`coordDir`/`genAssembly` 是 R1 的"影子依赖"**（`main.ts:392-395` 默认值从 `home` 推）
-     ⇒ **只改 home 不改 `WORK_DIR`** = 子代 home 指A臂、控制面 `genDir` 仍在现役 ⇒ **代的数据与日志分家**
-     ⇒ **必须一起参数化**。（读 `spawner.ts` 一处**看不出**这条。）
-  4. ⚠️ **`mgmt.childEnv`（剔 `DSH_HOME`）不许用在 `spawnGen` 上**：前者对"控制面→**脚本**"对
-     （脚本要回现役语境当源）；后者是"控制面→**代**"（要**显式给**）。混用 ⇒ 代失去 home ⇒
-     **隔离实例的代写进现役会话库**（最坏串场）。
+  3. ⚠️ **`mgmt.childEnv`（剔 `DSH_HOME`）不许用在 `spawnGen` 上**：前者对"控制面→**脚本**"、
+     后者是"控制面→**代**"（要**显式给**）。混用 ⇒ 代失去 home ⇒ **隔离实例的代写进现役会话库**。
   5. ⚠️ **身份（`DSH_ARM_SELF/DENY`）保持【控制面级】**，不许 per-spawn。
   6. ➖ **不受 R1 触及**：端口分配／日志落点（`relaunch-switchboard.mjs:89` 判的是**启动器自己**的 home）／
      `HANDOVER_CONTROL`（从 `process.env` 来）—— ★ 但 `HANDOVER_CONTROL` **无"子代必须向本控制面
@@ -293,14 +280,15 @@
   **我只要你干净的**……你总是下意识地找最小可行修法，但那其实就是在**打补丁**。**我哪怕你重写都无所谓**"*
   ⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。推论：给 `arm-up` 加"先停旧代"= 让外部脚本
   去管协调器的职责 = **补丁摞在病根上**，不算解决。
-- ★★ **六个症状的根因归属（**下表即"一条旁路"的展开**，别再逐条当独立缺陷修）**：
+- ★★ **六个症状的根因归属（下表即"一条旁路"的展开，别再逐条当独立缺陷修）**：
+  ★ **R1/R1.5/R2 已把这个根因修掉** ⇒ 下表留作**判据依据**（为什么当初不该逐条修）。
   | 症状 | 位置 | 根因 |
   |---|---|---|
   | `poolPort=none` | `gen assembly: … poolPort=none` | 旁路不经过 `gen-assembly` 端口分配 ⇒ 没拿到池口 ⇒ 只能抢 `33101` |
-  | 控制面僵死 | `mgmt.ts:159` `spawnSync` | 同步阻塞事件循环（实测 `p95=0.66s` 但 **`max=8.23s`**，铁律 34） |
-  | ⑦ 假红 | `arm-up.mjs:208` `ok=liveOk===true` | 把"通道不可用"当"被检对象坏了"（铁律 33）；两次完全复现 |
+  | 控制面僵死 | `mgmt.ts:159` `spawnSync`（**R4 待修**） | 同步阻塞事件循环（实测 `p95=0.66s` 但 **`max=8.23s`**，铁律 34） |
+  | ⑦ 假红 | `arm-up.mjs` `ok=liveOk===true`（**已修**，铁律 30） | 把"通道不可用"当"被检对象坏了"（铁律 33）；两次完全复现 |
   | "修了但没部署" | `mgmt.ts` 16:04 vs 现役跑 14:19 的 bundle | 逐个 bundle grep `childEnv` = **0 命中** ⇒ 判据要落在**在跑的 bundle**（铁律 18 变体） |
-  | 现役也被 `EADDRINUSE` 打死 | `out/switchboard-run.err.log` L23/L24、L179/L180 | 同一条旁路也用在现役重建 ⇒ `generation` 到 **15**、启动序列重复 10+ 次 |
+  | 现役也被 `EADDRINUSE` 打死 | `out/switchboard-run.err.log` | 同一条旁路也用在现役重建 ⇒ `generation` 到 **15**、启动序列重复 10+ 次 |
   | `DSH_ARM_DENY` 挡过期参与者 | `evals/arms.json` 的 `cwd`/`store` | `denyForArm()` 用旧实验目录拼 DENY ⇒ 实测挡的是 `C:\_abB-experiment-root\*`，**不含 `_arms/b`**；★ 真正承担隔离的是 `DSH_HOME`（那层确实分开了）⇒ **"2 条数字为真，但挡的是过期参与者"**（铁律 11 变体） |
 - ★★ **经管理面发的全部实验（7 次）从未真正把题派给臂A** ⇒
   `action=experiment` 的**后半段（真发题 + 判卷）仍是未验证代码**。
