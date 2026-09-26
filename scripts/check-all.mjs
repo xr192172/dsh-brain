@@ -139,6 +139,18 @@ const GATES = [
     cmd: ['node', 'scripts/check-session-integrity.mjs', '--limit', '12'],
   },
   {
+    id: 'seats-contract',
+    // ★★ 2026-09-26 新增（S0′）。三席（architect/dev/review）的 persona 里**早就写好了**契约：
+    //   「产出必须包含这N段」「我可能错在哪 不许省略」「不许用空话收尾」，
+    //   还有 review 席的裁决三态与独立性档位 —— **但没有任何东西在检查它**。
+    //   probe-verify-council.mjs 只是个需要前门的人工一次性探针，不含机器判据。
+    //   ⇒ 本门把**散文契约**变成**可执行判据**（零 LLM / 零网络 / 零副作用）。
+    //   ★ G0 单一真相源：契约从 persona 源码**解析**，不手抄第二份；解析不出 ⇒ fail-closed。
+    //   ★ 每条判据都**双向**（合格产出必须 PASS —— 防"逢错必报的噪音机"）。
+    what: '席位产出契约：三席 persona 里的散文契约变成可执行判据（双向自证 + 消融）',
+    cmd: ['node', 'scripts/seats/test-seat-contract.mjs'],
+  },
+  {
     id: 'test:patch-anchors',
     what: '上游补丁锚点严格化（两方向）',
     cmd: ['node', 'scripts/test-patch-anchors.mjs'],

@@ -15,6 +15,8 @@
     "check:cmd": "node scripts/check-cmd-lineendings.mjs .",
     "fix:cmd": "node scripts/fix-cmd-lineendings.mjs .",
     "check:desktop": "node scripts/check-desktop-launcher.mjs",
+    "check:seats": "node scripts/seats/test-seat-contract.mjs",
+    "seats:list": "node scripts/seats/validate-seat-output.mjs --list",
     "launcher:install": "node scripts/install-desktop-icon.mjs --yes",
     "check:all": "node scripts/check-all.mjs",
     "verify:p4": "node scripts/verify-p4-after-swap.mjs",
