@@ -217,46 +217,43 @@
   机制：`arm-up` 走 `isolated-instance … --force` ⇒ 每次**重新准备+起代**，但**旧代从不被停** ⇒
   新代绑不上池/端口 ⇒ 当场死，**而 lease 已被改写成新代（死掉的）pid** ⇒ **自我延续**。
   ⇒ ★ **已修**：`pidAlive()` + **控制面优先**（拿得到活 pid ⇒ 真跳过启动）+ 指名拒跑（见 `arm-up` 条目）。
-  ⇒ ★★ **仍未闭合**：**"旧代谁来停"没有答案** —— `spawner.ts:55-75` **有**强杀闭环
-  （`SIGTERM→SIGKILL→taskkill /T /F→确证消失`）但 **`arm-up` 没用它**；`isolated-instance` 里
-  grep 不到任何 stop/kill。★ **倾向在控制面内部修**（见下条），而不是让 arm-up 去停。
-- ★★ **同一份 boot 暴露的第二个缺陷：`poolPort=none`** ——
-  `gen assembly: source=none profile=web poolPort=none patches=1 envKeys=0`
-  ⇒ 控制面**没给这一代派池端口** ⇒ 它只能去抢别人手里的 `33101` ⇒
-  **这才让"池被占"从"可退避"变成"致命"**。**未修**。
-- ★★ **`DSH_ARM_DENY` 挡的是【过期的参与者】**（2026-09-26 实证）：`evals/arms.json` 的 `cwd`/`store`
-  指向旧实验目录（`_abA/wt`、`C:/_abB-experiment-root/wt`），而 `denyForArm()` 正是用它拼 DENY
-  ⇒ 实测臂 A 的 DENY = `C:\_abB-experiment-root\wt,C:\_abB-experiment-root\store`
-  ⇒ **不含臂 B 的真实训练场 `_arms/b`**。
-  ★ **精确说**（我第一版说重了）：按 `training-ground-…-2026-09-25.md:20/32`，
-  **真正承担臂间隔离的是 `DSH_HOME`**（`_arms/a/dshhome` vs `_arms/b/dshhome`，**那层确实分开了**）；
-  `cwd`/`store` 的定位是「**参与者锚定**」⇒ 准确结论 = **"2 条数字为真，但挡的是过期参与者"**
-  （**铁律 11 的变体**：数字非零 ≠ 挡对了东西）。**未修**。
-- ★★ **控制面为何会僵死**（2026-09-26 实测：`:3080`+`:31800` 双双 HTTP 000，进程活着、`netstat` 仍 LISTENING，
-  而**臂 A / gen 全程 200** ⇒ 只有现役控制面这一个进程僵）。**怀疑** = 管理面用 **`spawnSync`** 串行跑
-  `arm-up`/`dsh-delegate`（`timeout: 900_000`）⇒ **控制面自己的事件循环被同步 spawn 堵死**。
-  ★★ **2026-09-26 已【证到机制】+ 定量**（见铁律 34）：非 dry `experiment` 期间打 `:3080`
-  ⇒ **`n=90 ok=83 err=7`（全 timed out），`p95=0.66s` 但 `max=8.23s`**。
-  ⇒ **"探不通"的第一嫌疑改为"探针与被检共用了那条被 spawnSync 堵住的循环"**。
-- ★★★ **⑦（"现役仍健康"）是【假红】⇒ 这就是当前唯一卡点**（2026-09-26 第三棒，已单因素消融，
-  `docs/arm-a-experiment-loop-still-open-2026-09-26.md`）：
-  同代码/同探针/**只换"谁拉起 arm-up"** ⇒ **出带（shell）= 7/7 全过**，
-  **入带（`:31800` mgmt `spawnSync`）= ⑤✅⑥✅⑦❌** ⇒ `[失败] 不敢发题`。**两次完全复现**。
-  ⇒ 修法（**未实施**）：⑦ 的 `ok` **三分**（`true` / `unknown` 不判红 / `false`）—— 见**铁律 33**。
-- ★★ **"修了但没部署"**（2026-09-26 新增）：`mgmt.ts`（mtime 16:04）已含 `childEnv()` 修 `DSH_HOME` 泄漏，
-  **但现役跑的是 `out/b1790403532379/main.js`（14:19 起）** ⇒ 逐个 bundle grep `childEnv` = **0 命中**。
-  ⇒ 判"修没修"要落在**在跑的 bundle**，不是源码 mtime。（铁律 18 的"构建产物"变体）
-- ★★ **现役控制面【自己】也在被 `EADDRINUSE` 打死**（2026-09-26 新增，`out/switchboard-run.err.log` 行序）：
-  `L23/L24  EADDRINUSE 127.0.0.1:3080 / :31800`；`L179/L180` 同款再现 ⇒
-  **"旧代谁来停"不只打臂A，也打现役** ⇒ 现役 `generation` 已到 **15**，启动序列在日志里重复 10+ 次。
-  ⇒ **严重级别从「臂卡住」抬到「现役也在反复自杀重建」**。**未修**。
+  ⇒ ★★★ **2026-09-26 根因已定位（用户点破，`docs/handover-bypass-structural-diagnosis-2026-09-26.md`）**：
+  **"旧代谁来停"不是【缺】—— 机制 `coordinator.ts:568-597` 的 `retire` 阶段【早就写好了】，
+  而且【实测在工作】**：`_arms/a/.../handover-status.jsonl` **5 条全 success**；
+  `state.jsonl` 里 `retire` 执行 **6 次**、`KILL-OLD` 1 次；3 个 `resumeSession` **都真实存在**于臂A 会话列表
+  （`blank=false`，`updatedAt` 跨代递增）⇒ **"下一代跑上一代的任务"我验过，不只是台账说的**。
+  ⇒ ★★★ **真根因 = 一条【绕开整台机器】的旁路**：`arm-up.mjs:477` 每次都跑
+  `isolated-instance --force`（其定义 =「`<root>/dshhome` 已存在且非空时**强制覆盖**」）
+  ⇒ 它**不走协调器**：不切流量、不自证、**不 retire 旧代**、不回滚，还把 `dshhome` **推倒重建**。
+  ⇒ ★★ **旁路存在的真实约束**：`spawner.ts:76-86` 起新代 `env={...process.env}` 且**不设 `DSH_HOME`**
+  ⇒ **新代继承控制面的 `DSH_HOME`** ⇒ **一个协调器只能服务一个训练场** ⇒ 臂的 `_arms/a/dshhome`
+  **够不着协调器** ⇒ `arm-up` 只好自己重建 ⇒ 顺手绕过全部机制。
+  ⇒ ★ **未闭合 = 待实施的根因修法（不是补丁）**：**R1 `spawner.ts` 把 `DSH_HOME` 显式入参化**
+  （唯一让"一个协调器只能服务一个训练场"这个约束消失的改动 ⇒ 改完**旁路可整条删掉**）；
+  R2 `--force` 只留给"臂不存在/结构变更"，起代一律走 `?cmd=handover`；
+  R3 `ensureActiveLease()` 加 `if (!pidAlive(this.active.inst.pid)) return`；
+  R4 `mgmt.ts:159` `spawnSync` → 异步 spawn + 轮询；R5 ⑦ 的 `ok` 三分（铁律 33）。
+  ⚠️ **R1 实施前必须先做【影响面盘查】**（是否影响 `HANDOVER_CONTROL`／owner 判定／日志落点）—— 我没测。
+  ★ **一条旁路 ⇒ 六个症状**（EADDRINUSE / 僵尸 lease / 复活死 pid / 现役也撞 / ⑦ 假红 / `poolPort=none`）
+  ⇒ 这解释了"逐个修症状越修越多"。
+  ★★★ **纪律（用户 2026-09-26 点破）**：*"我不在乎什么最小可行修法或者是最大可行修法，
+  **我只要你干净的**……你总是下意识地找最小可行修法，但那其实就是在**打补丁**。**我哪怕你重写都无所谓**"*
+  ⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。推论：给 `arm-up` 加"先停旧代"= 让外部脚本
+  去管协调器的职责 = **补丁摞在病根上**，不算解决。
+- ★★ **六个症状的根因归属（**下表即"一条旁路"的展开**，别再逐条当独立缺陷修）**：
+  | 症状 | 位置 | 根因 |
+  |---|---|---|
+  | `poolPort=none` | `gen assembly: … poolPort=none` | 旁路不经过 `gen-assembly` 端口分配 ⇒ 没拿到池口 ⇒ 只能抢 `33101` |
+  | 控制面僵死 | `mgmt.ts:159` `spawnSync` | 同步阻塞事件循环（实测 `p95=0.66s` 但 **`max=8.23s`**，铁律 34） |
+  | ⑦ 假红 | `arm-up.mjs:208` `ok=liveOk===true` | 把"通道不可用"当"被检对象坏了"（铁律 33）；两次完全复现 |
+  | "修了但没部署" | `mgmt.ts` 16:04 vs 现役跑 14:19 的 bundle | 逐个 bundle grep `childEnv` = **0 命中** ⇒ 判据要落在**在跑的 bundle**（铁律 18 变体） |
+  | 现役也被 `EADDRINUSE` 打死 | `out/switchboard-run.err.log` L23/L24、L179/L180 | 同一条旁路也用在现役重建 ⇒ `generation` 到 **15**、启动序列重复 10+ 次 |
+  | `DSH_ARM_DENY` 挡过期参与者 | `evals/arms.json` 的 `cwd`/`store` | `denyForArm()` 用旧实验目录拼 DENY ⇒ 实测挡的是 `C:\_abB-experiment-root\*`，**不含 `_arms/b`**；★ 真正承担隔离的是 `DSH_HOME`（那层确实分开了）⇒ **"2 条数字为真，但挡的是过期参与者"**（铁律 11 变体） |
 - ★★ **经管理面发的全部实验（7 次）从未真正把题派给臂A** ⇒
   `action=experiment` 的**后半段（真发题 + 判卷）仍是未验证代码**。
   ★ 诚实表述：**"它对了" 我说不了 —— 我只知道"我还没看到它跑"**。
-  ⇒ **未复现、未证实**；若成立则管理面**不能用 `spawnSync`**（要异步+队列）。列为下一件要证的。
-  （恢复已验：`cmd //c scripts\relaunch-switchboard.cmd` 后台跑 ⇒ 双双 200 + 换代 gen15→16。）
 - `_arms/a.bak-from-cancelled-session-1441` 残留目录；`_arms/a` 下**只有 `dshhome`+`verifyout`**
-  （**没有 `wt`/`store`** ⇒ 印证上上条）。
+  （**没有 `wt`/`store`** ⇒ 印证 `DSH_ARM_DENY` 那条）。
 
 ## ★ 归属与前史（**别把上游的矛盾写成自己的罪状**）
 
