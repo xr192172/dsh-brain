@@ -31,7 +31,7 @@ const META = /[;&|$`<>(){}[\]\n\r]/
 // ① 白名单
 const r1 = validate(U('cmd=mgmt&action=rm'), WT)
 check('① 白名单外 action ⇒ 拒', r1.ok === false && /未知 action/.test(r1.reason), r1.ok ? '★ 放行了' : r1.reason)
-check('①b 合法 action 清单', ACTIONS.join(',') === 'tasks,verdict,experiment,result', ACTIONS.join(','))
+check('①b 合法 action 清单', ACTIONS.join(',') === 'brief,tasks,verdict,experiment,result', ACTIONS.join(','))
 // ② 题不存在
 check('② 题不存在 ⇒ 拒', validate(U('cmd=mgmt&action=verdict&task=no-such'), WT).ok === false, '')
 // ③ 题名非法
@@ -54,7 +54,7 @@ check('⑥ argvFor 返回数组、零 shell 元字符', Array.isArray(a6) && a6.
   JSON.stringify(a6.map((x) => x.replace(WT, '.'))))
 check('⑥b task 项**严格等于**题库里的名字（不是拼接出来的）', a6.includes('t1-guard'), a6.join(' '))
 // ⑦ 注入：合法请求的 argv 里也**绝不会**出现元字符
-const honest = [['tasks', ''], ['verdict', '&task=t1-guard'], ['experiment', '&task=t1-guard&arm=A&dry=1'], ['result', '&runId=abc-123']]
+const honest = [['tasks', ''], ['verdict', '&task=t1-guard'], ['experiment', '&task=t1-guard&arm=A&dry=1'], ['result', '&runId=abc-123'], ['brief', ''], ['brief', '&arm=A']]
 let leak7 = 0
 for (const [act, extra] of honest) {
   const v = validate(U(`cmd=mgmt&action=${act}${extra}`), WT)
@@ -62,7 +62,30 @@ for (const [act, extra] of honest) {
   const a = argvFor(v.v, WT, 'NODE')
   if (a.some((s) => META.test(s))) leak7++
 }
-check('⑦ ★★ 合法的四种动作 ⇒ argv 里零 shell 元字符', leak7 === 0, `泄漏 ${leak7}`)
+check('⑦ ★★ 合法的动作 ⇒ argv 里零 shell 元字符', leak7 === 0, `泄漏 ${leak7}`)
+
+// ⑦c ★★ **brief 动作**（2026-09-26）：自开发简报 —— 让 DSH **自己拿到"文档在哪"**
+//   判据三条：① 动作在白名单里、无需 task ② 臂名可选（不带也要能跑）③ 臂名非法必须拒
+const rBrief0 = validate(U('cmd=mgmt&action=brief'), WT)
+check('⑦c-1 brief 不带臂 ⇒ 接受（臂名可选）', rBrief0.ok === true, rBrief0.ok ? 'ok' : rBrief0.reason)
+const rBrief1 = validate(U('cmd=mgmt&action=brief&arm=A'), WT)
+check('⑦c-2 brief 带臂 ⇒ 接受并记下臂名', rBrief1.ok === true && rBrief1.v.arm === 'A', rBrief1.ok ? `arm=${rBrief1.v.arm}` : rBrief1.reason)
+const rBrief2 = validate(U('cmd=mgmt&action=brief&arm=' + encodeURIComponent('A;rm -rf /')), WT)
+check('⑦c-3 brief 臂名非法 ⇒ 拒', rBrief2.ok === false, rBrief2.ok ? '★ 放行了' : rBrief2.reason)
+// ⑦c-4 ★ brief **不需要题**（它不是"针对某道题"，而是"说明书"）⇒ 带个不存在的 task 也不该因此被拒
+const rBrief3 = validate(U('cmd=mgmt&action=brief&task=no-such-task'), WT)
+check('⑦c-4 brief 不因 task 不存在被拒（它不是题相关的）', rBrief3.ok === true, rBrief3.ok ? 'ok' : `★ 误拒：${rBrief3.reason}`)
+// ⑦c-5 ★★ 真跑一次 brief，**核对它报的文档路径真的存在**（判据要落在产物上，不只看校验函数）
+{
+  const argvB = rBrief1.ok ? argvFor(rBrief1.v, WT, process.execPath) : null
+  const rr = argvB ? spawnSync(argvB[0], argvB.slice(1), { encoding: 'utf8', timeout: 120000, cwd: WT }) : null
+  let bj = null
+  try { bj = JSON.parse(rr?.stdout ?? '') } catch { /* 下面报失败 */ }
+  const files = bj ? bj.docs.flatMap((s) => s.files).filter((f) => !f.missing) : []
+  const allThere = files.length >= 10 && files.every((f) => fs.existsSync(path.join(WT, f.path)))
+  check('⑦c-5 ★★ 真跑 brief ⇒ 报出的文档路径全部真实存在', rr?.status === 0 && allThere, `校验 ${files.length} 份文档路径`)
+  check('⑦c-6 ★ 真跑 brief ⇒ 管理面 URL 按臂派生（按 A 应是 33180 段）', !!bj && String(bj.mgmt?.admin ?? '').endsWith(':33180'), `admin=${bj?.mgmt?.admin}`)
+}
 // ⑧ 消融：撤掉字符集校验 ⇒ ③ 必须变红
 console.log('\n=== 消融自证 ===')
 const SRC = path.join(WT, 'packages/switchboard/src/mgmt.ts')

@@ -10,6 +10,7 @@
  *   ③ **绝不经 shell** —— 一律 `spawnSync(node, [脚本, ...已校验的参数])`（**数组**，没有字符串拼接 ⇒ 无注入面）。
  *
  * 动作（`?cmd=mgmt&action=…`）：
+ *   · `brief`                                    ★ **自开发简报**：文档在哪 / 题在哪 / 手在哪 / 管理面在哪
  *   · `tasks`                                   列题（题库，agent-agnostic）
  *   · `verdict&task=<id>`                       该题的重放轨迹与报警数
  *   · `experiment&task=<id>&arm=A[&dry=1]`      ★ **异步**跑一次实验（立即回 started + runId）
@@ -19,7 +20,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-export const ACTIONS = ['tasks', 'verdict', 'experiment', 'result'] as const
+export const ACTIONS = ['brief', 'tasks', 'verdict', 'experiment', 'result'] as const
 export type Action = (typeof ACTIONS)[number]
 
 /** 名字允许的字符（**先卡死字符集**，再谈别的）。 */
@@ -45,6 +46,18 @@ export function validate(url: URL, wt: string): { ok: true; v: Validated } | { o
   const v: Validated = { action }
 
   if (action === 'tasks') return { ok: true, v }
+
+  // ★ `brief`：只读，且**可选**带臂名（带了就派生该臂的管理面 URL）。
+  //   ★ 这里**不校验臂存在**：简报是"说明书"，看一眼不存在的臂不会坏事；
+  //     真正会 spawn 的 `experiment` 才必须校验臂实例存在。
+  if (action === 'brief') {
+    const arm = url.searchParams.get('arm')
+    if (arm !== null) {
+      if (!/^[a-zA-Z0-9_-]+$/.test(arm)) return { ok: false, reason: 'arm 不合法（只允许字母数字与 _ -）' }
+      v.arm = arm
+    }
+    return { ok: true, v }
+  }
 
   if (action === 'result') {
     const runId = url.searchParams.get('runId') ?? ''
@@ -84,6 +97,11 @@ export function validate(url: URL, wt: string): { ok: true; v: Validated } | { o
 export function argvFor(v: Validated, wt: string, nodeExe: string): string[] {
   const S = (n: string) => path.join(wt, 'scripts', n)
   switch (v.action) {
+    case 'brief': {
+      const a = [nodeExe, S('self-dev-brief.mjs'), '--json']
+      if (v.arm) a.push('--for-arm', v.arm)
+      return a
+    }
     case 'tasks':
       return [nodeExe, S('task-bank.mjs'), 'list']
     case 'verdict':
