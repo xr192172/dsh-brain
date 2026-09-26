@@ -20,6 +20,33 @@ export interface SpawnOptions {
   profile: string
   port: number
   adminPort: number
+  /**
+   * ★★ 2026-09-26 R1：本代要用的 `DSH_HOME`（**必填**，不再从 `process.env` 继承）。
+   *
+   * ## 为什么必须显式（这不是"加一个可选参数"，而是**契约**）
+   *
+   * 原实现 `env = { ...process.env, ... }` 会让子代**继承控制面自己的 `DSH_HOME`**
+   * ⇒ 由此产生一个**硬约束**：「**一个协调器只能服务一个训练场**」——
+   * 因为 `_arms/<x>/dshhome` 根本够不着控制面，`arm-up` 只好**自己准备 home**
+   * （`isolated-instance --force`）⇒ 顺手**绕过整台协调器**（不切流量、不自证、**不 retire 旧代**、不回滚）。
+   * ⇒ 那条旁路就是今天全部六个症状（EADDRINUSE / 僵尸 lease / 复活死 pid / 现役也撞 /
+   *   ⑦ 假红 / `poolPort=none`）的**共同根因**。见
+   *   `docs/handover-bypass-structural-diagnosis-2026-09-26.md`、
+   *   `docs/r1-dshhome-param-impact-audit-2026-09-26.md`。
+   *
+   * ## ★★★ 语义必须钉死：传的是"**控制面自己的** home"，不是"每代一个 home"
+   *
+   * 实测：**会话存储 = `<DSH_HOME>/sessions/<cwd 编码>/<sessionId>/`**
+   * ⇒ `DSH_HOME` **就是"这个 gen 能看到哪些会话"的根**。
+   * ⇒ 若有人把它误解成"给每个代一个独立的 home"，新代就**看不到**旧代那个 sessionId
+   * ⇒ `reissuePrompt`（中继器）会 **HTTP 200 但 resume 到空** ⇒ **跨代续接静默失效**
+   *   （症状：换代报成功、会话列表却空了）。**绝对不要这么用。**
+   *
+   * 换训练场时，**必须整体换**（home 与 `workDir` 一起），否则会出现
+   * "子代 home 指向别处、控制面 genDir 还在原处"的**数据/日志分家**混合态。
+   * 见 `CoordinatorConfig.dshHome` 与 `main.ts` 的 `WORK_DIR` 推导。
+   */
+  dshHome: string
   /** 可选：gen 的 --inspect 调试端口（外部 memory_observe 等通过 CDP 连它做进程级内存观测）。缺省不开。 */
   inspectPort?: number
   gen: string
@@ -77,6 +104,12 @@ export function spawnGen(opts: SpawnOptions): SpawnedGen {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...opts.envExtra,
+    // ★★ 2026-09-26 R1：`DSH_HOME` **显式赋值为本代自己的 home**（唯一一处）。
+    //   写在 `...opts.envExtra` **之后** ⇒ 即使清单/调用方不小心也塞了一个，
+    //   这里的契约值**仍然赢**（"谁是权威"不留歧义）。
+    //   ★ 为什么不能靠"继承 process.env"：那正是"一个协调器只能服务一个训练场"的来源，
+    //     它逼出了 arm-up 的那条旁路（根因见 SpawnOptions.dshHome 的注释）。
+    DSH_HOME: opts.dshHome,
     HANDOVER_GEN: opts.gen,
     HANDOVER_ADMIN_PORT: String(opts.adminPort),
     HANDOVER_LEASE_TOKEN: opts.leaseToken,
@@ -84,6 +117,10 @@ export function spawnGen(opts: SpawnOptions): SpawnedGen {
     HANDOVER_GEN_DIR: opts.genDir,
     HANDOVER_CONTROL: process.env.HANDOVER_CONTROL || 'http://127.0.0.1:31800',
   }
+  // ★★ 禁令（R1 盘查 §2.6）：**不要把 `mgmt.childEnv()` 用在这里。**
+  //   那个函数剔掉 `DSH_HOME` 是为了"控制面 → **脚本**"（脚本要回【现役语境】去当源）；
+  //   而这里是"控制面 → **代**"，代**必须**拿到 home。
+  //   两者混用 ⇒ 代失去 home ⇒ 落回 `~/.dsh` ⇒ **隔离实例的代会写进现役的会话库**（最坏的串场）。
   const args = [
     // 前导 Node flag → globalThis.gc() 可见，memory_observe 的 action=gc 才能强制回收，
     // 判断"瞬时占用 vs 疑似泄漏"。对正常 gen 无副作用。

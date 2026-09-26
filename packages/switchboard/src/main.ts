@@ -98,6 +98,8 @@ function boot(config: CoordinatorConfig): void {
     profile: bootSpec.profile,
     port,
     adminPort,
+    // ★★ R1：bootstrap 代与换代代走**同一条**契约 —— 显式传 home，不靠继承。
+    dshHome: config.dshHome,
     gen: genId,
     leaseToken: '', // A 启动即 active，token 在首次 grant 时定
     mode: 'active',
@@ -131,6 +133,8 @@ function boot(config: CoordinatorConfig): void {
   const preflightCfg: PreflightConfig = {
     nodeBin: config.nodeBin,
     dshBin: config.dshBin,
+    // ★★ R1：预演代与控制面的真代**同一个 home**。
+    dshHome: config.dshHome,
     portBase: envInt('PREFLIGHT_PORT_BASE', config.portBase + 100),
     adminBase: envInt('PREFLIGHT_ADMIN_PORT_BASE', config.adminBase + 100),
     // 预演代的落地目录单独一层：与活跃代的 gen 目录分开，便于取证与清理。
@@ -388,6 +392,10 @@ if (isMain) {
     profile: envStr('WEB_PROFILE', 'web'),
     portBase: envInt('GEN_PORT_BASE', 3081),
     adminBase: envInt('HANDOVER_ADMIN_PORT_BASE', 31810),
+    // ★★ R1：控制面自己的 home，显式下传（原来是"靠继承 process.env"）。
+    //   ★ 与 workDir 同源（下面的 workDir 默认也从 home 推）⇒ 换训练场时两者**必须一起换**，
+    //     否则"代的数据与日志分家"。见 CoordinatorConfig.dshHome 的注释。
+    dshHome: home,
     inspectPortBase: envInt('SWITCH_INSPECT_PORT_BASE', 32810),
     coordDir: envStr('WORK_DIR', join(home, 'switchboard')),
     workDir: envStr('WORK_DIR', join(home, 'switchboard')),

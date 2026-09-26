@@ -45,6 +45,11 @@ import type {
 export interface PreflightConfig {
   nodeBin: string
   dshBin: string
+  /**
+   * ★★ 2026-09-26 R1：本控制面的 `DSH_HOME`，显式下传给预演代。
+   * ★ 预演代**必须**与真代同一个 home（否则"预演的不是真会发生的事"）。
+   */
+  dshHome: string
   /** 预演代端口基址（与现役 `GEN_PORT_BASE` 不同段）。 */
   portBase: number
   /** 预演代 admin 端口基址。 */
@@ -146,6 +151,9 @@ export class PreflightRunner {
         profile,
         port,
         adminPort,
+        // ★★ R1：预演代必须与真代**同一个 home** —— 否则"预演的不是真会发生的事"
+        //   （它在别的会话库/别的装配语境里跑，判据就失去意义）。见 preflight 的 INVARIANT。
+        dshHome: this.cfg.dshHome,
         gen,
         leaseToken: '',
         mode: 'staging',

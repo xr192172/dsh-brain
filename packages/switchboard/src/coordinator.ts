@@ -27,6 +27,19 @@ export interface CoordinatorConfig {
   profile: string
   portBase: number
   adminBase: number
+  /**
+   * ★★ 2026-09-26 R1：**控制面自己的 `DSH_HOME`** —— 每代 spawn 时**显式**传给子代。
+   *
+   * ★ 语义（必须钉死）：这是"**控制面自己的** home"，**不是**"每代一个不同的 home"。
+   * 理由见 `spawner.ts` 的 `SpawnOptions.dshHome`：会话存储 = `<DSH_HOME>/sessions/…`
+   * ⇒ 各代 home 不同 ⇒ 新代看不到旧代会话 ⇒ **中继器（跨代续接）静默失效**。
+   * ⇒ 传它，只是把"继承来的"改成"显式传的" ⇒ 对现役**行为保持**。
+   *
+   * ★★ 换训练场（服务**别的** home）时必须**与 `workDir` 一起换**，否则
+   * "子代 home 指向 A 臂、控制面 `genDir` 仍在原处" ⇒ **数据与日志分家**（混合态，极难查）。
+   * 见 `docs/r1-dshhome-param-impact-audit-2026-09-26.md` §2.4。
+   */
+  dshHome: string
   /** 外部 memory_observe 观测用的 --inspect 端口基址；gen 的 inspect = base + (port - portBase)。0=关闭。 */
   inspectPortBase: number
   coordDir: string
@@ -337,6 +350,8 @@ export class Coordinator {
       profile: effectiveProfile,
       port,
       adminPort,
+      // ★★ R1：显式传本控制面的 home（不再靠继承 ⇒ 约束消失 ⇒ 旁路可删）。
+      dshHome: cfg.dshHome,
       gen: genId,
       leaseToken: token,
       mode: 'staging',
