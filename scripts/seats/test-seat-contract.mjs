@@ -159,6 +159,43 @@ console.log('\n-- W5/W6 review 席的额外契约 --')
   t('W6 缺独立性档位 ⇒ FAIL', !r.ok && r.problems.some((p) => p.code === 'G5-NO-INDEPENDENCE'), JSON.stringify(r.problems.map((p) => p.code)))
 }
 
+// ── W9 ★ 假红回归：段名【先出现在正文里】，标题在后面 ─────────────────────────
+console.log('\n-- W9 ★假红回归：段名先在正文出现（真实产出就是这个形状） --')
+{
+  // 真实席位产出里，正文先说「以下是独立复核裁决。」，标题 `## 3. 裁决：…` 在后面。
+  // 旧实现用全局 indexOf ⇒ 切到正文那句 ⇒ 判「没有三态词」= **假红**。
+  // （★ 病因与铁律 41 同族：文本判据没做作用域限定。）
+  const realShape = `关键数据已收集完毕。以下是独立复核裁决。
+
+---
+
+## 1. 被审对象
+
+门本身。
+
+## 2. 独立复算
+
+自己跑了命令，读数与作者声明一致。
+
+## 3. 裁决：**有条件通过**
+
+判据逻辑正确，但有阻塞项。
+
+## 4. 下一步
+
+修集成。
+
+## 5. 我可能错在哪
+
+可能这个行为只是本机沙箱特例。`
+  const r = validateSeatOutput('review', realShape, contracts)
+  const g4 = r.problems.some((p) => p.code === 'G4-VAGUE-VERDICT')
+  t('W9 段名先出现在正文、标题在后 ⇒ 不得报 G4（否则就是假红）', !g4, g4 ? '★ 又假红了！' : '')
+  // ★ 阳性：裁决段真的含三态词 ⇒ 必须被识别出来
+  const body = r.sections['裁决'] ?? ''
+  t('W9b 裁决段正文确实取到了「有条件通过」', body.includes('有条件通过'), JSON.stringify(body.slice(0, 40)))
+}
+
 // ── 其它 ─────────────────────────────────────────────────────────────────────
 console.log('\n-- 其余 --')
 t('未知席位 ⇒ FAIL（不许静默通过）', !validateSeatOutput('nope', '随便', contracts).ok)

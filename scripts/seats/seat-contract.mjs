@@ -176,33 +176,97 @@ function normalizeWithMap(s) {
 }
 
 /**
- * 把产出按"必需段落名"切分（**归一化后**定位，再映射回原文切片），返回每段正文。
- * ★ 段落名必须真的出现 —— persona 明确要求分段，所以这是契约的一部分。
- *   找不到就是不合格（错误信息里会指名是哪一段、以及它长什么样）。
+ * 剥掉行首的标题标记。★ 必须**循环剥**，因为标记顺序不定：
+ *   `## 3. 裁决` / `**4. 推荐 + 风险**` / `4. 取舍` / `**问题重述**`
+ *   —— 单条正则按固定顺序写（先 `#` 再数字再 `**`）会漏掉 `**4.` 这种"`**` 在数字前"的形状
+ *   （实测：加了标题形定位后，`推荐与风险` 变体因此被判缺段 ⇒ 又是一次假红）。
  */
-function sliceSections(output, sections) {
-  const { text: nOut, map } = normalizeWithMap(output)
-  const found = {}
-  /** 段落 → 归一化坐标里的起点 */
-  const spans = []
+function stripHeadingMarkers(line) {
+  let s = line
+  for (;;) {
+    const before = s
+    s = s.replace(/^\s+/, '')
+    s = s.replace(/^#{1,6}/, '')
+    s = s.replace(/^\*\*/, '')
+    s = s.replace(/^\d+\s*[.、)）]/, '')
+    if (s === before) break
+  }
+  return s
+}
+
+/**
+ * ★★★ 找每个必需段落的**起点**（优先"行首标题形"，回退"裸出现"）。
+ *
+ * ## 为什么必须有这一步（2026-09-26，真实席位产出校准抓出来的**假红**）
+ *
+ * 原先直接 `output.indexOf(name)` 取**全文第一次出现**。
+ * 而真实产出里，段落名会**先出现在正文里**，再出现在它自己的标题上：
+ *
+ * ```
+ * 关键数据已收集完毕。以下是独立复核**裁决**。      ← indexOf 命中的是这个
+ * ...
+ * ## 3. **裁决**：有条件通过                      ← 真正的段落在这里
+ * ```
+ *
+ * ⇒ 切出来的正文是 `。\n\n---\n\n## 1.` ⇒ 「没有三态词」**假红**，
+ *   而那份产出其实写得**完全合契约**（`## 3. 裁决：有条件通过`）。
+ *
+ * ★★ 这与**铁律 41**（文本型判据必须做作用域限定）是**同一个病** ——
+ *   而铁律 41 正是我在同一天稍早、在另一道门（`test-handover-drain`）上刚诊断出来的。
+ *   **我把刚诊断完的 bug 立刻在隔壁重犯了一次。** 记在这里，作为该铁律的第二个实例。
+ */
+function findSectionHeads(output, sections) {
+  const lines = output.split('\n')
+  const lineStarts = []
+  let off = 0
+  for (const l of lines) { lineStarts.push(off); off += l.length + 1 }
+
+  const heads = new Map()
   for (const name of sections) {
     const nName = normalizeWithMap(name).text
-    const at = nOut.indexOf(nName)
-    spans.push({ name, at, len: nName.length })
-  }
-  for (const sp of spans) {
-    if (sp.at < 0) { found[sp.name] = null; continue }
-    // 归一化坐标 → 原文坐标
-    const fromN = sp.at + sp.len
-    const startOrig = map[fromN] ?? output.length
-    // 到"下一个已定位段落"的起点，或文末
-    let endN = nOut.length
-    for (const other of spans) {
-      if (other === sp || other.at < 0) continue
-      if (other.at >= fromN && other.at < endN) endN = other.at
+    let start = -1
+    let afterName = -1
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      const stripped = stripHeadingMarkers(line)
+      const { text: nStripped, map } = normalizeWithMap(stripped)
+      if (!nStripped.startsWith(nName)) continue
+      const strippedStart = lineStarts[i] + (line.length - stripped.length)
+      const idxAfter = map[nName.length] ?? stripped.length
+      start = strippedStart
+      afterName = strippedStart + idxAfter
+      break
     }
-    const endOrig = map[endN] ?? output.length
-    found[sp.name] = output.slice(startOrig, endOrig).trim()
+
+    if (start < 0) {
+      // 回退：裸出现（无标题形的紧凑样本）
+      const at = output.indexOf(name)
+      if (at >= 0) { start = at; afterName = at + name.length }
+    }
+    heads.set(name, { start, afterName })
+  }
+  return heads
+}
+
+/**
+ * 把产出按"必需段落名"切分，返回每段正文。
+ * ★ 段落名必须真的出现 —— persona 明确要求分段，所以这是契约的一部分。
+ *   找不到就是不合格（错误信息里会指名是哪一段）。
+ */
+function sliceSections(output, sections) {
+  const heads = findSectionHeads(output, sections)
+  const found = {}
+  for (const name of sections) {
+    const me = heads.get(name)
+    if (!me || me.start < 0 || me.afterName < 0) { found[name] = null; continue }
+    // 到"下一个已定位段落"的起点，或文末
+    let end = output.length
+    for (const other of heads.values()) {
+      if (other.start < 0) continue
+      if (other.start >= me.afterName && other.start < end) end = other.start
+    }
+    found[name] = output.slice(me.afterName, end).trim()
   }
   return found
 }
