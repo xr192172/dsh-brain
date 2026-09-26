@@ -105,6 +105,16 @@
     ★★ 配套（本次抓到真缺陷的那条）：**"扫全目录" ≠ "精选入口"** ——
     把一份**精选清单**换成**目录倾倒**，是把"说明书"降级成"噪音"（165 条里 159 条无 role，agent 得先过滤）。
     ⇒ 交付物要**保持用户原话里的粒度**（"我们**写**的那些" ≠ "目录里**有**的那些"）。
+29. **★★★ 子 agent 的"读数"与它的"归因"必须【分开验】**：读数（它贴的 stderr 原文）它抄对了，
+    **归因**（"因为 X 所以 Y"）它编错了 —— 实测它对同一个失败给了**两条错归因**：
+    ① 把"⑦ 探 `:3080`"说成"`:31800` 不稳"（**指错了端口**）② 自检**编号整体错位一位**（`④⑤⑥` vs 真值 `⑤⑥⑦`）。
+    ⇒ **归因也是结论，也要证据**；验子 agent 交付时**只信"可复算的读数"**，**不许信它串好的因果**。
+30. **★★★ "健康检查判红" 与 "被检对象坏了" 是两件事**：见红**先问三句** ——
+    ① **它探的是谁**（实测：都说"现役"其实只探 `:3080`）？
+    ② **探针本身够不够硬**（实测：**无超时、无重试**的探针在**同机负载**下 5/6 次假红）？
+    ③ **被探对象此刻在干什么**（实测：现役正在跑"发起这次检查的那个会话"⇒ **自干扰**）？
+    ★ 越"来自我实验"越假红 ⇒ **整条链自锁**。修法**不是"重试到绿"**（那是把假红转成假绿），
+    而是**探针加超时+有界重试，并把结果分类** `ok`/`slow`/`unreachable`，**判据分辨**"探不通"与"答不对"。
 
 ## ★★★ 当前主线：自进化闭环（**施工从这三份开始读**）
 
@@ -119,16 +129,29 @@
 - `scripts/arm-ports.mjs` — 端口/根目录的**唯一定义**（纯模块、import-safe）。臂 idx ⇒ `33080+idx*40`；池 `=base+21` 必须在段内。
 - `scripts/arm-up.mjs` — **唯一启动入口**。`--live`（现役零参）/ `<臂名>`（训练场，不 flip）；`--open` 起完开界面。
   ★ **"起来了" = 自检全过**（臂模式 7 条；现役模式只判服务可用，不硬套臂专属条）。
+  · ★★ 2026-09-26 修三处（真事故，均消融自证）：
+    ① ⑦「现役仍健康」的探针**太脆 ⇒ 假红** —— 原 `rpc()` **无超时、无重试**；实测**30 并发压 `:3080`
+       同款探针 6 次 ⇒ 5/6 次 `http:0(TimeoutError)`**。而 `run-experiment→arm-up→探 :3080`，
+       **现役此刻正在跑"发起实验的那个会话"** ⇒ **越是来自我实验越假红** ⇒ `不敢发题` ⇒ **整条链自锁**。
+       ⇒ 修：`rpc()`/`get()` 改**超时(20s/次)+有界重试(5次,间隔2s)**，结果**分类** `ok`/`slow`/`unreachable`；
+       ⑦ 的 detail **分辨**"探不通（通道不可用）"与"答不对（现役真坏了）"（**看不到 ≠ 没有**）。
+    ② **僵尸 lease**：lease 指向的 pid **已不存在**（实测 `lease.pid=9224` 死、`:33082/:33101` 握在 pid 16520）
+       ⇒ 旧检查只看 `lease.activeGen.gen` **非空** ⇒ 僵尸被当成"我的实例⇒安全" ⇒ **臂永久卡死**
+       （成因见下方"未闭合"）。⇒ 修：加 `pidAlive()` 活体探测 + **僵尸 lease 指名拒跑**。
+- `packages/switchboard/src/mgmt.ts` — 控制面管理面 `?cmd=mgmt`（`brief/tasks/verdict/experiment/result`）。
+  ★ **安全三前提**：具名动作白名单 + 参数先校验 + **绝不经 shell**（spawn 数组）。
+  · ★★ 2026-09-26 修：**派子进程时 `DSH_HOME` 等"臂身份"变量会泄漏** —— `spawnSync` 默认继承
+    `process.env`，而**臂模式起的控制面**自己 env 里就有 `DSH_HOME=<该臂>/dshhome` ⇒ 泄漏进
+    `run-experiment → isolated-instance` ⇒ 它（**正确地**）拒跑（`isolated-instance.mjs:120`）。
+    ⇒ 修法**不是放宽那道拒绝**（它拦的正是"拿隔离实例当现役源"），而是新增 `ARM_IDENTITY_ENV_KEYS`
+    （8 个）+ 纯函数 `childEnv()`，`execAction` 传 `env: childEnv(env)` ⇒ 子进程回到**现役语境**。
+  · 判据 `scripts/delegation/test-mgmt-surface.mjs`（**19/19 + 单因子消融**，含 ⑨/⑨b/⑨c）。
 - `scripts/dsh-up.cmd` + `scripts/install-desktop-icon.mjs` — 桌面一键（双击 = 起现役 + 自检 + 开界面）。
   ★ 桌面那份**必须打绝对仓库路径**（`%~dp0..` 位置相关会崩）。
 - `scripts/task-bank.mjs` — **题库（agent-agnostic）**：`refresh/list/show/pick/score/stats/verdict`。
   ★ **场 ≠ 实验**：题在 `evals/tasks/`，成绩在 `evals/runs/`。
 - `scripts/run-experiment.mjs` — **闭环**：取题 → 起一代 → 发题 → 收卷 → 判定 → **报警则 exit 1**。`--from <result.json>` 重收卷。
-- `packages/switchboard/src/mgmt.ts` — **控制面管理面** `?cmd=mgmt`：
-  `brief / tasks / verdict&task= / experiment(异步) / result&runId=`。
-  ★ **安全三前提**：具名动作白名单 + 参数先校验 + **绝不经 shell**（spawn 数组）。
-  判据 `scripts/delegation/test-mgmt-surface.mjs`（**16/16 + 单因子消融**）。
-- ★★ `scripts/self-dev-brief.mjs` — **自开发简报**（2026-09-26 用户裁决："把**文档的位置**告诉它，
+- `scripts/self-dev-brief.mjs` — **自开发简报**（2026-09-26 用户裁决："把**文档的位置**告诉它，
   它就可以**自己给自己进行开发**"）：纯函数产 `{docs, tasks, tools, mgmt, missingDocs}` + `renderBrief()`。
   · **13 条 BRIEF_SPEC**（handover / MEMORY / lessons / architecture / skill-as-agent / training-ground / gaps /
   where-we-are / ledger / entry-docs）**每条带 `role`**（"为什么读它"），**路径不存在 ⇒ 标 `missing` 显形**
@@ -139,6 +162,11 @@
     `cmd` 里硬拼凭空造的 `<args>`）⇒ **已回退为【精选入口 9 条 + 存在性核验】**。
     ⇒ **通用纪律：`tools` 段 = 【精选入口】，不是【目录倾倒】；但"报了的必须真有"这条要保留**。
     ⇒ 核验报告 `docs/verify-self-dev-first-leg-2026-09-26.md`（含它新增的 2 条**同义反复判据**的定性）。
+- ★★ **第二棒（现役 DSH 经【管理面】发实验给臂 A）核验报告** = `docs/verify-self-dev-second-leg-2026-09-26.md`。
+  · **通道本身通了**（它真用 HTTP 走了 `brief/tasks/verdict/experiment/result` 五个动作，不是我替它起 shell；
+    台账 `evals/runs/_mgmt/` 有落盘证据）——**但实验没跑完**，卡在 `arm-up` 自检。
+  · **它给的归因是错的**（见铁律 29）；真根因是**三条**：探针假红（铁律 30）/ 管理面 env 泄漏 /
+    僵尸 lease（见"未闭合"）—— 前两条**已修 + 消融自证**，第三条**只修了一半**。
 - `scripts/skill-sieve.mjs` — 筛网（纯函数分级 + 融合候选）；**只判定 + 记账，绝不删任何东西**。
 - `scripts/skill-factory.mjs` — 工厂第一段（`skillToAgentSpec`，**只有一等才建**，复用筛的判定不重写）。
 - `scripts/skill-to-preset.mjs` — 桥（规格 → preset）；★ 真跑验证过：换代后 `agentPreset.list` 10→11。
@@ -177,7 +205,23 @@
 - **判据缺口**：能力库**门只跑到 L1**（L2/L3/L4 未实施 ⇒ 标"通过"就是假绿），G1 是 P0。
 - **既存红**：`test-patch-anchors.mjs` 12/17、`lib-tool-failure.mjs --self-test` 18/19、`key-pool-proxy/src/test.ts` TS2835。
 - **池的"退避重试"支路从未被走到**（没撞上 EADDRINUSE）。
+  ★ **2026-09-26 更新：走到了！** 实测臂 A 的 `boot.log` 第 6 段出现
+  `33101 被占（多半是上一代还没退）⇒ 退避重试（每 1.5s，最多 8 次）` → `⚠️ 连续 9 次拿不到 ⇒ 本代没有池`。
+  ⇒ **该支路的观测已存在**（顺带证明：这条"退避重试"**没有把臂救回来**，只是如实报了"本代没有池"）。
 - **skill store 真实落点未确认**（本机无任何 `*skill*` 文件）⇒ 筛只能跑自测。
+- ★★★ **`arm-up` 对"已在跑的臂"会造【僵尸 lease】⇒ 臂永久卡死**（2026-09-26 实测，**本棒真拦路虎**）：
+  实况：`lease.activeGen.pid=9224` **进程已不存在**；`:33082/:33101` 实际握在 **pid 16520** 手里。
+  机制：`arm-up` 走 `isolated-instance … --force`（**强制覆盖 `<root>/dshhome`**）⇒ 每次**重新准备+起代**，
+  但**旧代进程从不被停** ⇒ 新代绑不上池、当场死掉，**而 lease 已被改写成新代（死掉的）pid** ⇒ 自我延续。
+  ⇒ ★ **已修一半**：加了 `pidAlive()` + **僵尸 lease 指名拒跑**（不再默默又留一个尸体，消融自证过）。
+  ⇒ ★★ **仍未闭合**：**"旧代谁来停"** —— `arm-up` 在"已在跑"时应当**真跳过**（而不是重跑 `--force`），
+  且**起新代前要先确认旧代已退**。⚠️ 这是"经管理面跑完一次自实验"的**最后一个卡点**。
+- ★★ **控制面为何会僵死**（2026-09-26 实测：`:3080`+`:31800` 双双 HTTP 000，进程活着、`netstat` 仍 LISTENING，
+  而**臂 A / gen 全程 200** ⇒ 只有现役控制面这一个进程僵；`lease.expiresAt` 已过期，且它恰在
+  experiment 跑 `arm-up` 的同一时刻被改写）。**怀疑** = 管理面用 **`spawnSync`** 串行跑
+  `arm-up`/`dsh-delegate`（`timeout: 900_000`）⇒ **控制面自己的事件循环被同步 spawn 堵死**。
+  ⇒ **未复现**，**未证实**；若成立则管理面**不能用 `spawnSync`**（要异步+队列）。列为下一件要证的。
+  （恢复手段已验：`cmd //c scripts\relaunch-switchboard.cmd` 后台跑 ⇒ 双双 200 + 换代成功 gen15→16。）
 
 ## ★ 归属与前史（**别把上游的矛盾写成自己的罪状**）
 
