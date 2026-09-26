@@ -86,6 +86,37 @@ check('⑦c-4 brief 不因 task 不存在被拒（它不是题相关的）', rBr
   check('⑦c-5 ★★ 真跑 brief ⇒ 报出的文档路径全部真实存在', rr?.status === 0 && allThere, `校验 ${files.length} 份文档路径`)
   check('⑦c-6 ★ 真跑 brief ⇒ 管理面 URL 按臂派生（按 A 应是 33180 段）', !!bj && String(bj.mgmt?.admin ?? '').endsWith(':33180'), `admin=${bj?.mgmt?.admin}`)
 }
+// ⑨ ★★ 2026-09-26（真事故）：**派生子进程的 env 不许带"臂身份"**（DSH_HOME 等）。
+//    起因：经管理面发 experiment 时，臂模式控制面的 `DSH_HOME` 泄漏进子代 ⇒
+//          `isolated-instance.mjs` 把"该臂自己"当现役源 ⇒ 拒跑 ⇒ 整条自实验链死在 env 上。
+{
+  const m = mod
+  const fake = {
+    PATH: 'C:\\keep-me',
+    DSH_HOME: 'D:/project_develop/_arms/a/dshhome',   // ← 臂身份：必须被剔
+    DSH_ARM_SELF: 'A',
+    DSH_ARM_DENY: 'x,y',
+    SWITCH_PORT: '33080',
+    GEN_PORT_BASE: '33081',
+    SWITCH_ADMIN_PORT: '33180',
+    HANDOVER_ADMIN_PORT_BASE: '33190',
+    DSH_PUBLIC_WEB_URL: 'http://127.0.0.1:33080',
+    SOME_CRED: 'keep-me-too',                          // ← 非臂身份：必须保留
+  }
+  const out = m.childEnv ? m.childEnv(fake) : null
+  if (!out) {
+    check('⑨ childEnv 存在（派生子进程要剔臂身份）', false, '★ 没导出 childEnv')
+  } else {
+    const dropped = ['DSH_HOME', 'DSH_ARM_SELF', 'DSH_ARM_DENY', 'SWITCH_PORT', 'GEN_PORT_BASE', 'SWITCH_ADMIN_PORT', 'HANDOVER_ADMIN_PORT_BASE', 'DSH_PUBLIC_WEB_URL'].every((k) => !(k in out))
+    const kept = out.PATH === 'C:\\keep-me' && out.SOME_CRED === 'keep-me-too'
+    check('⑨ ★★ 臂身份变量被剔除（DSH_HOME/DSH_ARM_*/端口）', dropped, dropped ? '8 个全剔' : `★ 还剩：${['DSH_HOME','DSH_ARM_SELF','DSH_ARM_DENY','SWITCH_PORT','GEN_PORT_BASE','SWITCH_ADMIN_PORT','HANDOVER_ADMIN_PORT_BASE','DSH_PUBLIC_WEB_URL'].filter((k)=>k in out).join(',')}`)
+    check('⑨b ★ 非臂身份变量保留（PATH/凭据不许碰）', kept, kept ? 'PATH+SOME_CRED 保留' : '★ 误删了不该删的')
+    // ⑨c 消融：**不剔** ⇒ ⑨ 必须变红（用一个"原样继承"的对照读法）
+    const naive = { ...fake }                       // ← 修复前的行为：原样继承 process.env
+    const naiveDropped = ['DSH_HOME', 'DSH_ARM_SELF'].every((k) => !(k in naive))
+    check('⑨c 消融：不剔 env ⇒ ⑨ 会红（DSH_HOME 原样泄漏）', naiveDropped === false, `naive 里 DSH_HOME=${naive.DSH_HOME}`)
+  }
+}
 // ⑧ 消融：撤掉字符集校验 ⇒ ③ 必须变红
 console.log('\n=== 消融自证 ===')
 const SRC = path.join(WT, 'packages/switchboard/src/mgmt.ts')

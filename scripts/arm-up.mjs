@@ -77,27 +77,70 @@ export const rootForArm = (armName) => sharedRootForArm(armName)
 // ─────────────────────────────────────────────────────────────────────────────
 // 自检（★ 把今天踩的坑逐条固化）
 // ─────────────────────────────────────────────────────────────────────────────
-const rpc = async (front, method, payload = {}) => {
+/**
+ * ★★ 2026-09-26 修：**探针必须带超时 + 有界重试，并且**分类**失败原因**。
+ *
+ * 实证（我复现过）：`run-experiment.mjs` → `arm-up.mjs A` 的自检 ⑦ 会去探**现役 `:3080`**；
+ * 而**现役此刻正在跑发起这次实验的那个会话**（= 被我们占着）⇒ 前门排队 ⇒
+ * **同一个探针在负载下 5/6 次返回 `http:0`（TimeoutError）** ⇒ ⑦ 假红 ⇒ `不敢发题` ⇒ **整条链自锁**。
+ *
+ * ★ 这**不是**"现役不稳"（现役 pid 未变、连测 10/10 成功），是**探针太脆**。
+ * ★ 修法纪律（不许把假红转成假绿）：
+ *   · **不许**"重试到绿就算过" —— 那是把假红换成假绿（违反铁律 7/15）。
+ *   · 正解 = ① **带超时**（单次有上限）② **有界重试**（吸收偶发抖动）③ ★ **分类**：
+ *     `ok`（答对了）/ `slow`（答了但非 200 或不 ok）/ `unreachable`（一次都没探到）。
+ *     判据**只**把 `unreachable` 或 `slow` 当红；`unreachable` 与 `slow` 在报告里**分开写**，
+ *     因为"探不通"（看不到）与"探得通但答错"（看到了坏结果）是**两件不同的事**（铁律 12）。
+ */
+const rpcOnce = async (front, method, payload, timeoutMs) => {
   const { randomUUID } = await import('node:crypto')
   try {
     const r = await fetch(`${front}/api/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'client-request', rpcId: randomUUID(), method, payload }),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     const j = await r.json()
     return { http: r.status, ok: !!j?.result?.ok, value: j?.result?.value, error: j?.result?.error }
   } catch (e) {
-    return { http: 0, ok: false, error: { message: String(e.message) } }
+    return { http: 0, ok: false, unreachable: true, error: { message: String(e.message) } }
   }
 }
-const get = async (url) => {
+
+/** ★ 带超时（默认 20s/次）+ 有界重试（默认 5 次，间隔 2s）的探针；返回**分类后**的结果。 */
+const rpc = async (front, method, payload = {}, { tries = 5, timeoutMs = 20000, gapMs = 2000 } = {}) => {
+  const attempts = []
+  for (let i = 0; i < tries; i++) {
+    const r = await rpcOnce(front, method, payload, timeoutMs)
+    attempts.push(r)
+    if (r.http === 200 && r.ok) {
+      return { ...r, kind: 'ok', tries: i + 1, attempts }
+    }
+    if (i < tries - 1) await new Promise((s) => setTimeout(s, gapMs))
+  }
+  // 一次都没成功 ⇒ 分类：**有没有一次探到**（探到 = 通道没断，只是答得不对）
+  const anyReached = attempts.some((a) => a.http !== 0)
+  const last = attempts[attempts.length - 1]
+  return { ...last, kind: anyReached ? 'slow' : 'unreachable', tries, attempts }
+}
+/** ★ 2026-09-26：`get` 同样**带超时 + 有界重试**（原因同 `rpc`；控制面偶发排队不该判成"没起来"）。 */
+const getOnce = async (url, timeoutMs) => {
   try {
-    const r = await fetch(url)
+    const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
     return { http: r.status, text: await r.text() }
   } catch (e) {
-    return { http: 0, text: String(e.message) }
+    return { http: 0, text: String(e.message), unreachable: true }
   }
+}
+const get = async (url, { tries = 5, timeoutMs = 20000, gapMs = 2000 } = {}) => {
+  let last = { http: 0, text: '(未探测)' }
+  for (let i = 0; i < tries; i++) {
+    last = await getOnce(url, timeoutMs)
+    if (last.http === 200) return { ...last, tries: i + 1 }
+    if (i < tries - 1) await new Promise((s) => setTimeout(s, gapMs))
+  }
+  return { ...last, tries }
 }
 
 /**
@@ -132,7 +175,7 @@ export function latestBootLog(sbDir, activeGenName) {
 /**
  * 自检（纯函数化的核心）：给定"读数"，判 6 条。★ 读数取自真实探测，**不读注释、不读意图**。
  */
-export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, seatsLogOk, isolationLogOk, denyCount, liveOk, mode = 'arm', htmlOk = null }) {
+export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, seatsLogOk, isolationLogOk, denyCount, liveOk, liveKind = null, mode = 'arm', htmlOk = null }) {
   const rows = []
   const add = (name, ok, detail) => rows.push({ name, ok, detail })
   if (mode === 'live') {
@@ -160,7 +203,11 @@ export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, sea
   // ⑥ ★ 池在**本段内**（不是包内硬编码的 3101）
   add('⑥ 池端口在本段内', poolLogOk, `期望 ${ports.pool}`)
   // ⑦ 现役仍健康（隔离实例不许把现役搞掉）
-  add('⑦ 现役仍健康', liveOk, liveOk ? '前门 200' : '★ 现役受影响（这绝不该发生）')
+  // ★ 2026-09-26：判据**只**吃 `liveOk`（布尔），但 `detail` 必须**分辨**"探不通"与"探得通但答错"
+  //   —— 这两件事的处置完全不同（前者是通道问题，后者是现役真的坏了）。见 rpc() 的 kind。
+  add('⑦ 现役仍健康', liveOk === true, liveKind === 'ok' ? '前门 200' : liveKind === 'unreachable'
+    ? '★ 探不通（通道不可用）—— 不等于现役坏了；先别下结论（见 rpc 的超时/重试）'
+    : `★ 探得通但答不对（kind=${liveKind}）—— 这才是"现役受影响"该有的样子`)
   return rows
 }
 
@@ -175,18 +222,33 @@ const selftest = async () => {
     seatsLogOk: true,
     poolLogOk: true,
     liveOk: true,
+    liveKind: 'ok',
   })
   const ok = rows.every((r) => r.ok)
   console.log('=== arm-up 自检器自测（全绿情形）===')
   for (const r of rows) console.log(`  ${r.ok ? 'ok  ' : 'FAIL'} ${r.name} — ${r.detail}`)
   // ★ 消融：把"隔离层 deny=0"喂进去 ⇒ ④ 必须变红（空 deny = 不拦 = 最坏的假绿）
-  const rows2 = judgeSelfCheck({ ports, front: { http: 200, ok: true }, admin: { http: 200 }, isolationLogOk: true, denyCount: 0, seatsLogOk: true, poolLogOk: true, liveOk: true })
+  const rows2 = judgeSelfCheck({ ports, front: { http: 200, ok: true }, admin: { http: 200 }, isolationLogOk: true, denyCount: 0, seatsLogOk: true, poolLogOk: true, liveOk: true, liveKind: 'ok' })
   const row4 = rows2.find((r) => r.name.startsWith('④'))
-  const rows3 = judgeSelfCheck({ ports: { ...ports, pool: 3101 }, front: { http: 200, ok: true }, admin: { http: 200 }, isolationLogOk: true, denyCount: 2, seatsLogOk: true, poolLogOk: true, liveOk: true })
+  const rows3 = judgeSelfCheck({ ports: { ...ports, pool: 3101 }, front: { http: 200, ok: true }, admin: { http: 200 }, isolationLogOk: true, denyCount: 2, seatsLogOk: true, poolLogOk: true, liveOk: true, liveKind: 'ok' })
   const row1 = rows3.find((r) => r.name.startsWith('①'))
+  // ★★ 新增消融（2026-09-26，对应真事故）：⑦ 的 detail 必须**分辨**两种失败，且**两种都判红**
+  const rowsU = judgeSelfCheck({ ports, front: { http: 200, ok: true }, admin: { http: 200 }, isolationLogOk: true, denyCount: 2, seatsLogOk: true, poolLogOk: true, liveOk: false, liveKind: 'unreachable' })
+  const rowsS = judgeSelfCheck({ ports, front: { http: 200, ok: true }, admin: { http: 200 }, isolationLogOk: true, denyCount: 2, seatsLogOk: true, poolLogOk: true, liveOk: false, liveKind: 'slow' })
+  const r7u = rowsU.find((r) => r.name.startsWith('⑦'))
+  const r7s = rowsS.find((r) => r.name.startsWith('⑦'))
+  const kindDistinguished = r7u.detail !== r7s.detail && /探不通/.test(r7u.detail) && /答不对/.test(r7s.detail)
   console.log(`  ${!row4.ok ? 'ok  ' : 'FAIL'} 消融：deny=0 ⇒ ④ 变红 ${!row4.ok ? '✓' : ''}`)
   console.log(`  ${!row1.ok ? 'ok  ' : 'FAIL'} 消融：池端口=3101（撞现役）⇒ ① 变红 ${!row1.ok ? '✓' : ''}`)
-  const total = ok && !row4.ok && !row1.ok
+  console.log(`  ${!r7u.ok && !r7s.ok ? 'ok  ' : 'FAIL'} 消融（2026-09-26 真事故）：liveOk=false ⇒ ⑦ 变红（两种 kind 都红）`)
+  console.log(`  ${kindDistinguished ? 'ok  ' : 'FAIL'} 消融：⑦ 的 detail **分辨**"探不通"与"答不对"（不许混为一谈）`)
+  // ★★ 2026-09-26 加：**僵尸 lease 检测**（真事故：lease.pid 指向不存在的进程 ⇒ 臂永久卡死）
+  const selfAlive = pidAlive(process.pid)                 // 自己一定活着
+  const ghostAlive = pidAlive(99999999)                   // 一个几乎不可能存在的 pid
+  const badAlive = pidAlive(0) && pidAlive(-1) && pidAlive('abc')
+  const pidOk = selfAlive === true && ghostAlive === false && badAlive === false
+  console.log(`  ${pidOk ? 'ok  ' : 'FAIL'} 僵尸 lease 判据：pidAlive(自己)=${selfAlive}（须 true）/ pidAlive(99999999)=${ghostAlive}（须 false）/ 非法输入=${badAlive}（须 false）`)
+  const total = ok && !row4.ok && !row1.ok && !r7u.ok && !r7s.ok && kindDistinguished && pidOk
   console.log(`\n结果：${total ? 'PASS' : 'FAIL'}`)
   return total ? 0 : 1
 }
@@ -255,15 +317,42 @@ if (LIVE_MODE) {
 // ── ★★ 段位归属前置断言（**仅臂模式**）：那一段若有人在应答，**必须证明是本实例的**（看 lease）──
 //    否则就是"别人占着这段"（我第一版正是把臂 A 的前门当成了臂 B 的）⇒ **拒跑**。
 //    ★ 现役模式不适用：现役就是 3080，不存在"段位归属"这个问题。
-const rootHasLease = (() => {
+//
+// ★★★ 2026-09-26 加：**lease 里的那个 pid 必须是活的**，否则就是"僵尸 lease"。
+//   真事故（我三路交叉验过）：臂 A 的 `lease.json` 写 `activeGen.pid = 9224`，而
+//   `tasklist /FI "PID eq 9224"` ⇒ **进程不存在**；`:33082`/`:33101` 实际握在 **pid 16520** 手里。
+//   成因：`arm-up` 走 `isolated-instance … --force` ⇒ 每次**重新准备+重新起代**，但**旧代从不停** ⇒
+//   新代绑不上池（boot.log：`33101 被占 … 连续 9 次拿不到 ⇒ 本代没有池`）⇒ 新代死；
+//   **而 lease 已被改写成新代（死掉的）pid** ⇒ 从此 lease 指向**尸体**。
+//   ⇒ 而**旧检查只看 `lease.activeGen.gen` 是不是非空字符串** ⇒ 僵尸 lease 被当成"这是我的实例⇒安全"。
+//   ★ 后果 = **臂永久卡死**：第一次 arm-up 成功，之后每次都在 ⑥/⑦ 上红（而根因被这一条掩盖）。
+//   ★ 判据（不许读注释、不许读意图）：**去系统里问那个 pid 还在不在跑**。
+/** 该 pid 是否在运行（`process.kill(pid, 0)` 不发信号、只做存在性探测 —— 跨平台可用）。 */
+export function pidAlive(pid) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return false
+  try {
+    process.kill(n, 0)
+    return true
+  } catch (e) {
+    // EPERM = 进程在、但没权限（也算"活着"）；ESRCH = 真的不在
+    return e?.code === 'EPERM'
+  }
+}
+
+const leaseInfo = (() => {
   // ★ 2026-09-25 修：lease 在 **`<root>/dshhome/switchboard/lease.json`**（**不在** `<gen>/lease.json`）。
   //   我第一版找 `<gen>/lease.json` ⇒ 恒 false ⇒ **把自己的实例误判成"别人占着"⇒ 误拒**。
   const f = path.join(sbDir, 'lease.json')
-  if (!fs.existsSync(f)) return false
+  if (!fs.existsSync(f)) return { exists: false, gen: null, pid: null, alive: false }
   try {
-    return !!JSON.parse(fs.readFileSync(f, 'utf8'))?.activeGen?.gen
-  } catch { return false }
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'))
+    const gen = j?.activeGen?.gen ?? null
+    const pid = j?.activeGen?.pid ?? null
+    return { exists: true, gen, pid, alive: pid ? pidAlive(pid) : false }
+  } catch { return { exists: true, gen: null, pid: null, alive: false } }
 })()
+const rootHasLease = !!leaseInfo.gen
 const preFront = await rpc(frontUrl, 'session.list')
 const preAdmin = await get(`${adminUrl}/?cmd=status`)
 const someoneThere = preFront.http === 200 || preAdmin.http === 200
@@ -275,7 +364,23 @@ if (!LIVE_MODE && someoneThere && !rootHasLease) {
   )
   process.exit(2)
 }
-if (someoneThere) console.log(`  （前置：已在应答${LIVE_MODE ? '' : '，且本 root 有 lease'} ⇒ 确认是**本实例**，将继续；② 会跳过启动）`)
+// ★★★ 僵尸 lease：有 lease，但**它指的 pid 已经不在跑** ⇒ 拒跑并**指名道姓**（别让它默默继续）。
+//   为什么必须拒：继续下去会"重新起一代"，而端口实际被**另一个还活着的进程**握着 ⇒
+//   新代绑不上池、当场死掉、lease 又被改写成新的尸体 ⇒ **僵尸状态自我延续**（实测如此）。
+if (!LIVE_MODE && leaseInfo.exists && rootHasLease && !leaseInfo.alive) {
+  const holder = leaseInfo.pid ? `（lease 说 pid=${leaseInfo.pid}）` : ''
+  console.error(
+    `[失败] **僵尸 lease**：${path.join(sbDir, 'lease.json')} 指向 gen=${leaseInfo.gen}${holder}，\n` +
+      `  但**那个进程已经不在运行** ⇒ 若继续"起一代"，新代多半绑不上端口（旧代还没退）⇒ 又留一个尸体。\n` +
+      `  ⇒ 先收拾干净再跑：把仍在监听本段端口的进程停掉（本段的 front=${ports.front} pool=:${ports.pool}），\n` +
+      `     或删掉 ${path.join(sbDir, 'lease.json')} 后重跑（★ 只在确认没有活着的旧代时才这么做）。`,
+  )
+  process.exit(2)
+}
+if (someoneThere) {
+  const aliveNote = LIVE_MODE ? '' : `，且本 root 有 lease${leaseInfo.alive ? '（pid 活着）' : ''}`
+  console.log(`  （前置：已在应答${aliveNote} ⇒ 确认是**本实例**，将继续；② 会跳过启动）`)
+}
 
 // ── 现役：不需要"准备"（不复制 profile、不带臂身份）⇒ 已在跑就跳过，否则 relaunch ──
 if (LIVE_MODE && !hasFlag('--no-start')) {
@@ -373,10 +478,13 @@ if (LIVE_MODE) {
   const h = await get(`${frontUrl}/`)
   htmlOk = h.http === 200 && /<html|<!doctype/i.test(h.text)
 }
+// ★ 2026-09-26：⑦ 的探针**带超时 + 有界重试**（5×20s），并把结果**分类**（ok/slow/unreachable）。
+//   起因是实测的真假红：现役正在跑"发起本实验的那个会话"时，裸探针 5/6 次 `http:0` ⇒ 整条链自锁。
 const live = await rpc('http://127.0.0.1:3080', 'session.list')
 const rows = judgeSelfCheck({
   ports, front, admin, isolationLogOk, denyCount, seatsLogOk, poolLogOk,
-  liveOk: live.http === 200 && live.ok, mode: LIVE_MODE ? 'live' : 'arm', htmlOk,
+  liveOk: live.http === 200 && live.ok, liveKind: live.kind ?? null,
+  mode: LIVE_MODE ? 'live' : 'arm', htmlOk,
 })
 
 console.log('-- ④ 自检（"起来了" = 这些全过）--')

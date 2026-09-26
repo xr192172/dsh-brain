@@ -116,11 +116,47 @@ export function argvFor(v: Validated, wt: string, nodeExe: string): string[] {
   }
 }
 
-/** 执行（spawn **数组**，不经 shell）。 */
-export function execAction(v: Validated, wt: string, nodeExe = process.execPath): { code: number; stdout: string; stderr: string } {
+/**
+ * ★★ 2026-09-26 修：**子进程不许继承控制面的 `DSH_HOME`（以及其它"臂身份"变量）**。
+ *
+ * 真事故（我实测复现过）：经管理面发 `action=experiment&arm=A` 时，
+ * `run-experiment.mjs` → `isolated-instance.mjs` **总是拒跑**：
+ * ```
+ * [失败] 当前 shell 里的 DSH_HOME 指向的就是【本隔离实例自己】（D:\project_develop\_arms\a\dshhome）
+ *   ⇒ 本脚本要拿【现役】当源，这样会把隔离实例当现役（空转/搞乱）。请先 Remove-Item Env:DSH_HOME。
+ * ```
+ * 根因：`spawnSync(..., { cwd: wt })` **默认继承 `process.env`**；
+ * 而**臂模式起的控制面**自己的 env 里就有 `DSH_HOME=<该臂>/dshhome` ⇒
+ * 它泄漏进子代 ⇒ 子代把"该臂自己"当成"现役源" ⇒（正确地）拒跑 ⇒ **整条自实验链死在这个 env 上**。
+ *
+ * ★ 修法（**不是**放宽那道拒绝 —— 那道拒绝是对的，它拦住的正是"拿隔离实例当现役"这种搞乱）：
+ *   在**派生子进程**时，把"臂身份"这一类变量**显式剔掉**，让子进程回到"现役语境"。
+ *   ⇒ 这样 `isolated-instance.mjs` 会看到真正的现役 `DSH_HOME`（默认 `C:/Users/Admin/.dsh`）。
+ * ★ 只剔"身份/端口"这几类（**白名单式地删**），不动其它（PATH/凭据等必须保留）。
+ */
+export const ARM_IDENTITY_ENV_KEYS = [
+  'DSH_HOME',
+  'DSH_ARM_SELF',
+  'DSH_ARM_DENY',
+  'SWITCH_PORT',
+  'GEN_PORT_BASE',
+  'SWITCH_ADMIN_PORT',
+  'HANDOVER_ADMIN_PORT_BASE',
+  'DSH_PUBLIC_WEB_URL',
+] as const
+
+/** 返回一份**剔掉臂身份变量**的环境副本（纯函数，可测）。 */
+export function childEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...base }
+  for (const k of ARM_IDENTITY_ENV_KEYS) delete out[k]
+  return out
+}
+
+/** 执行（spawn **数组**，不经 shell）。★ env 走 `childEnv()`（剔臂身份）。 */
+export function execAction(v: Validated, wt: string, nodeExe = process.execPath, env: NodeJS.ProcessEnv = process.env): { code: number; stdout: string; stderr: string } {
   const argv = argvFor(v, wt, nodeExe)
   if (argv.length === 0) return { code: 0, stdout: '', stderr: '' }
-  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 900_000, cwd: wt })
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 900_000, cwd: wt, env: childEnv(env) })
   return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
 }
 
