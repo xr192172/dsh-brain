@@ -95,6 +95,20 @@ const GATES = [
     cmd: ['node', 'scripts/check-desktop-launcher.mjs'],
   },
   {
+    id: 'availability-surface',
+    // ★★★ 2026-09-27 新增（用户问："启动/运维缺什么料" -> 取证发现视图只讲交接）。
+    //   现场：`?cmd=panel` 的 <title> 逐字「DSH 三脑 · 交接投影」，
+    //   作用域内「哨兵/池、死代、清理、健康、可用性」**全部零命中**
+    //   （而这些话题在 main.ts 全文分别有 13/20/1/4/1 次命中）
+    //   ⇒ 缺的不是"状态视图"，是**把视图从'只讲交接'扩到'讲可用性'**。
+    //   本门：静态查 availability 分支 + <title> 含"可用性"；
+    //   行为查起**隔离实例**（自己的 DSH_HOME/WORK_DIR，不碰现役 —— 铁律 31），
+    //   真造 3 个死代 + 1 个假现役，真问一遍 `?cmd=availability` 并核对计数与字节口径。
+    //   ★ 含 A6 阳性对照（自愈必须真的发生）+ C1 消融自证。
+    what: '可用性投影：?cmd=availability + panel 的可用性区必须在（三态 + 隔离实例实证）',
+    cmd: ['node', 'scripts/switchboard/test-availability-surface.mjs'],
+  },
+  {
     id: 'plugin-hygiene',
     what: '插件卫生：包完整性 / 残留 / deps 与 bundles / lock 一致 / 遗留物',
     cmd: ['node', 'scripts/check-plugin-hygiene.mjs'],

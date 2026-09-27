@@ -32,7 +32,7 @@ import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { FrontDoor } from './proxy.js'
 import { Coordinator, allocGenPort, type CoordinatorConfig } from './coordinator.js'
 import { AdminClient } from './adminclient.js'
@@ -42,6 +42,22 @@ import * as mgmt from './mgmt.js'
 import type { PreflightManifest } from './preflight-contract.js'
 import { resolveGenSpawnSpec, projectAssembly } from './gen-assembly.js'
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+/**
+ * `readdirSync` 的**不抛**包装：目录不存在 / 权限不足 ⇒ 返回 `[]`。
+ *
+ * ★ 为什么要包（铁律 33 的落地）：可用性投影里"某个子目录读不到"是**正常情况**
+ *   （比如死代目录被外部工具动过、`_archive-*` 还没建）。
+ *   让它抛 ⇒ 整条 `?cmd=availability` 500，把"部分未知"升级成"整体不可用" = 假红。
+ *   ⇒ 读不到就**如实是空**，由调用方区分"真的没有"与"读不到"（本命令用 `null`/`note` 表达不确定）。
+ */
+function readdirSyncSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
 
 /**
  * `?cmd=assembly` 里探的"模型接入相关环境变量名"。
@@ -403,6 +419,91 @@ function boot(config: CoordinatorConfig): void {
           mainPort: switchPort,
         }),
       )
+    } else if (cmd === 'availability') {
+      // ★★★ 2026-09-27（用户问："启动/运维缺什么料"）：**可用性投影**。
+      //
+      // 为什么加（现场证据）：`?cmd=panel` 的 title 逐字是「DSH 三脑 · 交接投影」，
+      //   它**只讲换代** —— 作用域内「哨兵/池、死代、清理、健康、可用性」**全部零命中**
+      //   （而这些话题在 main.ts 全文分别有 13/20/1/4/1 次命中）。
+      //   ⇒ 缺的不是"状态视图"，是**把视图从'只讲交接'扩到'讲可用性'**。
+      //
+      // 设计纪律：
+      //   · **同步只读**：只读内存态 + 对 gen 目录做一次 `readdirSync` + `statSync`。
+      //     绝不 spawn（铁律 34：mgmt 那条同步 spawn 曾把前门拖到 max=8.23s）。
+      //   · **不删任何东西**：本命令只**数**和**报**，清理动作另有其物（且默认关闭）。
+      //   · 三态（铁律 33）：读不到 ⇒ 报 `null` + `note`，**不当 0、不当通过**。
+      try {
+        const gens = readdirSyncSafe(config.coordDir).filter((n) => /^gen-\d+$/.test(n))
+        const active = coord.getLease()?.current?.activeGen?.gen ?? null
+        let deadCount = 0
+        let liveBytes = 0
+        let deadBytes = 0
+        const deadAges: number[] = []
+        const now = Date.now()
+        for (const g of gens) {
+          const dir = join(config.coordDir, g)
+          let bytes = 0
+          let newest = 0
+          try {
+            for (const f of readdirSyncSafe(dir)) {
+              try {
+                const st = statSync(join(dir, f))
+                if (st.isFile()) bytes += st.size
+                else if (st.isDirectory()) {
+                  // 只下探一层（run/ 里还有内容），够用且不会失控
+                  for (const f2 of readdirSyncSafe(join(dir, f))) {
+                    try {
+                      const st2 = statSync(join(dir, f, f2))
+                      if (st2.isFile()) bytes += st2.size
+                      if (st2.mtimeMs > newest) newest = st2.mtimeMs
+                    } catch { /* 忽略 */ }
+                  }
+                }
+                if (st.mtimeMs > newest) newest = st.mtimeMs
+              } catch { /* 忽略 */ }
+            }
+          } catch { /* 忽略 */ }
+          if (g === active) {
+            liveBytes += bytes
+          } else {
+            deadCount++
+            deadBytes += bytes
+            if (newest > 0) deadAges.push(Math.round((now - newest) / 3600000))
+          }
+        }
+        deadAges.sort((a, b) => b - a)
+        const pv = coord.poolView
+        // 归档区（清理过的死代）—— 存在即报，不存在不报错
+        let archived = 0
+        try {
+          archived = readdirSyncSafe(join(config.coordDir, '_archive-dead-gens')).filter((n) => /^gen-\d+$/.test(n)).length
+        } catch { /* 忽略 */ }
+        res.end(
+          JSON.stringify({
+            ok: true,
+            cmd: 'availability',
+            /** 现役代（真相在 lease，不猜 max(genNumber)）。 */
+            active,
+            /** 盘上 gen 目录总数（**目录口径**）。 */
+            genDirsTotal: gens.length,
+            /** 死代（非现役）数量。 */
+            deadGens: deadCount,
+            /** 已归档的死代数（清理过的）。 */
+            archivedGens: archived,
+            /** 字节口径（铁律 20：口径要分开说）。 */
+            bytes: { live: liveBytes, dead: deadBytes, total: liveBytes + deadBytes },
+            /** 最老的死代已经静默多久（小时）。空数组 = 没有死代。 */
+            oldestDeadAgeHours: deadAges.length ? deadAges[0] : null,
+            /** 池（内存态）。 */
+            pool: { primary: pv.primary ?? null, sentinel: pv.sentinel ?? null, others: pv.others ?? [] },
+            /** 判据用：盘上有死代 ⇒ 提示可以清理（**本命令自己不清理**）。 */
+            note: deadCount > 0 ? `盘上有 ${deadCount} 个死代目录（${(deadBytes / 1024).toFixed(1)} KB），池是干净的` : '无常驻死代',
+            t: now,
+          }),
+        )
+      } catch (e) {
+        res.end(JSON.stringify({ ok: false, cmd: 'availability', error: e instanceof Error ? e.message : String(e) }))
+      }
     } else if (cmd === 'stand') {
       // ★★ **立哨**：spawn 一代但**不提拔**（绝不 flip ⇒ 前门不动）。
       //   ★ 用户裁决 5：*"立哨和提拔肯定要拆呀，不拆的话那岂不是一给他立好了他就要自动提拔了。"*
@@ -558,7 +659,7 @@ if (isMain) {
 /** 只读投影面板 HTML（自包含，无外部依赖）。数据来自同源 admin 接口。 */
 const panelHtml = `<!doctype html><html lang="zh"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DSH 三脑 · 交接投影</title>
+<title>DSH 三脑 · 可用性投影</title>
 <style>
   :root{--bg:#0f1420;--card:#171d2e;--line:#26304a;--fg:#e6eaf3;--mut:#8b95ad;
     --ok:#34d399;--run:#60a5fa;--warn:#fbbf24;--bad:#f87171;}
@@ -595,7 +696,15 @@ const panelHtml = `<!doctype html><html lang="zh"><meta charset="utf-8">
 <h1>交接阶段流水</h1>
 <div class="stages" id="gStages"></div>
 <div id="gFlow"><div class="err">加载中…</div></div>
-<footer>DSH 三脑 · 只读投影 · 数据源 <span class="mono">?cmd=flow / ?cmd=status</span></footer>
+<h1 style="margin-top:28px">可用性</h1>
+<div class="grid" style="margin-top:12px">
+  <div class="card"><div class="lbl">现役代</div><div class="val" id="aActive">-</div><div class="mono dim" id="aActiveSub"></div></div>
+  <div class="card"><div class="lbl">池：哨兵</div><div class="val" id="aSentinel">-</div><div class="mono dim" id="aOthers"></div></div>
+  <div class="card"><div class="lbl">盘上 gen 目录</div><div class="val" id="aGens">-</div><div class="mono dim" id="aGensSub"></div></div>
+  <div class="card"><div class="lbl">死代占用</div><div class="val" id="aDead">-</div><div class="mono dim" id="aDeadSub"></div></div>
+</div>
+<div id="aNote" class="dim mono" style="margin-bottom:20px"></div>
+<footer>DSH 三脑 · 只读投影 · 数据源 <span class="mono">?cmd=flow / ?cmd=status / ?cmd=availability</span></footer>
 <script>
 const stagees=['idle','defer','spawn','ready','catchup','freeze','promote','flip','verify','retire'];
 const admin=new URLSearchParams(location.search).get('admin')||'http://127.0.0.1:31800';
@@ -618,10 +727,30 @@ async function refresh(){
     el('gStages').innerHTML=stagees.map((s,i)=>{
       const cls=i===curi?' cur':seen.has(s)?' done':''; return '<div class="stage'+cls+'">'+s+'</div>'}).join('');
     // 流水表
-    if(!rows.length){el('gFlow').innerHTML='<div class="err">暂无交接流水（尚未进行过切换，或 state.jsonl 为空）</div>';return}
-    el('gFlow').innerHTML='<table><thead><tr><th>时间</th><th>阶段</th><th>gen</th><th>备注</th></tr></thead><tbody>'+
+    // ★ 注意：这里**不许 return** —— 可用性区在下面，早退会让它整块不渲染（假"没数据"）。
+    if(!rows.length){el('gFlow').innerHTML='<div class="err">暂无交接流水（尚未进行过切换，或 state.jsonl 为空）</div>'}
+    else el('gFlow').innerHTML='<table><thead><tr><th>时间</th><th>阶段</th><th>gen</th><th>备注</th></tr></thead><tbody>'+
       rows.slice().reverse().map(r=>'<tr><td class="nowrap mono dim">'+t(r.t)+'</td><td>'+(r.stage||'-')+'</td><td class="mono">'+(r.gen||'-')+'</td><td class="dim">'+(r.note||'')+'</td></tr>').join('')+'</tbody></table>';
   }catch(e){el('gFlow').innerHTML='<div class="err">读取失败：'+e.message+'<br>请确认 switchboard 已启动，且 admin 端口 (默认 31800) 可访问。</div>'}
+  // ── 可用性区（独立 try：一条读不到不该拖垮另一条）──────────────────────────
+  try{
+    const av=await j('cmd=availability');
+    if(av.ok===false){el('aNote').textContent='可用性读取失败：'+(av.error||'未知')}
+    else{
+      el('aActive').textContent=av.active||'-';
+      const p=av.pool||{};
+      el('aActiveSub').textContent=p.primary?('pid '+(p.primary.pid??'?')+' · port '+(p.primary.port??'?')):'';
+      el('aSentinel').innerHTML=p.sentinel?chip('run'):'<span class="dim">无</span>';
+      el('aOthers').textContent=(p.others&&p.others.length)?('others: '+p.others.map(o=>o.gen).join(', ')):'others: 0';
+      const b=av.bytes||{live:0,dead:0,total:0};
+      el('aGens').textContent=(av.genDirsTotal??'-')+' 个';
+      el('aGensSub').textContent='活 '+((b.live/1024).toFixed(1))+' KB · 总 '+((b.total/1024).toFixed(1))+' KB'+(av.archivedGens?(' · 已归档 '+av.archivedGens):'');
+      const dead=av.deadGens??0;
+      el('aDead').innerHTML=dead>0?('<span class="chip warn">'+dead+' 个</span>'):('<span class="chip ok">0</span>');
+      el('aDeadSub').textContent=dead>0?(('' + (b.dead/1024).toFixed(1))+' KB'+(av.oldestDeadAgeHours!=null?(' · 最老静默 '+av.oldestDeadAgeHours+'h'):'')):'盘上无死代';
+      el('aNote').textContent=av.note||'';
+    }
+  }catch(e){el('aNote').textContent='可用性读取失败：'+e.message}
 }
 refresh(); setInterval(refresh,1500);
 </script></html>`;
