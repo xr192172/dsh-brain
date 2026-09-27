@@ -3,7 +3,7 @@
  *
  * 分工：
  *   - MCP 承载：DSH 原生 @deepseek-ai/dsh-mcp-client 以 stdio 连 design-canvas，
- *     把 55 个工具注册到 ctx.tools，命名空间 `mcp__<serverName>__<rawName>`
+ *     把 67 个工具注册到 ctx.tools，命名空间 `mcp__<serverName>__<rawName>`
  *     （如 `mcp__design-canvas__import_project` / `explore_code` / `impact_analysis`）。
  *   - 本插件：在用户“选中/新建工作区”时，自动调用 `import_project` 对工作区做
  *     前置解析 —— tree-sitter 建立符号/import/调用边/类型引用索引并持久化 DSL，
