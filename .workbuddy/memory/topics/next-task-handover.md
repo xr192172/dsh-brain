@@ -1,3 +1,49 @@
+## ★★★ 席位迁移线（2026-09-27）—— 状态与下一项
+
+> 放在最顶，接手先读。**本段是这条线的唯一入口。**
+
+**一句话**：用户要求「在**兼容**外部 agent 市场（wshoboy/agents + obra/superpowers）MD 格式的同时，
+**把我们现在硬编码的那些乱七八糟的东西向它那边迁移改造**」。
+⇒ **迁移的形状已经完整**（一份源 → 生成物 → 漂移门）；**缺的是"让它动起来"**。
+
+### 已落地（可复算）
+
+| 项 | 位置 | 判据 |
+|---|---|---|
+| 席位定义格式（规格） | `seats/schema.json` | 含 `body.selfDoubtSections`（必填 fail-closed） |
+| 三席定义（源） | `seats/library/council-{architect,dev,review}.md` | **指纹全程未变**（迁移只改解析器） |
+| ★ 接线（**消除双份真相**） | `packages/subagent-council/src/{index.ts,seat-registry.generated.ts}` | `SEAT_PERSONAS/SEAT_TOOL_SCOPE/SEAT_PROVIDER_NAMES` 全部由生成物推导；旧短名走 `LEGACY_ALIASES` 垫片（命中即打印迁移提示） |
+| 漂移门 | `scripts/seats/gen-seat-registry.mjs --check` | `OK —— 3 份定义与生成物一致` |
+| 判据门 | `scripts/seats/check-seat-defs.mjs` | `45 PASS / 0 FAIL / 0 SKIP`；含 **F5a/F5b** 与 **A2 消融自证** |
+| 契约判据 | `scripts/seats/test-seat-contract.mjs` | `42 passed, 0 failed` |
+| 花名册 | `AGENTS.md` | `gen-roster.mjs --check` 同步（指纹 `6f699b3f3ce1`） |
+| 融合管线文档 | `docs/seat-fusion-pipeline-2026-09-27.md` | §6 的 #1/#2 **已完成** |
+
+### ★ 下一步（**唯一一项**，按融合管线 §6 的 #3）
+
+**采 F1/F2 读数** —— 这是"从静态配置变自进化"的那一步。
+- **F1 已经采了第一次**（2026-09-27，见日更 §16）：**`council_architect` 真调用 3 次、
+  `council_dev` 0、`council_review` 0**（388 会话全量）。
+  ★ 两个正交通道一致：席位名在脚手架里出现 716/1210 次，**真调用只有 3 次** ⇒ **"有席位、没有运用"**。
+- **F2（产出被采纳率）还没采** —— 需要"席位产出 → 进入最终变更"的关联，比数调用次数难。
+- ⚠️ **此刻不许做 §5 的筛选/合并**：样本（3 次）**不足以下任何结论**；
+  融合管线 §1 逐字：**"几个"是读数，不是设计目标**，预设"要 5 个"就已经不是自进化了。
+
+### ★ 探针（不入库，`out/_seat-migration/`）
+
+`probe-f1.mjs`（直调通道，`tool/call.data.name` 精确相等）/
+`probe-f1b.mjs`（委派参数通道）/ `probe-f1c.mjs`（词边界全文，**正交通道**）。
+★ **踩过的坑**：`probe-f1b` 裸 `includes('dev')` ⇒ 命中 `project_**dev**elop` **6 个假阳性**
+⇒ 文本判据**必须做作用域限定**（铁律 41 复发）。
+
+### ★ 相关铁律
+
+- 铁律 11（从未为真的判据 = 假绿）、铁律 28（"扫全目录"≠"精选入口"；判据不许同义反复）、
+  铁律 37（填细节前功能必须先落成带编号清单）、铁律 47（消融没变红要分辨"没接线"与"锚点错"）、
+  **铁律 48（`session.list` 的 `running` 会陈旧 ⇒ 判据自锁）**。
+
+---
+
 ## ★ 实验台回执（2026-09-21 05:0x）—— 自变量前置**已完成**：工具面可被可靠地开/关
 
 > 新增段（放在最顶，便于接手先读）。完整版：`docs/eval-independent-variable-plan.md` §2.1–§2.4。
