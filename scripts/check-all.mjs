@@ -110,14 +110,40 @@ const GATES = [
     //   **不是"非空行"**（那个数是 565）。改这个数字必须用**门自己的口径** —— 我先前按
     //   非空行写成 565，门随即报 `行数 575 ≠ 期望 565`；靶场会话的 `exp-base` 变体实测 575，
     //   也正是同一口径。**别拿自己另数的一遍当基线。**
-    what: 'profile 装配（--dump-config）：exit 0 / stderr 空 / 575 行 / pet 0 / dup 0',
+    // ★ 2026-09-27 基线 575 → 581（+6 行）：**不是配置错，是判据随合法变更前进**。
+    //   变更 = 现役 profile 加了一条 `- id: subagent-council` 覆盖块，把 `seats` 设为
+    //   `[architect, dev, review]` ⇒ 自进化三席上线（此前现役**只有 architect 一席**）。
+    //   +6 行 = `seats:` + 3 个 `- xxx` + `model:` + `provider:`（覆盖是**整体替换** config，
+    //   必须重述完整 4 字段 ⇒ 这几行是**必需的**，不是冗余）。
+    //   ★ 为什么这次可以改基线（而"为消红改测试"不行）：① 变更本身是**要交付的功能**，
+    //     不是为了让门变绿；② 我**另加了 require 判据**（见下）把"三席真的在"钉死 ——
+    //     只改数字而不加判据，才是把门改松。
+    what: 'profile 装配（--dump-config）：exit 0 / stderr 空 / 581 行 / pet 0 / dup 0 / 三席在位',
     // ★ 2026-09-20 修语法：原来写 `['…bin.js', 'web', '--dump-config']` ——
     //   **那不是有效语法**（`dsh` 要的是 `--profile <name>`）。它对 `web` 之所以"能过"，
     //   是因为 **`web` 正好是默认 profile** ⇒ **门一直在测"默认 profile"，而不是显式测 web**。
     //   证据：`bin.js candidate --dump-config` → `error: --profile <name> is required`。
     //   ⇒ 若哪天默认 profile 变了，这道门会**静默测错对象**（假绿）。
     cmd: ['node', 'node_modules/@deepseek-ai/dsh/lib/bin.js', '--profile', 'web', '--dump-config'],
-    expect: { lines: 575, forbid: ['duplicate loader entry id'], forbidCount: { pet: 0 } },
+    expect: {
+      lines: 581,
+      forbid: ['duplicate loader entry id'],
+      forbidCount: { pet: 0 },
+      // ★★ require：**每一段都必须在 stdout 里逐字出现**。
+      //   行数对了但把 `dev` 写成 `dve` ⇒ 行数仍是 581 ⇒ 只有 require 能抓住。
+      //   ★ 这是"行数判据"的**阳性对照**：证明这道门真的在看内容，不只在数行。
+      require: [
+        // (1) council 段被 profile **真的 patch 过**（不是碰巧行数对上）
+        '@dsh-brain/subagent-council, patched by',
+        // (2) 三席逐字在位
+        '      - architect',
+        '      - dev',
+        '      - review',
+        // (3) 完整 config 四字段都在（漏了 model/provider 会被整体替换冲掉）
+        "    model: ''",
+        "    provider: ''",
+      ],
+    },
   },
   {
     id: 'registry',
@@ -171,6 +197,26 @@ const GATES = [
     //   ⇒ 两门一起才叫"证明机制在工作"（铁律 11：数判据为真的次数，不读意图）。
     what: '席位工具档位（端到端）：直调 applyChildComposition 看 restrict 真的被调用',
     cmd: ['node', 'scripts/seats/test-seat-toolscope-e2e.mjs'],
+  },
+  {
+    id: 'seats-evo-online',
+    // ★★★ 2026-09-27 新增：**三席上线**的判据。
+    //   事故形状（真实）：现役 profile 只 insert 了包内默认的 `seat: architect`
+    //   ⇒ provider 只注册了一席，而 preset 也只挂了 architect 一条工具行
+    //   ⇒ 自进化的 **dev/review 两席"从未存在"**（此前记的"三席已上线"是假绿）。
+    //
+    //   本门把"三席真的在线"拆成**三处必须同时正确**，并**双向交叉核对**：
+    //     ① HOST plane   profile 有 `- id: subagent-council` **覆盖块**且 seats 三席
+    //     ② preset       delegation 组里有三条工具行、且都未 disabled
+    //     ③ 一致性       ①的每个 seat 在②有工具行；②的每个席位 provider 在①有注册
+    //   ★ 只 ① 对 ⇒ "provider 在线但没人能调"（改造前的真实状态）
+    //   ★ 只 ② 对 ⇒ **悬空 provider**（工具行指向不存在的名字 ⇒ 席位起不来）
+    //   ⇒ 单向判据两种都查不出来，所以必须**双向**（B1 + B2）。
+    //
+    //   ★ 判据全静态（不需要服务在跑）⇒ 在 check-all 里稳定。
+    //     运行时的实证（boot.log 三席注册 + 工具面含 evo_dev/evo_review + 真委派起子会话）
+    //     属于**一次性取证**，已留档在 out/（见当日记忆）。
+    cmd: ['node', 'scripts/seats/test-evo-seats-online.mjs'],
   },
   {
     id: 'test:patch-anchors',
@@ -346,6 +392,13 @@ for (const g of selected) {
     }
     for (const bad of g.expect.forbid ?? []) {
       if (out.includes(bad)) { ok = false; notes.push(`出现了不该有的：${bad}`) }
+    }
+    // ★ 2026-09-27 新增（R5 的姊妹需求：行数判据的**阳性对照**）：
+    //   `require` = 每一段**必须逐字出现**。为什么需要它：`lines` 只能证明"行数对"，
+    //   证明不了"内容对" —— 把 `dev` 拼成 `dve`（三席少一席）行数一字不差。
+    //   ★ 与 `forbid` 对称：`forbid` 防"多了不该有的"，`require` 防"少了该有的"。
+    for (const need of g.expect.require ?? []) {
+      if (!out.includes(need)) { ok = false; notes.push(`缺少必须有的：${JSON.stringify(need)}`) }
     }
     for (const [k, want] of Object.entries(g.expect.forbidCount ?? {})) {
       const n = out.split('\n').filter((l) => l.includes(k)).length
