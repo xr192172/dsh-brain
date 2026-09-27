@@ -1546,3 +1546,129 @@ seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户消息"设计画布
    **再**谈专职协调位。否则是给一个**只有一个人**的公司设"秘书岗"。
 5. ★ 若要推进，最该做的**具体件** = **给父会话的"转交"落一个显式、可审计的记录**
    （谁把什么活转给了哪个席位、依据是什么）—— 这是"秘书"里**唯一不能靠 prompt 解决**的那部分。
+
+
+---
+
+## R5 全文：⑦ 的 `ok` 三值化（2026-09-27，提交 `7bdd920` + 记忆 `6b07d9b`）
+
+> MEMORY.md 里只留一行式；本段是**全文与证据**（append-only，一条没删）。
+
+### R5.1 病灶（铁律 33 的原文场景）
+
+`arm-up.mjs` 判 ⑦「现役仍健康」时，**诚实地在 `detail` 字符串里**分辨两种失败：
+
+- `'★ 探不通（通道不可用）—— 不等于现役坏了'`（`liveKind === 'unreachable'`）
+- `'★ 探得通但答不对（kind=slow）—— 这才是"现役受影响"该有的样子'`
+
+**但 `ok` 只有 `true`/`false`** ⇒ 两种情形在 `ok` 上**完全同形**。后果实测：
+
+- 下游 `run-experiment.mjs` 只看 `up.status !== 0` ⇒ 两者都 exit 1 ⇒ **归因能力为零**
+  （"这次失败是现役坏了、还是我根本没探到？"读不出来）；
+- `--json` 的 `rows[].ok` 也同形 ⇒ **机器通道里根本没有这个信息**。
+
+⇒ 正是**铁律 33 的原文**：*文案诚实地写了"不确定" ≠ 判据诚实地处理了"不确定"*。
+
+### R5.2 修法（只加不换，铁律 22 的推广）
+
+| 项 | 改动 |
+|---|---|
+| `ok` | **语义一个字节都不改**（两种失败仍 `false`）⇒ 既有消费者零影响 |
+| 新增 `status` | 三值：`'ok'`（答对了）/ `'unknown'`（看不到=通道不可用）/ `'false'`（看到坏结果） |
+| 默认值 | `status = ok ? 'ok' : 'false'` ⇒ 老调用点不传即与改动前**逐字同形** |
+| `--json` 顶层 | 显式带 `liveStatus` / `liveKind` / `liveAttributableToFront` |
+| 下游 | **只改归因文案**（`false` ⇒ "看到了坏结果"；`unknown` ⇒ "★ 不许据此说现役坏了"）；**拒跑不变** |
+
+★ **`'unknown'` 不许当通过、也不许当失败**（铁律 14/33）—— 它是**第三个**值，只能被分流。
+
+关键代码（`arm-up.mjs`）：
+
+```js
+const add = (name, ok, detail, status = ok ? 'ok' : 'false') => rows.push({ name, ok, detail, status })
+// ⑦ 行：
+const isUnreachable = liveKind === 'unreachable'
+const status = liveOk === true ? 'ok' : isUnreachable ? 'unknown' : 'false'
+```
+
+### R5.3 前置结构修：`arm-up.mjs` 原先**不可 import**
+
+一 `import` 就跑主流程 + `process.exit` ⇒ 门无法在**行为层**测那个纯函数。
+修：加 `isMain` 守卫（**逐字照同族**：`run-experiment.mjs:135` / `task-bank.mjs:370`）：
+
+```js
+const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+```
+
+为把**约 500 行**主流程整段守卫，必须先把两个纯函数 `pidAlive` / `alreadyRunning` **上移到顶层**
+（在 `judgeSelfCheck` 之前）。**踩过的坑**：第一次直接把 `export function` 一起包进 `if (isMain) {`
+⇒ `SyntaxError: Unexpected token 'export'` ⇒ `git checkout --` 回滚重来。
+
+**验证**：`--selftest` 仍 PASS（14 条全绿）；**无参仍 exit 2**（用法保留）。
+
+### R5.4 ★ 铁律 44 的现场：我改了结构 ⇒ 把别人的门弄瞎了
+
+`check-import-safe.mjs` 靠**形态**（不是行为）在工作：
+
+- 判据 `/^(?:process.exit(|…)/m` **要求行首** ⇒ 主流程一缩进 ⇒ 行首不匹配
+  ⇒ 判"顶层没有派发" ⇒ **跳过该文件** ⇒ **最该被检的文件被漏掉**（假绿）；
+- 同族：它还靠 `from '…/x.mjs'` 这个**文本形态**数"谁被 import 了"。
+
+**修法**：新增 `hasTopLevelCliDispatch()`（**按块结构**判：只看缩进 0 的裸派发，或落在
+`if (isMain…) {` 块内、按花括号配对算的派发）+ `hasIsMainGuard()`（认三种等价写法）。
+
+| 读数 | 修前 | 修后 |
+|---|---|---|
+| 被检文件数 | 4 | **8** |
+| 带真守卫计数 | 11 | **16** |
+| 违规 | 0 | 0 |
+| 阳性对照 | 无 | **有**（`mustCheck` 含 `arm-up.mjs`） |
+
+★★ **修判据期间我自己先造了一个假红**：放松成"任意缩进"判顶层派发
+⇒ 把 `patch-anchors.mjs` 函数体内的 `process.exit(1)` 误报
+⇒ 改回**按块结构**判，假红消失。★ 另抓出 2 个假红：`change-classify.mjs:502`（`===` 右多一层
+`path.resolve`）、`gate-impl-reference.mjs:495`（`const isMain =` 换行写）—— 两者**都有守卫**。
+
+### R5.5 门与运行时实证
+
+- **新门** `scripts/switchboard/test-selfcheck-tristate.mjs`（**26 passed / 0 failed**）
+  - A 组 **行为**：真调 `judgeSelfCheck` 三输入（`ok`/`slow`/`unreachable`）
+    ⇒ 断 `(ok,status)` 组合互不相同（A0 = 判据有效性）、三值分别为 `ok`/`false`/`unknown`
+  - B 组 **`ok` 语义未变**：两种失败仍必须 `ok === false`；`ok` 仍必须是**布尔**
+  - C 组 **机器通道**：真跑 `arm-up --live --json` 解 JSON，断顶层三字段
+  - D 组 **下游可分流**：三情形必须得出三种不同结论（`healthy`/`broken`/`inconclusive`）
+  - E 组 **消融**：E1（抹掉三值式 ⇒ 源码无该式）/ E1b（**反自证**）/ E2（二值版下 `unreachable` 变 `false`
+    ⇒ 证明 A3 不是同义反复）
+  - F 组 **接线**：断 `run-experiment` 真带 `--json`、真解 `liveStatus`、真有 unknown/false **两个分支**、
+    真存进证据、**且两种都照样拒跑**
+  - ★ 本门**自己踩过一次假红**（第 5 次 CRLF 击穿）⇒ 源文件是 CRLF，必须
+    `readFileSync(ARM_UP,'utf8').replace(/
+/g,'
+')` 先归一化
+- **运行时实证** `out/_r5-runtime-verify.mjs`（**9 passed / 0 failed**）
+  - A1 真打**不可达端口** ⇒ 实测抛的是 `TypeError: fetch failed`（**不是** `TimeoutError`）
+    ⇒ `http:0/unreachable:true` ⇒ `kind:'unreachable'`
+  - B1/B2 **阳性对照**：真在听但答不对（200 但 `body.result.ok` 缺）⇒ `kind:'slow'`（与 A **正交**）
+  - C1–C4 端到端：真探针读数喂真 `judgeSelfCheck` ⇒ `unknown` vs `false`，**两者 `ok` 都 `false`**
+- **全量门**：**21 通过 / 2 失败**（新门 ✓ 绿；两道红 = `capability-gate` / `test:capability-gate`
+  的 L3 holdout 未跑，**既有、非本棒引入**，故意留红）
+
+### R5.6 ★ 真事故现场：本棒的价值当场兑现
+
+**臂 A 起失败**（`arm-up A` 两次都失败：② ③ 前门/控制面 `HTTP 0`，等 90s）。**归属核验**：
+
+- `lease.json` 说现役 = `gen-33084`（**port 33084**，pid 24460），而 `arm-up` 探 **33080**（`ports.front`）
+- `netstat` 显示 **33080~33089 全空**；臂 A **无任何 node 进程在跑**
+- ⇒ **既有问题**（前门端口号 ≠ `ports.front`），**不是 R5 引入的** ⇒ **留作 R6 线索**
+
+★ **同时**：`--json` 给出 `"liveStatus":"ok"` + `"liveAttributableToFront":false`
+⇒ 下游**一眼看出"这次失败跟现役无关"** —— 这正是 R5 要买的东西，在真事故里首次兑现。
+
+### R5.7 未闭合与代价
+
+- **R6 线索**：`arm-up` 探 `ports.front`（33080）而代自己绑 `genBase+n` ⇒ 臂的"前门在哪"**两处不一致**。
+- **代价**：`arm-up.mjs` 的 `git diff` 有 983 行，但 `git diff -w` 只有 **88/37 行**实质
+  （其余是整段缩进）⇒ **必须告知审查者用 `-w` 看**。
+- **行尾事故**：我的 node 脚本曾把 `arm-up.mjs` 意外翻成 CRLF（840 行，索引里是 LF）
+  ⇒ 用 `s.replace(/
+/g,'
+')` 恢复。
