@@ -1343,3 +1343,26 @@ seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户消息"设计画布
 ⇒ 这解释了"逐个修症状越修越多"。★ **R1/R1.5/R2 已把根因修掉** ⇒ 该表留作**判据依据**（为什么当初不该逐条修）。
 ★★★ **纪律（用户 2026-09-26 点破）**：*"我不在乎什么最小可行修法或者是最大可行修法，
 **我只要你干净的**……我哪怕你重写都无所谓"* ⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。
+
+
+---
+
+## ★★★ 2026-09-27 O8 全文（从 MEMORY.md 下沉；MEMORY.md 只留一行索引）
+
+### ★★★ 2026-09-27 已落地：O8「席位只读」从 persona 的话 ⇒ 机制层的约束（`cc702de`）
+
+- **事故**：`architect` 席 persona 写「默认只读…不要修改任何文件」，但它**真往仓库写了个脚本**
+  （留证 `out/seat-wrote-this-_analyze-personas.mjs`）。⇒ **写在 persona 里的约束不是约束。**
+- **根因（核过上游）**：`dsh-subagent/lib/index.js:570` `applyChildComposition` ——
+  子代理 `sandboxMode` 从**父会话快照**（provider 改不了）、`approvalPolicy` 钉 `'never'`，
+  **但 `composition.toolFilter` 会落成 `childCtx.tools.restrict()`** ⇒ **工具面是能改的那层**。
+- **修法**：`SEAT_TOOL_SCOPE` = `architect/review`→**readonly**（`allow` 白名单 7 个只读工具）、
+  `dev`→**full**（阳性对照：它的职责就是施工）、**未知席位→readonly**（fail-closed）。
+  ★ 用 `allow` 不用 `deny`：`admits()` 语义 = "allow 表里没有 ⇒ 拒" ⇒ **白名单 fail-closed**（新工具默认关）。
+- **判据**：`seats-toolscope`（静态 10/0）+ `seats-toolscope-e2e`（**直调上游** 4/0），**两门都在 `check-all`**。
+  **消融**：撤掉修复 ⇒ E1/E2/E4 红、**E3 阳性对照仍绿**（与自变量正交）。
+  **运行时实测**：换代 `gen-3082→gen-3083` 后新代 boot.log 自报 `工具档位=readonly（allow 7 个…）`；
+  对**旧代**跑同一判据 ⇒ **3 红**（它没这个片段）⇒ 判据非同义反复。
+- ⚠️ **`packages/*/lib/` 被 gitignore** ⇒ **改源码后必须重编译 + 换代**，否则现役加载的还是旧产物。
+- ★ 同日两个我自己的判据错误：**假绿**（裸正则把 `capabilities.toolFilter:true` 当"真限制了"）、
+  **假红**（`/write/` 命中 `todo_write` 的子串）⇒ 均固化成门里的 P6 与"精确名字比对"。

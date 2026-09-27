@@ -220,11 +220,28 @@
 **我只要你干净的**……我哪怕你重写都无所谓"* ⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。
 
 **未闭合**（启动器 / 哨兵 / 判据缺口 / 既存红 / 并发安全 …十余条）详见 `topics/current-status.md`。
-★ **已作废的旧表述**：原写"两席（dev/review）code 在、profile 未设 seats ⇒ **没上线**" ——
-**三席（architect/dev/review）已上线**，且 2026-09-26 已把「**独立性档位**」加为**必需段落**
-（`feec7f8`，段数 六/七/六），并新增门判据 G10（探针自证）/ G11。
+★ ★★★ **更正（2026-09-27 实测）：现役【只上线了 architect 一席】，dev/review 从未注册。**
+  逐字证据：`~/.dsh/switchboard/gen-3082/boot.log` 里只有
+  `[subagent-council] 已注册席位 "architect" ⇒ provider="council-architect"` **一条**，零 `dev`/`review`。
+  根因：`packages/subagent-council/cordis.patch.yml` 是 `seat: architect`（`seats: []`），
+  且 `~/.dsh/profiles/web/cordis.patch.yml` **没有覆盖它**；那两席只在**隔离实例**挂过
+  （`out/_evoseats-test/a/dshhome/profiles/web/cordis.patch.yml:70-77`）。
+  ⇒ 本文件此前写的"**三席已上线**"是**假绿**（铁律 11：判机制有没有在跑 ⇒ 去历史记录里数「判据为真的次数」）。
+  ★ 三席的**代码与 persona 契约都已就位**（段数 六/七/六，G10/G11 门在跑），**只是没挂进现役 profile**。
+  ★ 若要上线：加 `evo-dev`/`evo-review` 两条 insert ⇒ ★ **必须用不同 id**（`subagent-council` 这个 id
+  已被包内 patch insert 过 ⇒ 重复 insert = `duplicate loader entry id` = 整树装配失败，铁律 2）。
 ★ **座位相关的一切，先读 `docs/agent-seats-spec-2026-09-26.md` 与
 `packages/subagent-council/src/index.ts` 的 `SEAT_PERSONAS`（单一真相源）。**
+
+### ★★★ 2026-09-27 已落地：O8「席位只读」⇒ 机制层约束（`cc702de`）
+
+一举两得：①**修掉 persona 约束落不到机制的假约束**（architect 席真写过仓库文件）；
+② 抓到既存**假绿**「三席已上线」——实测**现役只有 architect 一席**（证据与修法见下）。
+修法 = `SEAT_TOOL_SCOPE`（architect/review 给 `allow` 白名单 7 个只读工具 ⇒ **fail-closed**；dev 不设限 = 阳性对照）。
+门 = `seats-toolscope`（静态 10/0）+ `seats-toolscope-e2e`（**直调上游** 4/0），都在 `check-all`。
+⚠️ **`packages/*/lib/` 被 gitignore** ⇒ 改源码后**必须重编译 + 换代**才生效。
+★ 全文（含根因源码行号 / 消融 / 运行时实测 / 两个我自己的假绿假红）在 `topics/current-status.md` 尾部。
+
 ## ★ 归属与前史（**别把上游的矛盾写成自己的罪状**）
 
 - `D:\project_develop\ai-base`（Go，**用户的前一个项目**）= 多条设计的先例来源（内含 `agent-shell`）。
