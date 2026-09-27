@@ -1366,3 +1366,77 @@ seq=630 agent/inbox/spliced    ← ★ 又一条 630（用户消息"设计画布
 - ⚠️ **`packages/*/lib/` 被 gitignore** ⇒ **改源码后必须重编译 + 换代**，否则现役加载的还是旧产物。
 - ★ 同日两个我自己的判据错误：**假绿**（裸正则把 `capabilities.toolFilter:true` 当"真限制了"）、
   **假红**（`/write/` 命中 `todo_write` 的子串）⇒ 均固化成门里的 P6 与"精确名字比对"。
+
+## ★★★ 2026-09-27 R3 全文（从 MEMORY.md 下沉；MEMORY.md 只留一行索引）
+
+### 事故形状
+
+**"真相源"能被写上一个死进程。** `lease.json` 是"现役是谁"的真相源
+（`pool.ts` 头部：`primary` 从 lease **只读派生**）。被写上死 pid ⇒
+① 前门指向 corpse；② 池里写着 corpse；③ `promoteSentinel` 的 precheck（`coordinator.ts:287`）
+读到它会把**真哨兵**误判成"不是本进程立的"。
+
+### 两半，性质**不同**（如实分级，不夸大）
+
+**半一 `ensureActiveLease()`（`coordinator.ts:379`）= 家族内不一致，不是活的 bug。**
+- 契约说"确保活跃代持有租约"，实现是"**无条件授予**"。
+- ★ 诚实归因：**现役唯一调用点**（`main.ts:260`，紧跟 `boot()` 的 `spawnGen`）下**不会发生** ——
+  那里 `this.active.inst.pid` 是**刚 spawn 的活进程**。所以**这不是现网故障**。
+- 但**同一文件已有四处相反方向的检查**（`:287` / `:412` / `:677` / `:1003` 都先 `pidAliveFrom`）
+  ⇒ 缺守卫属于**家族不一致**，是**留给下一个调用点的陷阱**（代码本身在邀请第二个调用点）。
+- 修法：先探活再授予；返回值改 `boolean` ⇒ 调用方**能分流**（`main.ts` 里 `if (!coord.ensureActiveLease())` 打错误日志）。
+
+**半二 `pool.pruneDead()`（`pool.ts:138`）= 真·死代码缺口。**
+- 函数**已实现、已有单测**（`scripts/delegation/test-sentinel-pool.mjs` ⑥），
+  但**从没被生产代码调用过**（全仓 grep：只有定义 + 测试 ⇒ **零生产调用点**）。
+- 后果：`?cmd=pool` 是给用户看的**只读投影** ⇒ 用户会看到一个**已经崩掉、连不上**的哨兵。
+- 修法：新增 `Coordinator.pruneStaleSentinels()`，用**同一个** `pidAliveFrom`（与 :287 的 precheck 同函数，
+  避免"池说活着、提拔说死了"两处真相），在 `?cmd=pool` 读路径剪枝；
+  摘掉的结果以 `pruned` 字段**如实回给调用方**；若被摘的正是 `pending` ⇒ **同步清 `pending`**
+  （否则 `promoteSentinel` 会拿死 cage 去 flip，白折腾一轮）。
+
+### 门：`scripts/switchboard/test-lease-liveness-guard.mjs`（16 passed / 0 failed）
+
+- **行为层（主判据）**：真实 `PoolStore` + 真实探针，死/活 pid 读数**必须不同**
+  （A2 是"判据有效性"自证 —— 探针读不出差别的话 A1 就是同义反复，铁律 28）。
+- **接线层**：B4 断言 `pruneStaleSentinels` **真的被 main.ts 调用**（这正是半二原始病的形状：
+  函数写了、没人调）；B5 断言返回值被检查。
+- **消融自证**：C1 撤掉守卫 ⇒ B1 必须变红；**C1b 反自证** —— 不撤时同一段文本必须仍判"有守卫"。
+- **阳性对照（正交）**：A4 —— 活 pid 必须照常授予（护栏不是"逢事必拦的噪音机"，铁律 13）。
+
+### ★★★ 反面教材一：**文件注入测不出剪枝**（我的假红）
+
+第一版运行时实证**往 `pool.json` 注入一个死哨兵** ⇒ 请求 `?cmd=pool` ⇒ `pruned:[]`、`sentinel:null`
+⇒ 我判"R1 失败"。**根因（用 `out/_r3-dbg-clobber.mjs` 复现坐实）**：
+`PoolStore` **在内存里缓存 `state`**（构造时 `load()` 一次），而 `pool.json` 是**单一写者**文件（铁律 31）
+⇒ 外部改盘上的 json **永远到不了活实例**，而且实例下一次 `commit()` 会把内存**写回盘** ⇒ 我的注入被**覆盖**。
+⇒ **结论：池的剪枝只能走真实 `stand` 路径验证。** 该陷阱已**钉进门里**（判据 B7：
+断言文件注入**确实无效**），防这个假红测法再被使用。
+
+### ★★ 反面教材二：消融正则被 CRLF 击穿（假红）
+
+第一版消融正则以 `\n\s*\}` 收尾，而源文件是 **CRLF** ⇒ **永不匹配** ⇒
+"撤掉后仍含 pidAliveFrom=true" ⇒ 假红。**是消融脚本错了，不是守卫错了。**
+修法：行尾归一化（`\r\n → \n`）后再匹配；并加 **C1b 反自证**防"消融本身假红"。
+
+### 运行时实证（走**真实路径**，7 passed / 0 failed，`out/_r3-runtime-verify.mjs`）
+
+`?cmd=stand` 立真哨 `gen-3083`(pid 17488) → 真 kill → **复核确已死透**（不信信号本身）
+→ `?cmd=pool` 返回 **`pruned:[{"gen":"gen-3083","port":3083,"pid":17488}]`**
+→ 池不再暴露它、`primary` 未被误动、再读一次 `pruned` 回空（幂等）、盘上也不含它。
+
+### ⚠️⚠️ 两条必须记住的部署事实（实测踩到）
+
+1. **换代只换代，不换控制面** —— `main.ts` 跑在**控制面进程**里，`?cmd=handover` **不会**重启它
+   ⇒ 实测：换代 `gen-3083→gen-3084` 后 `?cmd=pool` **仍无 `pruned` 字段**（= 控制面还是旧进程）。
+   **改 `main.ts` 必须走 `node scripts/arm-up.mjs --stop` → `node scripts/arm-up.mjs --live`。**
+   （`bin.cjs` 按排序取 `out/` 下**最新**构建 ⇒ 自然拾起新产物；实测新进程命令行
+   = `out/b1790498082780/main.js`，而旧的是 `b1790425978496`。）
+2. **控制面与前门同进程**（实测 pid 相同 = 19524 → 18772）⇒ 停它俩一起停。
+   ★ `arm-up --live` 是**幂等**的（前门已应答就只自检、**不重启**）⇒ 只靠它**推不动**新代码。
+
+### 全量门
+
+`19 通过 / 2 失败`。两道红是**既存 + 故意留红**（`capability-gate` / `test:capability-gate`，L3 holdout 未跑）。
+★ **归属已用消融核验**：把我的改动 `git stash` 后重跑 ⇒ 同样 `29 passed / 4 failed`、同样四项
+⇒ **不是本次引入的**（铁律 17 的归属核验）。
