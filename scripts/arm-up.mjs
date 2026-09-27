@@ -175,9 +175,55 @@ export function latestBootLog(sbDir, activeGenName) {
 /**
  * 自检（纯函数化的核心）：给定"读数"，判 6 条。★ 读数取自真实探测，**不读注释、不读意图**。
  */
+/** 该 pid 是否在运行（`process.kill(pid, 0)` 不发信号、只做存在性探测 —— 跨平台可用）。 */
+export function pidAlive(pid) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return false
+  try {
+    process.kill(n, 0)
+    return true
+  } catch (e) {
+    // EPERM = 进程在、但没权限（也算"活着"）；ESRCH = 真的不在
+    return e?.code === 'EPERM'
+  }
+}
+
+/**
+ * ★★ 控制面优先判定：是否"视作已在跑"。
+ *
+ * 输入全是"读数"（数字/布尔/null），不读 fs、不发包，是纯函数。
+ * 判定优先级：
+ *   1. 控制面答得到（http=200）且控制面说的 pid 活着 ⇒ source='admin'，running=true
+ *   2. 控制面拿不到，退而看磁盘 lease：文件里 pid 活着 ⇒ source='lease-file'，running=true
+ *   3. 都不满足 ⇒ source 区分"端口被占（别人）"和"真正空闲"
+ *
+ * ★ 这一条的消融测试在 `selftest()` 里：把优先级 1 去掉（只看 filePid），
+ *   真实读数下 `running` 必须从 true 变 false（治"误拒"）。
+ */
+export function alreadyRunning({ someoneThere, adminHttp, adminPid, filePid }) {
+  // 控制面优先：答得到且 pid 活着 ⇒ 权威来源
+  if (adminHttp === 200 && adminPid != null && pidAlive(adminPid)) return { running: true, source: 'admin' }
+  // 控制面拿不到 ⇒ 才看文件（只读）：文件里 pid 活着 ⇒ 也算已在跑
+  if (filePid != null && pidAlive(filePid)) return { running: true, source: 'lease-file' }
+  return { running: false, source: someoneThere ? 'port-busy-no-owner' : 'free' }
+}
+
 export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, seatsLogOk, isolationLogOk, denyCount, liveOk, liveKind = null, mode = 'arm', htmlOk = null }) {
   const rows = []
-  const add = (name, ok, detail) => rows.push({ name, ok, detail })
+  /**
+   * ★★★ 2026-09-27（R5）：`add` 增加第 4 个参数 `status` —— **机器可读的三态**。
+   *
+   * 事故形状（本门的 ⑦ 是原文场景，铁律 33）：判据**诚实地在 `detail` 里写了**"探不通 ≠ 探得通但答错"，
+   * 但 `ok` 只有 `true`/`false` ⇒ **下游（`rows.every(r=>r.ok)` / exit code / `--json`）读不到这个差别**
+   * ⇒ 文案诚实、判据不诚实。
+   *
+   * ★ 修法**只加不换**（关键：不许改 `ok` 语义，否则击穿所有既有消费者，铁律 22 的推广）：
+   *   · `ok` 仍是布尔、语义逐字不变（两种失败都 `false`）⇒ 既有逻辑零影响；
+   *   · 新增 `status`：`'ok'`（答对了）/ `'false'`（看到了坏结果）/ `'unknown'`（看不到 = 通道不可用）。
+   *   · ★ `'unknown'` **不许当通过、也不许当失败**（铁律 14/33）—— 它是**第三个**值，只能被分流。
+   *   · 默认 `status = ok ? 'ok' : 'false'`（老调用点不传 ⇒ 与改动前逐字同形）。
+   */
+  const add = (name, ok, detail, status = ok ? 'ok' : 'false') => rows.push({ name, ok, detail, status })
   if (mode === 'live') {
     // ★ 现役模式：**只判"服务可用"** —— 臂专属那几条（隔离层/两席/池在本段内）对现役**不适用**
     //   （现役不是训练场：没有 DSH_ARM_SELF/DENY、池就在 3101）。**不许把不适用的判据硬套**（那会造假红）。
@@ -205,9 +251,18 @@ export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, sea
   // ⑦ 现役仍健康（隔离实例不许把现役搞掉）
   // ★ 2026-09-26：判据**只**吃 `liveOk`（布尔），但 `detail` 必须**分辨**"探不通"与"探得通但答错"
   //   —— 这两件事的处置完全不同（前者是通道问题，后者是现役真的坏了）。见 rpc() 的 kind。
-  add('⑦ 现役仍健康', liveOk === true, liveKind === 'ok' ? '前门 200' : liveKind === 'unreachable'
-    ? '★ 探不通（通道不可用）—— 不等于现役坏了；先别下结论（见 rpc 的超时/重试）'
-    : `★ 探得通但答不对（kind=${liveKind}）—— 这才是"现役受影响"该有的样子`)
+  // ★★★ 2026-09-27（R5）：**`status` 三值化** —— 把"探不通"从"失败"里**分出来**：
+  //   · `liveOk === true`               ⇒ status='ok'        （答对了）
+  //   · `liveKind === 'unreachable'`    ⇒ status='unknown'   （★ 看不到 ≠ 坏了，也不等于通过）
+  //   · 其余（探得通但答错 / kind 缺失） ⇒ status='false'     （看到了坏结果）
+  //   ★ `ok` 一个字节都不改（两种失败仍 false）⇒ 既有消费者零影响；新消费者读 `status` 分流。
+  {
+    const isUnreachable = liveKind === 'unreachable'
+    const status = liveOk === true ? 'ok' : isUnreachable ? 'unknown' : 'false'
+    add('⑦ 现役仍健康', liveOk === true, liveKind === 'ok' ? '前门 200' : isUnreachable
+      ? '★ 探不通（通道不可用）—— 不等于现役坏了；先别下结论（见 rpc 的超时/重试）'
+      : `★ 探得通但答不对（kind=${liveKind}）—— 这才是"现役受影响"该有的样子`, status)
+  }
   return rows
 }
 
@@ -276,7 +331,19 @@ const selftest = async () => {
 }
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
-if (hasFlag('--selftest')) process.exit(await selftest())
+/**
+ * ★★ 2026-09-27（R5）：加**直接执行守卫** —— 本文件原先**没有** `isMain`，
+ *   一旦被 `import` 就会把整个主流程跑一遍（而且会 `process.exit`）⇒ **本模块不可测**。
+ *   R5 要给 ⑦ 的 `ok` 做三值化，而"三值化"的判据必须是**行为**判据（直接调 `judgeSelfCheck`），
+ *   不许退化成"源码里有没有那个词"（文本判据会假绿，铁律 11/41）。
+ *   ⇒ 没有可测性就写不出行为门 ⇒ 这一步是 R5 的**前置结构修**：
+ *     · 零行为变更（直接跑时 `isMain` 恒真）；
+ *     · 顺带把两个**纯函数**（`pidAlive` / `alreadyRunning`）上移到顶层
+ *       （它们原先夹在主流程中间 ⇒ 不这样就没法整段守卫）。
+ *   ★ 写法逐字照同族：`scripts/run-experiment.mjs:135` / `scripts/task-bank.mjs:370`。
+ */
+const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain && hasFlag('--selftest')) process.exit(await selftest())
 
 /**
  * ★★ 2026-09-25：**两个模式、一个入口**（用户要求"点一下图标就直接起、别每回参数都不一样"）。
@@ -284,507 +351,491 @@ if (hasFlag('--selftest')) process.exit(await selftest())
  *   · ` <臂名>`  ⇒ 起一个**训练场**
  * ⇒ **不再有第二个启动器**（那正是"管理混乱"的来源）。
  */
-const LIVE_MODE = hasFlag('--live')
-const armName = LIVE_MODE ? LIVE_SPEC.arm : argv.find((a) => !a.startsWith('--'))
-// ★★★ 2026-09-26 R2：把"准备训练场"与"起一代"**拆成两个动词**（旁路就是它们被绑在一起长出来的）。
-//   · `arm-up A`            确保训练场可用（不存在才建；已跑就只自检；**不覆盖**）
-//   · `arm-up A --gen`      换一代（**只打 ?cmd=handover**；绝不碰 isolated-instance）
-//   · `arm-up A --rebuild`  结构性变更（换 profile/preset/node_modules 布局）⇒ **唯一允许 --force 的路径**
-//   用户裁决（2026-09-26）：保持 `arm-up A` 原义 + 新增 `--gen`（只加不覆盖，铁律 22）。
-//   设计依据：docs/r2-handover-only-design-2026-09-26.md
-const GEN_MODE = hasFlag('--gen')
-const REBUILD_MODE = hasFlag('--rebuild')
+if (isMain) {
+  const LIVE_MODE = hasFlag('--live')
+  const armName = LIVE_MODE ? LIVE_SPEC.arm : argv.find((a) => !a.startsWith('--'))
+  // ★★★ 2026-09-26 R2：把"准备训练场"与"起一代"**拆成两个动词**（旁路就是它们被绑在一起长出来的）。
+  //   · `arm-up A`            确保训练场可用（不存在才建；已跑就只自检；**不覆盖**）
+  //   · `arm-up A --gen`      换一代（**只打 ?cmd=handover**；绝不碰 isolated-instance）
+  //   · `arm-up A --rebuild`  结构性变更（换 profile/preset/node_modules 布局）⇒ **唯一允许 --force 的路径**
+  //   用户裁决（2026-09-26）：保持 `arm-up A` 原义 + 新增 `--gen`（只加不覆盖，铁律 22）。
+  //   设计依据：docs/r2-handover-only-design-2026-09-26.md
+  const GEN_MODE = hasFlag('--gen')
+  const REBUILD_MODE = hasFlag('--rebuild')
 
-// ★★★ 2026-09-26：补上**与 --live 对称的"停"**（`--stop`）。
-//   用户点破：*"我要把所有的那些任务，就是 Node js 的窗口……全都关掉是吗？"*
-//   —— **不该全关**。这台机器上同时跑着十几个 node，`taskkill /IM node.exe` 会误杀别人的东西。
-//   ⇒ 所以 `--stop` **只停本项目这一套**（switchboard 本体 + 它拉起的代），
-//     判据是**命令行里含本仓库路径**（见 scripts/arm-stop.mjs 的安全不变量）。
-//   ★ 它**不需要**臂身份、也不看注册表 ⇒ 必须在下面那段"臂注册表校验"**之前**分流，
-//     否则 `--stop` 会被当成臂名去查注册表 ⇒ 报"臂不在注册表里"（自己把自己挡住）。
-if (hasFlag('--stop')) {
-  const { stopAll, selectDsBrainProcs } = await import('./arm-stop.mjs')
-  const { spawnSync: sp } = await import('node:child_process')
+  // ★★★ 2026-09-26：补上**与 --live 对称的"停"**（`--stop`）。
+  //   用户点破：*"我要把所有的那些任务，就是 Node js 的窗口……全都关掉是吗？"*
+  //   —— **不该全关**。这台机器上同时跑着十几个 node，`taskkill /IM node.exe` 会误杀别人的东西。
+  //   ⇒ 所以 `--stop` **只停本项目这一套**（switchboard 本体 + 它拉起的代），
+  //     判据是**命令行里含本仓库路径**（见 scripts/arm-stop.mjs 的安全不变量）。
+  //   ★ 它**不需要**臂身份、也不看注册表 ⇒ 必须在下面那段"臂注册表校验"**之前**分流，
+  //     否则 `--stop` 会被当成臂名去查注册表 ⇒ 报"臂不在注册表里"（自己把自己挡住）。
+  if (hasFlag('--stop')) {
+    const { stopAll, selectDsBrainProcs } = await import('./arm-stop.mjs')
+    const { spawnSync: sp } = await import('node:child_process')
 
-  /**
-   * 取全机 node 进程快照。
-   *
-   * ★ 为什么不能只写 `spawnSync('powershell', …)`：本机**`powershell` 不在 PATH 上**
-   *   （实测 `spawnSync('powershell')` = `ENOENT`）⇒ 必须用**绝对路径**
-   *   `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`。
-   *   （★ 顺带：从 bash 里提这个路径会被安全策略拦 ⇒ 本脚本由 node 自己 spawn，不经 bash。）
-   * ★ 兜底：`wmic`（本机实测可用，能出 CommandLine）—— 两个都试，都拿不到就**拒跑**（不猜着杀）。
-   */
-  const sysRoot = process.env.SystemRoot || 'C:\\Windows'
-  const psAbs = `${sysRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
-  const wmicAbs = `${sysRoot}\\System32\\wbem\\WMIC.exe`
+    /**
+     * 取全机 node 进程快照。
+     *
+     * ★ 为什么不能只写 `spawnSync('powershell', …)`：本机**`powershell` 不在 PATH 上**
+     *   （实测 `spawnSync('powershell')` = `ENOENT`）⇒ 必须用**绝对路径**
+     *   `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`。
+     *   （★ 顺带：从 bash 里提这个路径会被安全策略拦 ⇒ 本脚本由 node 自己 spawn，不经 bash。）
+     * ★ 兜底：`wmic`（本机实测可用，能出 CommandLine）—— 两个都试，都拿不到就**拒跑**（不猜着杀）。
+     */
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows'
+    const psAbs = `${sysRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+    const wmicAbs = `${sysRoot}\\System32\\wbem\\WMIC.exe`
 
-  const snapshot = async () => {
-    /** 解析成 {pid, ppid, cmd}；拿不到一行就返回 null（**不许返回空数组冒充"没有"**，铁律 12）。 */
-    const parse = (stdout) => {
-      const rows = (stdout ?? '')
-        .split(/\r?\n/)
-        .map((l) => l.split('\t'))
-        .filter((a) => a.length >= 3 && /^\d+$/.test(String(a[0]).trim()))
-        .map((a) => ({ pid: Number(String(a[0]).trim()), ppid: Number(String(a[1]).trim()), cmd: a.slice(2).join('\t') }))
-      return rows.length ? rows : null
-    }
-
-    // ① PowerShell 绝对路径（首选：字段干净）
-    const psCmd =
-      'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | ' +
-      'ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.CommandLine)" }'
-    const r1 = sp(psAbs, ['-NoProfile', '-NonInteractive', '-Command', psCmd], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
-    const p1 = parse(r1.stdout)
-    if (p1) return p1
-
-    // ② wmic 兜底（CSV：Node,CommandLine,ParentProcessId,ProcessId）
-    const r2 = sp(wmicAbs, ['process', 'where', "name='node.exe'", 'get', 'ProcessId,ParentProcessId,CommandLine', '/format:csv'], {
-      encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024,
-    })
-    if (r2.status === 0 && r2.stdout) {
-      const lines = r2.stdout.split(/\r?\n/).filter((l) => l.includes(',') && !/^Node,/i.test(l))
-      const rows = []
-      for (const l of lines) {
-        // CommandLine 里可能含逗号 ⇒ 从**右侧**固定切：…,PPID,PID
-        const m = l.match(/^(.*),(\d+),(\d+)\s*$/)
-        if (!m) continue
-        // 最左是 hostname，去掉
-        const cmd = m[1].replace(/^[^,]*,(?="|[A-Za-z]:)/, '')
-        rows.push({ pid: Number(m[3]), ppid: Number(m[2]), cmd })
+    const snapshot = async () => {
+      /** 解析成 {pid, ppid, cmd}；拿不到一行就返回 null（**不许返回空数组冒充"没有"**，铁律 12）。 */
+      const parse = (stdout) => {
+        const rows = (stdout ?? '')
+          .split(/\r?\n/)
+          .map((l) => l.split('\t'))
+          .filter((a) => a.length >= 3 && /^\d+$/.test(String(a[0]).trim()))
+          .map((a) => ({ pid: Number(String(a[0]).trim()), ppid: Number(String(a[1]).trim()), cmd: a.slice(2).join('\t') }))
+        return rows.length ? rows : null
       }
-      if (rows.length) return rows
+
+      // ① PowerShell 绝对路径（首选：字段干净）
+      const psCmd =
+        'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | ' +
+        'ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.CommandLine)" }'
+      const r1 = sp(psAbs, ['-NoProfile', '-NonInteractive', '-Command', psCmd], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+      const p1 = parse(r1.stdout)
+      if (p1) return p1
+
+      // ② wmic 兜底（CSV：Node,CommandLine,ParentProcessId,ProcessId）
+      const r2 = sp(wmicAbs, ['process', 'where', "name='node.exe'", 'get', 'ProcessId,ParentProcessId,CommandLine', '/format:csv'], {
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+      })
+      if (r2.status === 0 && r2.stdout) {
+        const lines = r2.stdout.split(/\r?\n/).filter((l) => l.includes(',') && !/^Node,/i.test(l))
+        const rows = []
+        for (const l of lines) {
+          // CommandLine 里可能含逗号 ⇒ 从**右侧**固定切：…,PPID,PID
+          const m = l.match(/^(.*),(\d+),(\d+)\s*$/)
+          if (!m) continue
+          // 最左是 hostname，去掉
+          const cmd = m[1].replace(/^[^,]*,(?="|[A-Za-z]:)/, '')
+          rows.push({ pid: Number(m[3]), ppid: Number(m[2]), cmd })
+        }
+        if (rows.length) return rows
+      }
+
+      // ★ 两条通道都拿不到 ⇒ 返回 null（调用方必须**拒绝执行**，不许当成"没有进程"）
+      return null
     }
 
-    // ★ 两条通道都拿不到 ⇒ 返回 null（调用方必须**拒绝执行**，不许当成"没有进程"）
-    return null
-  }
-
-  const alive = (pid) => {
-    try { process.kill(pid, 0); return true } catch { return false }
-  }
-  const kill = async (pid) => {
-    // ★ 先温和（SIGTERM）；给窗口让它自己收尾（生代自己也要退）
-    try { process.kill(pid, 'SIGTERM') } catch { /* 可能已经没了 */ }
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 250))
-      if (!alive(pid)) return true
+    const alive = (pid) => {
+      try { process.kill(pid, 0); return true } catch { return false }
     }
-    // ★ 还不走 ⇒ 强制。**仅对本项目这两个 pid**（选择集已在上游钉死）。
-    const k = sp('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' })
-    return k.status === 0
-  }
-
-  console.log('\n===== arm-up · 停（--stop）=====')
-  const procs = await snapshot()
-  // ★ 铁律 14：通道"不可用" ≠ 读数"为 0"。取不到快照 ⇒ **拒绝执行**，不许当成"没有进程要停"。
-  if (procs === null) {
-    console.error('  [失败] 两条进程快照通道（PowerShell 绝对路径 / wmic）都拿不到读数 ⇒ **拒绝执行**。')
-    console.error('          ★ 这不是"没有进程要停"，是"我看不见" ⇒ 不许当作停干净。')
-    console.error('          ⇒ 请手工确认后停：Task Manager，或 `taskkill /PID <pid> /T /F`。')
-    process.exit(3)
-  }
-  const preview = selectDsBrainProcs(procs, WT)
-  if (preview.all.length === 0) {
-    console.log('  没有发现属于本仓库这一套的 node 进程 ⇒ 已经是停的（什么都不做）。')
-  } else {
-    console.log(`  将停 ${preview.all.length} 个（先子后父）：${preview.all.join(', ')}`)
-    for (const pid of preview.all) {
-      const p = procs.find((x) => x.pid === pid)
-      console.log(`    · ${pid}  ${String(p?.cmd ?? '').slice(0, 120)}`)
+    const kill = async (pid) => {
+      // ★ 先温和（SIGTERM）；给窗口让它自己收尾（生代自己也要退）
+      try { process.kill(pid, 'SIGTERM') } catch { /* 可能已经没了 */ }
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 250))
+        if (!alive(pid)) return true
+      }
+      // ★ 还不走 ⇒ 强制。**仅对本项目这两个 pid**（选择集已在上游钉死）。
+      const k = sp('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8' })
+      return k.status === 0
     }
-    // ★ 不停别人的：把"没被选中的 node 总数"如实报出来，让用户一眼看到我们没碰它们
-    console.log(`  （机器上另有 ${procs.length - preview.all.length} 个无关 node 进程 —— **一个都不碰**）`)
-  }
 
-  const r = await stopAll({ snapshot, kill, alive }, WT)
-  if (r.found.length === 0) { console.log('  ✓ 无进程需停。'); process.exit(0) }
-  if (r.survivors.length) {
-    console.error(`  ✗ **没停干净**：pid ${r.survivors.join(', ')} 仍在 ⇒ 不谎报成功。`)
-    process.exit(1)
-  }
-  console.log(`  ✓ 已停干净（${r.killed.join(', ')}）`)
-  process.exit(0)
-}
-
-if (GEN_MODE && REBUILD_MODE) {
-  console.error('[失败] `--gen`（换一代）与 `--rebuild`（重建训练场）是互斥的两件事 ⇒ 只能选一个。')
-  process.exit(2)
-}
-if (LIVE_MODE && (GEN_MODE || REBUILD_MODE)) {
-  console.error('[失败] `--gen` / `--rebuild` 是**臂模式**的动词；现役模式请直接用 `--live`。')
-  process.exit(2)
-}
-if (!LIVE_MODE && !armName) {
-  console.error(
-    '[用法]\n' +
-      '  node scripts/arm-up.mjs --live                 # 起现役（无参，最常用）\n' +
-      '  node scripts/arm-up.mjs <臂名>                 # 确保某个训练场可用（不存在才建；已跑就只自检）\n' +
-      '  node scripts/arm-up.mjs <臂名> --gen           # ★ 换一代（走 ?cmd=handover；不碰训练场骨架）\n' +
-      '  node scripts/arm-up.mjs <臂名> --rebuild       # ★ 结构变更：重建训练场骨架（唯一允许 --force 的路径）\n' +
-      '  node scripts/arm-up.mjs --stop                 # ★ 停：只停本仓库这一套（本体+它拉起的代），不碰别的 node\n' +
-      '  可选：[--port-base <n>] [--no-start] [--open] [--json]\n' +
-      '  ★ 双击 `scripts\\dsh-up.cmd` 等价于 `--live --open`（桌面图标的做法见该文件注释）。',
-  )
-  process.exit(2)
-}
-
-// ── 臂清单：**必须来自注册表，读不到就拒跑**（★ 我第一版这里静默退化 ⇒ 臂 B 拿到臂 A 的端口段）──
-//    为什么不能退化：`indexOf` 失败会返回 -1 ⇒ `Math.max(0,-1)=0` ⇒ **base 永远是 33080**
-//    ⇒ 与臂 A **撞段**，还会把 A 的前门当成自己的（"已在跑"⇒跳过启动）⇒ **自检去看空气**。
-//    ★ 现役模式**不需要**注册表（它没有臂身份）⇒ 整块跳过。
-let allArms = null
-if (!LIVE_MODE) {
-  try {
-    const { createRequire } = await import('node:module')
-    const req = createRequire(path.join(WT, 'scripts', 'arms-registry.mjs'))
-    const { loadArmsRegistry } = req(path.join(WT, 'scripts', 'arms-registry.mjs'))
-    allArms = (loadArmsRegistry('evals/arms.json', { base: WT }).arms ?? []).map((a) => a.name)
-  } catch (e) {
-    console.error(`[失败] 读不到臂注册表（evals/arms.json）⇒ **拒绝猜臂序号**：${e?.message ?? e}`)
-    process.exit(2)
-  }
-  if (!allArms.includes(armName)) {
-    console.error(`[失败] 臂 "${armName}" 不在注册表里 ⇒ 拒绝猜它的序号（猜错会撞别的臂的端口段）。\n  可用的臂：${allArms.join(', ')}\n  ⇒ 要么用现成的臂名，要么先把它加进 evals/arms.json。`)
-    process.exit(2)
-  }
-}
-
-// ── ★ 两种模式只在这一处分叉（**其余全部共用**，避免"两套算法"漂移）──────────────
-const ports = LIVE_MODE ? LIVE_SPEC.ports : portsForArm(armName, allArms)
-const root = LIVE_MODE ? LIVE_SPEC.dshHome : rootForArm(armName)
-const sbDir = LIVE_MODE ? LIVE_SPEC.switchboardDir : path.join(root, 'dshhome', 'switchboard')
-const frontUrl = LIVE_MODE ? LIVE_SPEC.front : ports.front
-const adminUrl = LIVE_MODE ? LIVE_SPEC.admin : ports.admin
-console.log(`\n===== arm-up · ${LIVE_MODE ? '现役（--live）' : '臂 ' + armName} =====`)
-if (LIVE_MODE) {
-  console.log('  ★ 现役模式：**不需要任何参数**（端口固定 3080 / 池 3101 / 控制面 31800）')
-  console.log(`  前端     : ${frontUrl}`)
-} else {
-  console.log(`  ★ 唯一自变量 = 臂名；端口段由臂序号派生（不再手抄）`)
-  console.log(`  臂序号   : ${allArms.indexOf(armName)}（注册表 ${allArms.join(', ')}）`)
-  console.log(`  根目录   : ${root}`)
-  console.log(`  端口段   : switch=${ports.base}  gen=${ports.genBase}+  pool=${ports.pool}  admin=${ports.base + 100}  handover=${ports.base + 110}`)
-  console.log(`  现役占用 : ${[...LIVE_PORTS].join(', ')}（派生结果不许落进来）`)
-}
-
-// ── ★★ 段位归属前置断言（**仅臂模式**）：那一段若有人在应答，**必须证明是本实例的**（看 lease）──
-//    否则就是"别人占着这段"（我第一版正是把臂 A 的前门当成了臂 B 的）⇒ **拒跑**。
-//    ★ 现役模式不适用：现役就是 3080，不存在"段位归属"这个问题。
-//
-// ★★★ 2026-09-26 加：**lease 里的那个 pid 必须是活的**，否则就是"僵尸 lease"。
-//   真事故（我三路交叉验过）：臂 A 的 `lease.json` 写 `activeGen.pid = 9224`，而
-//   `tasklist /FI "PID eq 9224"` ⇒ **进程不存在**；`:33082`/`:33101` 实际握在 **pid 16520** 手里。
-//   成因：`arm-up` 走 `isolated-instance … --force` ⇒ 每次**重新准备+重新起代**，但**旧代从不停** ⇒
-//   新代绑不上池（boot.log：`33101 被占 … 连续 9 次拿不到 ⇒ 本代没有池`）⇒ 新代死；
-//   **而 lease 已被改写成新代（死掉的）pid** ⇒ 从此 lease 指向**尸体**。
-//   ⇒ 而**旧检查只看 `lease.activeGen.gen` 是不是非空字符串** ⇒ 僵尸 lease 被当成"这是我的实例⇒安全"。
-//   ★ 后果 = **臂永久卡死**：第一次 arm-up 成功，之后每次都在 ⑥/⑦ 上红（而根因被这一条掩盖）。
-//   ★ 判据（不许读注释、不许读意图）：**去系统里问那个 pid 还在不在跑**。
-/** 该 pid 是否在运行（`process.kill(pid, 0)` 不发信号、只做存在性探测 —— 跨平台可用）。 */
-export function pidAlive(pid) {
-  const n = Number(pid)
-  if (!Number.isInteger(n) || n <= 0) return false
-  try {
-    process.kill(n, 0)
-    return true
-  } catch (e) {
-    // EPERM = 进程在、但没权限（也算"活着"）；ESRCH = 真的不在
-    return e?.code === 'EPERM'
-  }
-}
-
-/**
- * ★★ 控制面优先判定：是否"视作已在跑"。
- *
- * 输入全是"读数"（数字/布尔/null），不读 fs、不发包，是纯函数。
- * 判定优先级：
- *   1. 控制面答得到（http=200）且控制面说的 pid 活着 ⇒ source='admin'，running=true
- *   2. 控制面拿不到，退而看磁盘 lease：文件里 pid 活着 ⇒ source='lease-file'，running=true
- *   3. 都不满足 ⇒ source 区分"端口被占（别人）"和"真正空闲"
- *
- * ★ 这一条的消融测试在 `selftest()` 里：把优先级 1 去掉（只看 filePid），
- *   真实读数下 `running` 必须从 true 变 false（治"误拒"）。
- */
-export function alreadyRunning({ someoneThere, adminHttp, adminPid, filePid }) {
-  // 控制面优先：答得到且 pid 活着 ⇒ 权威来源
-  if (adminHttp === 200 && adminPid != null && pidAlive(adminPid)) return { running: true, source: 'admin' }
-  // 控制面拿不到 ⇒ 才看文件（只读）：文件里 pid 活着 ⇒ 也算已在跑
-  if (filePid != null && pidAlive(filePid)) return { running: true, source: 'lease-file' }
-  return { running: false, source: someoneThere ? 'port-busy-no-owner' : 'free' }
-}
-
-const leaseInfo = (() => {
-  // ★ 2026-09-25 修：lease 在 **`<root>/dshhome/switchboard/lease.json`**（**不在** `<gen>/lease.json`）。
-  //   我第一版找 `<gen>/lease.json` ⇒ 恒 false ⇒ **把自己的实例误判成"别人占着"⇒ 误拒**。
-  const f = path.join(sbDir, 'lease.json')
-  if (!fs.existsSync(f)) return { exists: false, gen: null, pid: null, alive: false }
-  try {
-    const j = JSON.parse(fs.readFileSync(f, 'utf8'))
-    const gen = j?.activeGen?.gen ?? null
-    const pid = j?.activeGen?.pid ?? null
-    return { exists: true, gen, pid, alive: pid ? pidAlive(pid) : false }
-  } catch { return { exists: true, gen: null, pid: null, alive: false } }
-})()
-const rootHasLease = !!leaseInfo.gen
-const preFront = await rpc(frontUrl, 'session.list')
-const preAdmin = await get(`${adminUrl}/?cmd=status`)
-// ★★ 控制面优先：读控制面自己说的那个 activeGen.pid（权威来源）。
-//   如果控制面答得到 + pid 活着 ⇒ 这就是"活着的人"，不管磁盘 lease 说什么。
-//   为什么优先于磁盘：实测臂 A 的 lease.json 写 pid=9224（死），但控制面内存里的 pid=16520（活）⇒
-//   磁盘是陈旧副本，控制面才是真相。
-const adminInfo = (() => {
-  try {
-    const j = JSON.parse(preAdmin.text)
-    const pid = j?.lease?.activeGen?.pid ?? null
-    return { http: preAdmin.http, ok: preAdmin.http === 200, pid }
-  } catch { return { http: preAdmin.http, ok: false, pid: null } }
-})()
-const adminPid = adminInfo.pid ?? null
-const someoneThere = preFront.http === 200 || preAdmin.http === 200
-if (!LIVE_MODE && someoneThere && !rootHasLease) {
-  console.error(
-    `[失败] 端口段 ${ports.base} 已经**有人在应答**，但 ${path.join(root, 'dshhome')} 里没有 lease ⇒\n` +
-      `  那一段**不是本实例的**（很可能是别的臂占着）⇒ 拒跑。\n` +
-      `  ⇒ 请换一个臂名，或先把那一段上的实例停掉。`,
-  )
-  process.exit(2)
-}
-// ★★★ 控制面优先：不再以磁盘 lease 的 pid 死活作为拒跑判据。
-//   原因（实测臂 A 真实事故）：
-//   · 磁盘 lease.json 写 pid=9224（已死），但控制面内存里 pid=16520（活着）
-//   · 旧判据把"文件陈旧"误判成"实例坏了"，拒跑并叫人去杀健康进程
-//   → 新判据：控制面答得到 + pid 活着 ⇒ 视作已在跑，跳过启动（不管磁盘说什么）
-//   ★ 用纯函数 alreadyRunning() 计算，避免内联 if 链无法消融的问题。
-const runningStatus = alreadyRunning({
-  someoneThere,
-  adminHttp: adminInfo.http,
-  adminPid: adminInfo.pid,
-  filePid: leaseInfo.pid,
-})
-const isAlreadyRunning = runningStatus.running
-
-// 前置诊断输出（仅臂模式）
-if (!LIVE_MODE && someoneThere) {
-  if (runningStatus.source === 'admin') {
-    // 控制面权威：活着的就是活着的，跳过准备+启动
-    console.log(`  （前置：控制面应答且 pid=${adminInfo.pid} 活着 ⇒ 视作**本实例已在跑**，跳过①②，只做自检）`)
-  } else if (runningStatus.source === 'lease-file') {
-    console.log(`  （前置：控制面未应答，但磁盘 lease pid=${leaseInfo.pid} 活着 ⇒ 视作**本实例已在跑**，跳过①②，只做自检）`)
-  } else if (runningStatus.source === 'port-busy-no-owner') {
-    const logHint = `★ 根因诊断线索（读这两份日志就能确认）：\n` +
-      `    · ${path.join(root, 'dshhome', 'logs', 'switchboard-run.log')}  看「lease recovery」和「gen EXIT」\n` +
-      `    · ${path.join(sbDir, leaseInfo.gen ?? 'gen-???', 'boot.log')}  看「EADDRINUSE」或「连续 N 次拿不到」\n` +
-      `    ★ arm-up 不触碰 lease.json（单一写者职责归 switchboard，见 lease.ts:6）。\n` +
-      `    新起的一代会在 main.ts:178-189 的 stale-lease recovery 里清理这个文件。`
-    if (adminInfo.ok && adminPid && !pidAlive(adminPid)) {
-      // 控制面答得到但 pid 已死：控制面自己状态脏
-      console.warn(`  （警告：控制面应答但 activeGen.pid=${adminPid} 已不在运行 ⇒ 控制面内部状态陈旧）\n` +
-        `    ★ arm-up 不触碰 lease.json。建议走 switchboard 内部的 handover/clear 通道清理状态。\n` +
-        `    ${logHint}`)
+    console.log('\n===== arm-up · 停（--stop）=====')
+    const procs = await snapshot()
+    // ★ 铁律 14：通道"不可用" ≠ 读数"为 0"。取不到快照 ⇒ **拒绝执行**，不许当成"没有进程要停"。
+    if (procs === null) {
+      console.error('  [失败] 两条进程快照通道（PowerShell 绝对路径 / wmic）都拿不到读数 ⇒ **拒绝执行**。')
+      console.error('          ★ 这不是"没有进程要停"，是"我看不见" ⇒ 不许当作停干净。')
+      console.error('          ⇒ 请手工确认后停：Task Manager，或 `taskkill /PID <pid> /T /F`。')
+      process.exit(3)
+    }
+    const preview = selectDsBrainProcs(procs, WT)
+    if (preview.all.length === 0) {
+      console.log('  没有发现属于本仓库这一套的 node 进程 ⇒ 已经是停的（什么都不做）。')
     } else {
-      // 控制面无应答 + 文件 pid 也死：真正的"无人区"，但文件陈旧
-      console.warn(`  （警告：端口被占但租约陈旧（admin 无应答 + file.pid=${leaseInfo.pid} 已死）⇒ ${logHint}`)
+      console.log(`  将停 ${preview.all.length} 个（先子后父）：${preview.all.join(', ')}`)
+      for (const pid of preview.all) {
+        const p = procs.find((x) => x.pid === pid)
+        console.log(`    · ${pid}  ${String(p?.cmd ?? '').slice(0, 120)}`)
+      }
+      // ★ 不停别人的：把"没被选中的 node 总数"如实报出来，让用户一眼看到我们没碰它们
+      console.log(`  （机器上另有 ${procs.length - preview.all.length} 个无关 node 进程 —— **一个都不碰**）`)
     }
-  } else {
-    // free
-    console.log(`  （前置：无应答 + 无 lease ⇒ 正常准备+启动）`)
-  }
-}
 
-// ── 现役：不需要"准备"（不复制 profile、不带臂身份）⇒ 已在跑就跳过，否则 relaunch ──
-if (LIVE_MODE && !hasFlag('--no-start')) {
-  if (isAlreadyRunning) {
-    console.log('\n-- 起 —— **跳过**：现役已在应答（只做自检）--')
-  } else {
-    console.log('\n-- 起（现役：relaunch，不带臂身份）--')
-    const l = spawnSync('cmd', ['/c', path.join(WT, 'scripts', 'relaunch-switchboard.cmd')], { encoding: 'utf8', timeout: 120000 })
-    console.log(`  relaunch exit=${l.status}（它自己返回后服务在后台起）`)
+    const r = await stopAll({ snapshot, kill, alive }, WT)
+    if (r.found.length === 0) { console.log('  ✓ 无进程需停。'); process.exit(0) }
+    if (r.survivors.length) {
+      console.error(`  ✗ **没停干净**：pid ${r.survivors.join(', ')} 仍在 ⇒ 不谎报成功。`)
+      process.exit(1)
+    }
+    console.log(`  ✓ 已停干净（${r.killed.join(', ')}）`)
+    process.exit(0)
   }
-}
 
-// ① 准备（复用 isolated-instance，端口只传 base）—— **仅臂模式**
-//   ★★★ 2026-09-26 R2：**只有 `--rebuild` 才允许 `--force`**。
-//     原来这里是无条件 `--force` ⇒ 每次"起代"都被迫走"准备+覆盖"这条路
-//     ⇒ `--force` 从"结构变更的应急阀"长成了常规路径 = **那条旁路**。
-//     现在：① 训练场已存在且没给 `--rebuild` ⇒ **根本不跑准备**（幂等路径省掉）；
-//           ② 不存在 ⇒ 不带 `--force`（本来就不冲突）；
-//           ③ 只有 `--rebuild` 才带 `--force`，且**记账留痕**。
-const dshHomePath = path.join(root, 'dshhome')
-const homeExists = fs.existsSync(dshHomePath) && fs.readdirSync(dshHomePath).length > 0
-const needPrepare = REBUILD_MODE || !homeExists
-if (GEN_MODE) {
-  // ★ 换一代：绝不碰训练场骨架。控制面活着 ⇒ 打 handover；死了 ⇒ 明确报错（不偷偷重建）。
-  if (!isAlreadyRunning) {
+  if (GEN_MODE && REBUILD_MODE) {
+    console.error('[失败] `--gen`（换一代）与 `--rebuild`（重建训练场）是互斥的两件事 ⇒ 只能选一个。')
+    process.exit(2)
+  }
+  if (LIVE_MODE && (GEN_MODE || REBUILD_MODE)) {
+    console.error('[失败] `--gen` / `--rebuild` 是**臂模式**的动词；现役模式请直接用 `--live`。')
+    process.exit(2)
+  }
+  if (!LIVE_MODE && !armName) {
     console.error(
-      `[失败] --gen 要求**控制面正在跑**（换代是控制面的职责，不是重新起实例）。\n` +
-        `  现在 ${adminUrl} 无应答、且没有活着的 activeGen.pid ⇒ 没有可换代的协调器。\n` +
-        `  ⇒ 先用 \`node scripts/arm-up.mjs ${armName}\` 把它拉起来，再 \`--gen\`。\n` +
-        `  ★ --gen **不会**去重建训练场（那是 --rebuild 的事）。`,
+      '[用法]\n' +
+        '  node scripts/arm-up.mjs --live                 # 起现役（无参，最常用）\n' +
+        '  node scripts/arm-up.mjs <臂名>                 # 确保某个训练场可用（不存在才建；已跑就只自检）\n' +
+        '  node scripts/arm-up.mjs <臂名> --gen           # ★ 换一代（走 ?cmd=handover；不碰训练场骨架）\n' +
+        '  node scripts/arm-up.mjs <臂名> --rebuild       # ★ 结构变更：重建训练场骨架（唯一允许 --force 的路径）\n' +
+        '  node scripts/arm-up.mjs --stop                 # ★ 停：只停本仓库这一套（本体+它拉起的代），不碰别的 node\n' +
+        '  可选：[--port-base <n>] [--no-start] [--open] [--json]\n' +
+        '  ★ 双击 `scripts\\dsh-up.cmd` 等价于 `--live --open`（桌面图标的做法见该文件注释）。',
     )
-    process.exit(1)
+    process.exit(2)
   }
-  console.log('\n-- ① 准备 —— **跳过**（--gen 只换代，不碰训练场骨架）--')
-  console.log('\n-- ② 换代 —— 走控制面的 ?cmd=handover（★ 不经 isolated-instance）--')
-  const profileOverride = argv[argv.indexOf('--profile') + 1]
-  const hasProfile = argv.includes('--profile') && profileOverride && !profileOverride.startsWith('--')
-  const hoUrl =
-    `${adminUrl}/?cmd=handover` + (hasProfile ? `&profile=${encodeURIComponent(profileOverride)}` : '')
-  const ho = await get(hoUrl)
-  console.log(`  handover -> http=${ho.http}  ${ho.text.slice(0, 200)}`)
-  if (ho.http !== 200) {
-    console.error(`[失败] handover 未被接受（http=${ho.http}）⇒ 不谎报成功。`)
-    process.exit(1)
+
+  // ── 臂清单：**必须来自注册表，读不到就拒跑**（★ 我第一版这里静默退化 ⇒ 臂 B 拿到臂 A 的端口段）──
+  //    为什么不能退化：`indexOf` 失败会返回 -1 ⇒ `Math.max(0,-1)=0` ⇒ **base 永远是 33080**
+  //    ⇒ 与臂 A **撞段**，还会把 A 的前门当成自己的（"已在跑"⇒跳过启动）⇒ **自检去看空气**。
+  //    ★ 现役模式**不需要**注册表（它没有臂身份）⇒ 整块跳过。
+  let allArms = null
+  if (!LIVE_MODE) {
+    try {
+      const { createRequire } = await import('node:module')
+      const req = createRequire(path.join(WT, 'scripts', 'arms-registry.mjs'))
+      const { loadArmsRegistry } = req(path.join(WT, 'scripts', 'arms-registry.mjs'))
+      allArms = (loadArmsRegistry('evals/arms.json', { base: WT }).arms ?? []).map((a) => a.name)
+    } catch (e) {
+      console.error(`[失败] 读不到臂注册表（evals/arms.json）⇒ **拒绝猜臂序号**：${e?.message ?? e}`)
+      process.exit(2)
+    }
+    if (!allArms.includes(armName)) {
+      console.error(`[失败] 臂 "${armName}" 不在注册表里 ⇒ 拒绝猜它的序号（猜错会撞别的臂的端口段）。\n  可用的臂：${allArms.join(', ')}\n  ⇒ 要么用现成的臂名，要么先把它加进 evals/arms.json。`)
+      process.exit(2)
+    }
   }
-  // ★ 必须轮询：handover 是异步的（立即回 stage:"started"）——铁律 20
-  console.log('  轮询 ?cmd=status 直到 result 出现（最多 120s）...')
-  let ok = false
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 3000))
-    const st = await get(`${adminUrl}/?cmd=status`)
-    let j = null
-    try { j = JSON.parse(st.text) } catch {}
-    if (j?.result?.result === 'success') {
-      console.log(`  ✓ 换代成功：${j.result.note ?? ''}  gen=${j.result.gen}  resumeSession=${j.result.resumeSession || '(无)'}`)
-      ok = true
-      break
+
+  // ── ★ 两种模式只在这一处分叉（**其余全部共用**，避免"两套算法"漂移）──────────────
+  const ports = LIVE_MODE ? LIVE_SPEC.ports : portsForArm(armName, allArms)
+  const root = LIVE_MODE ? LIVE_SPEC.dshHome : rootForArm(armName)
+  const sbDir = LIVE_MODE ? LIVE_SPEC.switchboardDir : path.join(root, 'dshhome', 'switchboard')
+  const frontUrl = LIVE_MODE ? LIVE_SPEC.front : ports.front
+  const adminUrl = LIVE_MODE ? LIVE_SPEC.admin : ports.admin
+  console.log(`\n===== arm-up · ${LIVE_MODE ? '现役（--live）' : '臂 ' + armName} =====`)
+  if (LIVE_MODE) {
+    console.log('  ★ 现役模式：**不需要任何参数**（端口固定 3080 / 池 3101 / 控制面 31800）')
+    console.log(`  前端     : ${frontUrl}`)
+  } else {
+    console.log(`  ★ 唯一自变量 = 臂名；端口段由臂序号派生（不再手抄）`)
+    console.log(`  臂序号   : ${allArms.indexOf(armName)}（注册表 ${allArms.join(', ')}）`)
+    console.log(`  根目录   : ${root}`)
+    console.log(`  端口段   : switch=${ports.base}  gen=${ports.genBase}+  pool=${ports.pool}  admin=${ports.base + 100}  handover=${ports.base + 110}`)
+    console.log(`  现役占用 : ${[...LIVE_PORTS].join(', ')}（派生结果不许落进来）`)
+  }
+
+  // ── ★★ 段位归属前置断言（**仅臂模式**）：那一段若有人在应答，**必须证明是本实例的**（看 lease）──
+  //    否则就是"别人占着这段"（我第一版正是把臂 A 的前门当成了臂 B 的）⇒ **拒跑**。
+  //    ★ 现役模式不适用：现役就是 3080，不存在"段位归属"这个问题。
+  //
+  // ★★★ 2026-09-26 加：**lease 里的那个 pid 必须是活的**，否则就是"僵尸 lease"。
+  //   真事故（我三路交叉验过）：臂 A 的 `lease.json` 写 `activeGen.pid = 9224`，而
+  //   `tasklist /FI "PID eq 9224"` ⇒ **进程不存在**；`:33082`/`:33101` 实际握在 **pid 16520** 手里。
+  //   成因：`arm-up` 走 `isolated-instance … --force` ⇒ 每次**重新准备+重新起代**，但**旧代从不停** ⇒
+  //   新代绑不上池（boot.log：`33101 被占 … 连续 9 次拿不到 ⇒ 本代没有池`）⇒ 新代死；
+  //   **而 lease 已被改写成新代（死掉的）pid** ⇒ 从此 lease 指向**尸体**。
+  //   ⇒ 而**旧检查只看 `lease.activeGen.gen` 是不是非空字符串** ⇒ 僵尸 lease 被当成"这是我的实例⇒安全"。
+  //   ★ 后果 = **臂永久卡死**：第一次 arm-up 成功，之后每次都在 ⑥/⑦ 上红（而根因被这一条掩盖）。
+  //   ★ 判据（不许读注释、不许读意图）：**去系统里问那个 pid 还在不在跑**。
+
+  const leaseInfo = (() => {
+    // ★ 2026-09-25 修：lease 在 **`<root>/dshhome/switchboard/lease.json`**（**不在** `<gen>/lease.json`）。
+    //   我第一版找 `<gen>/lease.json` ⇒ 恒 false ⇒ **把自己的实例误判成"别人占着"⇒ 误拒**。
+    const f = path.join(sbDir, 'lease.json')
+    if (!fs.existsSync(f)) return { exists: false, gen: null, pid: null, alive: false }
+    try {
+      const j = JSON.parse(fs.readFileSync(f, 'utf8'))
+      const gen = j?.activeGen?.gen ?? null
+      const pid = j?.activeGen?.pid ?? null
+      return { exists: true, gen, pid, alive: pid ? pidAlive(pid) : false }
+    } catch { return { exists: true, gen: null, pid: null, alive: false } }
+  })()
+  const rootHasLease = !!leaseInfo.gen
+  const preFront = await rpc(frontUrl, 'session.list')
+  const preAdmin = await get(`${adminUrl}/?cmd=status`)
+  // ★★ 控制面优先：读控制面自己说的那个 activeGen.pid（权威来源）。
+  //   如果控制面答得到 + pid 活着 ⇒ 这就是"活着的人"，不管磁盘 lease 说什么。
+  //   为什么优先于磁盘：实测臂 A 的 lease.json 写 pid=9224（死），但控制面内存里的 pid=16520（活）⇒
+  //   磁盘是陈旧副本，控制面才是真相。
+  const adminInfo = (() => {
+    try {
+      const j = JSON.parse(preAdmin.text)
+      const pid = j?.lease?.activeGen?.pid ?? null
+      return { http: preAdmin.http, ok: preAdmin.http === 200, pid }
+    } catch { return { http: preAdmin.http, ok: false, pid: null } }
+  })()
+  const adminPid = adminInfo.pid ?? null
+  const someoneThere = preFront.http === 200 || preAdmin.http === 200
+  if (!LIVE_MODE && someoneThere && !rootHasLease) {
+    console.error(
+      `[失败] 端口段 ${ports.base} 已经**有人在应答**，但 ${path.join(root, 'dshhome')} 里没有 lease ⇒\n` +
+        `  那一段**不是本实例的**（很可能是别的臂占着）⇒ 拒跑。\n` +
+        `  ⇒ 请换一个臂名，或先把那一段上的实例停掉。`,
+    )
+    process.exit(2)
+  }
+  // ★★★ 控制面优先：不再以磁盘 lease 的 pid 死活作为拒跑判据。
+  //   原因（实测臂 A 真实事故）：
+  //   · 磁盘 lease.json 写 pid=9224（已死），但控制面内存里 pid=16520（活着）
+  //   · 旧判据把"文件陈旧"误判成"实例坏了"，拒跑并叫人去杀健康进程
+  //   → 新判据：控制面答得到 + pid 活着 ⇒ 视作已在跑，跳过启动（不管磁盘说什么）
+  //   ★ 用纯函数 alreadyRunning() 计算，避免内联 if 链无法消融的问题。
+  const runningStatus = alreadyRunning({
+    someoneThere,
+    adminHttp: adminInfo.http,
+    adminPid: adminInfo.pid,
+    filePid: leaseInfo.pid,
+  })
+  const isAlreadyRunning = runningStatus.running
+
+  // 前置诊断输出（仅臂模式）
+  if (!LIVE_MODE && someoneThere) {
+    if (runningStatus.source === 'admin') {
+      // 控制面权威：活着的就是活着的，跳过准备+启动
+      console.log(`  （前置：控制面应答且 pid=${adminInfo.pid} 活着 ⇒ 视作**本实例已在跑**，跳过①②，只做自检）`)
+    } else if (runningStatus.source === 'lease-file') {
+      console.log(`  （前置：控制面未应答，但磁盘 lease pid=${leaseInfo.pid} 活着 ⇒ 视作**本实例已在跑**，跳过①②，只做自检）`)
+    } else if (runningStatus.source === 'port-busy-no-owner') {
+      const logHint = `★ 根因诊断线索（读这两份日志就能确认）：\n` +
+        `    · ${path.join(root, 'dshhome', 'logs', 'switchboard-run.log')}  看「lease recovery」和「gen EXIT」\n` +
+        `    · ${path.join(sbDir, leaseInfo.gen ?? 'gen-???', 'boot.log')}  看「EADDRINUSE」或「连续 N 次拿不到」\n` +
+        `    ★ arm-up 不触碰 lease.json（单一写者职责归 switchboard，见 lease.ts:6）。\n` +
+        `    新起的一代会在 main.ts:178-189 的 stale-lease recovery 里清理这个文件。`
+      if (adminInfo.ok && adminPid && !pidAlive(adminPid)) {
+        // 控制面答得到但 pid 已死：控制面自己状态脏
+        console.warn(`  （警告：控制面应答但 activeGen.pid=${adminPid} 已不在运行 ⇒ 控制面内部状态陈旧）\n` +
+          `    ★ arm-up 不触碰 lease.json。建议走 switchboard 内部的 handover/clear 通道清理状态。\n` +
+          `    ${logHint}`)
+      } else {
+        // 控制面无应答 + 文件 pid 也死：真正的"无人区"，但文件陈旧
+        console.warn(`  （警告：端口被占但租约陈旧（admin 无应答 + file.pid=${leaseInfo.pid} 已死）⇒ ${logHint}`)
+      }
+    } else {
+      // free
+      console.log(`  （前置：无应答 + 无 lease ⇒ 正常准备+启动）`)
     }
-    if (j?.result?.result && j.result.result !== 'success') {
-      console.error(`  ✗ 换代失败：${JSON.stringify(j.result)}`)
-      break
+  }
+
+  // ── 现役：不需要"准备"（不复制 profile、不带臂身份）⇒ 已在跑就跳过，否则 relaunch ──
+  if (LIVE_MODE && !hasFlag('--no-start')) {
+    if (isAlreadyRunning) {
+      console.log('\n-- 起 —— **跳过**：现役已在应答（只做自检）--')
+    } else {
+      console.log('\n-- 起（现役：relaunch，不带臂身份）--')
+      const l = spawnSync('cmd', ['/c', path.join(WT, 'scripts', 'relaunch-switchboard.cmd')], { encoding: 'utf8', timeout: 120000 })
+      console.log(`  relaunch exit=${l.status}（它自己返回后服务在后台起）`)
     }
+  }
+
+  // ① 准备（复用 isolated-instance，端口只传 base）—— **仅臂模式**
+  //   ★★★ 2026-09-26 R2：**只有 `--rebuild` 才允许 `--force`**。
+  //     原来这里是无条件 `--force` ⇒ 每次"起代"都被迫走"准备+覆盖"这条路
+  //     ⇒ `--force` 从"结构变更的应急阀"长成了常规路径 = **那条旁路**。
+  //     现在：① 训练场已存在且没给 `--rebuild` ⇒ **根本不跑准备**（幂等路径省掉）；
+  //           ② 不存在 ⇒ 不带 `--force`（本来就不冲突）；
+  //           ③ 只有 `--rebuild` 才带 `--force`，且**记账留痕**。
+  const dshHomePath = path.join(root, 'dshhome')
+  const homeExists = fs.existsSync(dshHomePath) && fs.readdirSync(dshHomePath).length > 0
+  const needPrepare = REBUILD_MODE || !homeExists
+  if (GEN_MODE) {
+    // ★ 换一代：绝不碰训练场骨架。控制面活着 ⇒ 打 handover；死了 ⇒ 明确报错（不偷偷重建）。
+    if (!isAlreadyRunning) {
+      console.error(
+        `[失败] --gen 要求**控制面正在跑**（换代是控制面的职责，不是重新起实例）。\n` +
+          `  现在 ${adminUrl} 无应答、且没有活着的 activeGen.pid ⇒ 没有可换代的协调器。\n` +
+          `  ⇒ 先用 \`node scripts/arm-up.mjs ${armName}\` 把它拉起来，再 \`--gen\`。\n` +
+          `  ★ --gen **不会**去重建训练场（那是 --rebuild 的事）。`,
+      )
+      process.exit(1)
+    }
+    console.log('\n-- ① 准备 —— **跳过**（--gen 只换代，不碰训练场骨架）--')
+    console.log('\n-- ② 换代 —— 走控制面的 ?cmd=handover（★ 不经 isolated-instance）--')
+    const profileOverride = argv[argv.indexOf('--profile') + 1]
+    const hasProfile = argv.includes('--profile') && profileOverride && !profileOverride.startsWith('--')
+    const hoUrl =
+      `${adminUrl}/?cmd=handover` + (hasProfile ? `&profile=${encodeURIComponent(profileOverride)}` : '')
+    const ho = await get(hoUrl)
+    console.log(`  handover -> http=${ho.http}  ${ho.text.slice(0, 200)}`)
+    if (ho.http !== 200) {
+      console.error(`[失败] handover 未被接受（http=${ho.http}）⇒ 不谎报成功。`)
+      process.exit(1)
+    }
+    // ★ 必须轮询：handover 是异步的（立即回 stage:"started"）——铁律 20
+    console.log('  轮询 ?cmd=status 直到 result 出现（最多 120s）...')
+    let ok = false
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 3000))
+      const st = await get(`${adminUrl}/?cmd=status`)
+      let j = null
+      try { j = JSON.parse(st.text) } catch {}
+      if (j?.result?.result === 'success') {
+        console.log(`  ✓ 换代成功：${j.result.note ?? ''}  gen=${j.result.gen}  resumeSession=${j.result.resumeSession || '(无)'}`)
+        ok = true
+        break
+      }
+      if (j?.result?.result && j.result.result !== 'success') {
+        console.error(`  ✗ 换代失败：${JSON.stringify(j.result)}`)
+        break
+      }
+      process.stdout.write('.')
+    }
+    console.log('')
+    if (!ok) {
+      console.error('[失败] 轮询窗口内没等到 result=success ⇒ 不谎报成功。请查 handover-status.jsonl。')
+      process.exit(1)
+    }
+  }
+  if (!hasFlag('--no-start') && !LIVE_MODE && needPrepare && !GEN_MODE) {
+    const forceFlag = REBUILD_MODE ? ['--force'] : []
+    const modeLabel = REBUILD_MODE ? '结构变更 ⇒ 允许 --force（会记账留痕）' : '幂等：不带 --force'
+    console.log(`\n-- ① 准备（${modeLabel}）--`)
+    if (REBUILD_MODE) {
+      // ★ 逃生阀要留痕：`--force` 是本项目里"从应急阀长成旁路"的先例 ⇒ 每次使用都记一条。
+      try {
+        fs.appendFileSync(
+          path.join(WT, 'out', 'arm-rebuild-journal.jsonl'),
+          JSON.stringify({ t: Date.now(), arm: armName, root, by: 'arm-up --rebuild' }) + '\n',
+          'utf8',
+        )
+        console.log('  （已记账：out/arm-rebuild-journal.jsonl）')
+      } catch (e) {
+        console.warn(`  （警告：重建台账写入失败，不阻断：${e?.message ?? e}）`)
+      }
+    }
+    const r = spawnSync(NODE, [path.join(HERE, 'delegation', 'isolated-instance.mjs'), '--arm', armName, '--root', root, '--port-base', String(ports.base), ...forceFlag], { encoding: 'utf8', timeout: 600000 })
+    const tail = (r.stdout ?? '').split('\n').filter((l) => /自建 preset|端口覆盖|自进化两席|arm-isolation:|准备完成/.test(l))
+    for (const l of tail) console.log('  ' + l.trim())
+    if (r.status !== 0) {
+      console.error(`\n[失败] 准备阶段 exit=${r.status}。★ 无论我的过滤有没有命中，都把它的原始输出贴全：`)
+      console.error('---- stdout ----')
+      console.error((r.stdout ?? '(空)').split('\n').slice(-20).join('\n'))
+      console.error('---- stderr ----')
+      console.error((r.stderr ?? '(空)').split('\n').slice(-20).join('\n'))
+      process.exit(1)
+    }
+
+    // ② 起（★ 用派生出的 env 起，不经人手）
+    //    ★★ 用**控制面优先**的 `isAlreadyRunning`：控制面答得到 + pid 活着 = 已在跑。
+    //    旧判据只看 "someoneThere && lease.alive"，磁盘陈旧时会误拒（见事故）。
+    if (isAlreadyRunning) {
+      console.log('\n-- ② 起 —— **跳过**：控制面确认已在应答（pid=' + adminPid + '；只做自检，不重启）--')
+    } else {
+      console.log('\n-- ② 起（用**准备阶段吐出的**身份/端口 env 起，不经人手）--')
+      // ★★ 身份与端口**只信准备阶段那一处**（本脚本不再自己算一遍 deny —— 两套算法必然漂移）。
+      //    实测：只传 DSH_ARM_SELF、不传 DSH_ARM_DENY ⇒ 护栏走"显式 no-op" ⇒ **不拦任何东西**。
+      const armEnvLine = (r.stdout ?? '').split('\n').find((l) => l.includes('[arm-env] '))
+      if (!armEnvLine) {
+        console.error('[失败] 没从准备阶段拿到 [arm-env]（训练场身份 + 端口）⇒ **拒绝在"身份不明"下去起服务**')
+        process.exit(1)
+      }
+      let armEnv
+      try {
+        armEnv = JSON.parse(armEnvLine.slice(armEnvLine.indexOf('[arm-env] ') + '[arm-env] '.length))
+      } catch (e) {
+        console.error(`[失败] [arm-env] 不是合法 JSON ⇒ 拒跑：${e?.message ?? e}`)
+        process.exit(1)
+      }
+      // 三道一致性/非空断言（★ 最后一条正是刚才那个洞的守卫）
+      if (armEnv.DSH_ARM_SELF !== armName) {
+        console.error(`[失败] 准备阶段给的身份是 "${armEnv.DSH_ARM_SELF}"，与臂名 "${armName}" 不符 ⇒ 拒跑`)
+        process.exit(1)
+      }
+      if (String(armEnv.SWITCH_PORT) !== String(ports.base)) {
+        console.error(`[失败] 端口推导**两边不一致**（准备阶段 ${armEnv.SWITCH_PORT} ≠ 本脚本 ${ports.base}）⇒ 拒跑`)
+        process.exit(1)
+      }
+      if (!armEnv.DSH_ARM_DENY || String(armEnv.DSH_ARM_DENY).trim() === '') {
+        console.error(`[失败] DSH_ARM_DENY 为空 ⇒ 护栏会走"显式 no-op"**什么都不拦** ⇒ 拒跑（这一条是实测踩出来的）`)
+        process.exit(1)
+      }
+      console.log(`  身份 : DSH_ARM_SELF=${armEnv.DSH_ARM_SELF}  DSH_ARM_DENY=${armEnv.DSH_ARM_DENY}`)
+      const env = { ...process.env, ...armEnv, ...ports.env }
+      const l = spawnSync('cmd', ['/c', path.join(WT, 'scripts', 'relaunch-switchboard.cmd')], { encoding: 'utf8', env, timeout: 120000 })
+      console.log(`  relaunch exit=${l.status}（它自己返回后服务在后台起）`)
+    }
+  }
+
+  // ③ 等它起来
+  console.log('\n-- ③ 等前门应答（最多 90s）--')
+  let front = { http: 0, ok: false }
+  for (let i = 0; i < 18; i++) {
+    await new Promise((r) => setTimeout(r, 5000))
+    front = await rpc(frontUrl, 'session.list')
+    if (front.http === 200 && front.ok) break
     process.stdout.write('.')
   }
   console.log('')
-  if (!ok) {
-    console.error('[失败] 轮询窗口内没等到 result=success ⇒ 不谎报成功。请查 handover-status.jsonl。')
-    process.exit(1)
+
+  // ④ 自检（★ "起来了"的定义）
+  const admin = await get(`${adminUrl}/?cmd=status`)
+  // ★ 问控制面要现行代（权威）—— 不靠猜 mtime（见 latestBootLog 的注释）
+  let activeGenName = null
+  try { activeGenName = JSON.parse(admin.text)?.lease?.activeGen?.gen ?? null } catch { /* 控制面没答 */ }
+  const boot = latestBootLog(sbDir, activeGenName)
+  console.log(`  现行代（控制面权威）= ${activeGenName ?? '(拿不到，退化为按 boot.log mtime)'}`)
+  const t = boot?.text ?? ''
+  const isolationLogOk = /\[arm-isolation\] apply running/.test(t)
+  const denyCount = Number((t.match(/denyRoots=(\d+) 条/) ?? [])[1] ?? 0)
+  const seatsLogOk = /provider="evo-dev"/.test(t) && /provider="evo-review"/.test(t)
+  const poolLogOk = new RegExp(`\\[key-pool-proxy\\] listening 127\\.0\\.0\\.1:${ports.pool}\\b`).test(t)
+  // 现役模式还要判"前端可取"（点了就有界面）—— 臂模式不判这条
+  let htmlOk = null
+  if (LIVE_MODE) {
+    const h = await get(`${frontUrl}/`)
+    htmlOk = h.http === 200 && /<html|<!doctype/i.test(h.text)
   }
-}
-if (!hasFlag('--no-start') && !LIVE_MODE && needPrepare && !GEN_MODE) {
-  const forceFlag = REBUILD_MODE ? ['--force'] : []
-  const modeLabel = REBUILD_MODE ? '结构变更 ⇒ 允许 --force（会记账留痕）' : '幂等：不带 --force'
-  console.log(`\n-- ① 准备（${modeLabel}）--`)
-  if (REBUILD_MODE) {
-    // ★ 逃生阀要留痕：`--force` 是本项目里"从应急阀长成旁路"的先例 ⇒ 每次使用都记一条。
+  // ★ 2026-09-26：⑦ 的探针**带超时 + 有界重试**（5×20s），并把结果**分类**（ok/slow/unreachable）。
+  //   起因是实测的真假红：现役正在跑"发起本实验的那个会话"时，裸探针 5/6 次 `http:0` ⇒ 整条链自锁。
+  const live = await rpc('http://127.0.0.1:3080', 'session.list')
+  const rows = judgeSelfCheck({
+    ports, front, admin, isolationLogOk, denyCount, seatsLogOk, poolLogOk,
+    liveOk: live.http === 200 && live.ok, liveKind: live.kind ?? null,
+    mode: LIVE_MODE ? 'live' : 'arm', htmlOk,
+  })
+
+  console.log('-- ④ 自检（"起来了" = 这些全过）--')
+  for (const r of rows) console.log(`  ${r.ok ? '✅' : '❌'} ${r.name} — ${r.detail}`)
+  console.log(`\n  boot.log = ${boot?.file ?? '(没找到)'}`)
+  const allOk = rows.every((r) => r.ok)
+  console.log(`\n===== ${allOk ? '✅ 起来了（自检全过）' : '❌ 没起来（照上面 ❌ 那条查）'} =====`)
+
+  // ★★ `--open`：起完**直接把界面打开** —— 这就是"像桌面应用那样，点了就有界面"
+  //    （`dsh-up.cmd` 默认带这个开关 ⇒ 双击桌面图标 = 起服务 + 开界面，不需要任何参数）
+  if (hasFlag('--open') && allOk) {
     try {
-      fs.appendFileSync(
-        path.join(WT, 'out', 'arm-rebuild-journal.jsonl'),
-        JSON.stringify({ t: Date.now(), arm: armName, root, by: 'arm-up --rebuild' }) + '\n',
-        'utf8',
-      )
-      console.log('  （已记账：out/arm-rebuild-journal.jsonl）')
+      spawn('cmd', ['/c', 'start', '""', frontUrl], { detached: true, stdio: 'ignore', shell: false }).unref()
+      console.log(`  🌐 已打开界面：${frontUrl}`)
     } catch (e) {
-      console.warn(`  （警告：重建台账写入失败，不阻断：${e?.message ?? e}）`)
+      console.log(`  （自动开界面失败，请手动打开 ${frontUrl}：${e?.message ?? e}）`)
     }
   }
-  const r = spawnSync(NODE, [path.join(HERE, 'delegation', 'isolated-instance.mjs'), '--arm', armName, '--root', root, '--port-base', String(ports.base), ...forceFlag], { encoding: 'utf8', timeout: 600000 })
-  const tail = (r.stdout ?? '').split('\n').filter((l) => /自建 preset|端口覆盖|自进化两席|arm-isolation:|准备完成/.test(l))
-  for (const l of tail) console.log('  ' + l.trim())
-  if (r.status !== 0) {
-    console.error(`\n[失败] 准备阶段 exit=${r.status}。★ 无论我的过滤有没有命中，都把它的原始输出贴全：`)
-    console.error('---- stdout ----')
-    console.error((r.stdout ?? '(空)').split('\n').slice(-20).join('\n'))
-    console.error('---- stderr ----')
-    console.error((r.stderr ?? '(空)').split('\n').slice(-20).join('\n'))
-    process.exit(1)
+  // ★★★ 2026-09-27（R5）：`--json` 是下游**唯一的机器通道** ⇒ 必须把 ⑦ 的三态**显式带出去**
+  //   （只写在 `rows[].status` 里不够 —— 下游未必知道去翻哪一行、按什么键）。
+  //   ★ `liveStatus` 与 `rows[].ok` **并存且可能"矛盾"**：`unreachable` 时 `ok=false` 但 `liveStatus='unknown'`。
+  //     这不是 bug —— 前者是"不许放行"，后者是"别把它当'现役坏了'来归因"。两个问题、两个字段。
+  if (hasFlag('--json')) {
+    const liveRow = rows.find((r) => r.name.startsWith('⑦'))
+    console.log(JSON.stringify({
+      mode: LIVE_MODE ? 'live' : 'arm', arm: armName, ports, root, rows, gen: boot?.gen,
+      liveStatus: liveRow?.status ?? null,
+      liveKind: live.kind ?? null,
+      // ★ 便于下游一句话判"该不该把这次的失败归因为'现役受影响'"
+      liveAttributableToFront: liveRow ? liveRow.status === 'false' : null,
+    }, null, 2))
   }
+  process.exit(allOk ? 0 : 1)
 
-  // ② 起（★ 用派生出的 env 起，不经人手）
-  //    ★★ 用**控制面优先**的 `isAlreadyRunning`：控制面答得到 + pid 活着 = 已在跑。
-  //    旧判据只看 "someoneThere && lease.alive"，磁盘陈旧时会误拒（见事故）。
-  if (isAlreadyRunning) {
-    console.log('\n-- ② 起 —— **跳过**：控制面确认已在应答（pid=' + adminPid + '；只做自检，不重启）--')
-  } else {
-    console.log('\n-- ② 起（用**准备阶段吐出的**身份/端口 env 起，不经人手）--')
-    // ★★ 身份与端口**只信准备阶段那一处**（本脚本不再自己算一遍 deny —— 两套算法必然漂移）。
-    //    实测：只传 DSH_ARM_SELF、不传 DSH_ARM_DENY ⇒ 护栏走"显式 no-op" ⇒ **不拦任何东西**。
-    const armEnvLine = (r.stdout ?? '').split('\n').find((l) => l.includes('[arm-env] '))
-    if (!armEnvLine) {
-      console.error('[失败] 没从准备阶段拿到 [arm-env]（训练场身份 + 端口）⇒ **拒绝在"身份不明"下去起服务**')
-      process.exit(1)
-    }
-    let armEnv
-    try {
-      armEnv = JSON.parse(armEnvLine.slice(armEnvLine.indexOf('[arm-env] ') + '[arm-env] '.length))
-    } catch (e) {
-      console.error(`[失败] [arm-env] 不是合法 JSON ⇒ 拒跑：${e?.message ?? e}`)
-      process.exit(1)
-    }
-    // 三道一致性/非空断言（★ 最后一条正是刚才那个洞的守卫）
-    if (armEnv.DSH_ARM_SELF !== armName) {
-      console.error(`[失败] 准备阶段给的身份是 "${armEnv.DSH_ARM_SELF}"，与臂名 "${armName}" 不符 ⇒ 拒跑`)
-      process.exit(1)
-    }
-    if (String(armEnv.SWITCH_PORT) !== String(ports.base)) {
-      console.error(`[失败] 端口推导**两边不一致**（准备阶段 ${armEnv.SWITCH_PORT} ≠ 本脚本 ${ports.base}）⇒ 拒跑`)
-      process.exit(1)
-    }
-    if (!armEnv.DSH_ARM_DENY || String(armEnv.DSH_ARM_DENY).trim() === '') {
-      console.error(`[失败] DSH_ARM_DENY 为空 ⇒ 护栏会走"显式 no-op"**什么都不拦** ⇒ 拒跑（这一条是实测踩出来的）`)
-      process.exit(1)
-    }
-    console.log(`  身份 : DSH_ARM_SELF=${armEnv.DSH_ARM_SELF}  DSH_ARM_DENY=${armEnv.DSH_ARM_DENY}`)
-    const env = { ...process.env, ...armEnv, ...ports.env }
-    const l = spawnSync('cmd', ['/c', path.join(WT, 'scripts', 'relaunch-switchboard.cmd')], { encoding: 'utf8', env, timeout: 120000 })
-    console.log(`  relaunch exit=${l.status}（它自己返回后服务在后台起）`)
-  }
 }
-
-// ③ 等它起来
-console.log('\n-- ③ 等前门应答（最多 90s）--')
-let front = { http: 0, ok: false }
-for (let i = 0; i < 18; i++) {
-  await new Promise((r) => setTimeout(r, 5000))
-  front = await rpc(frontUrl, 'session.list')
-  if (front.http === 200 && front.ok) break
-  process.stdout.write('.')
-}
-console.log('')
-
-// ④ 自检（★ "起来了"的定义）
-const admin = await get(`${adminUrl}/?cmd=status`)
-// ★ 问控制面要现行代（权威）—— 不靠猜 mtime（见 latestBootLog 的注释）
-let activeGenName = null
-try { activeGenName = JSON.parse(admin.text)?.lease?.activeGen?.gen ?? null } catch { /* 控制面没答 */ }
-const boot = latestBootLog(sbDir, activeGenName)
-console.log(`  现行代（控制面权威）= ${activeGenName ?? '(拿不到，退化为按 boot.log mtime)'}`)
-const t = boot?.text ?? ''
-const isolationLogOk = /\[arm-isolation\] apply running/.test(t)
-const denyCount = Number((t.match(/denyRoots=(\d+) 条/) ?? [])[1] ?? 0)
-const seatsLogOk = /provider="evo-dev"/.test(t) && /provider="evo-review"/.test(t)
-const poolLogOk = new RegExp(`\\[key-pool-proxy\\] listening 127\\.0\\.0\\.1:${ports.pool}\\b`).test(t)
-// 现役模式还要判"前端可取"（点了就有界面）—— 臂模式不判这条
-let htmlOk = null
-if (LIVE_MODE) {
-  const h = await get(`${frontUrl}/`)
-  htmlOk = h.http === 200 && /<html|<!doctype/i.test(h.text)
-}
-// ★ 2026-09-26：⑦ 的探针**带超时 + 有界重试**（5×20s），并把结果**分类**（ok/slow/unreachable）。
-//   起因是实测的真假红：现役正在跑"发起本实验的那个会话"时，裸探针 5/6 次 `http:0` ⇒ 整条链自锁。
-const live = await rpc('http://127.0.0.1:3080', 'session.list')
-const rows = judgeSelfCheck({
-  ports, front, admin, isolationLogOk, denyCount, seatsLogOk, poolLogOk,
-  liveOk: live.http === 200 && live.ok, liveKind: live.kind ?? null,
-  mode: LIVE_MODE ? 'live' : 'arm', htmlOk,
-})
-
-console.log('-- ④ 自检（"起来了" = 这些全过）--')
-for (const r of rows) console.log(`  ${r.ok ? '✅' : '❌'} ${r.name} — ${r.detail}`)
-console.log(`\n  boot.log = ${boot?.file ?? '(没找到)'}`)
-const allOk = rows.every((r) => r.ok)
-console.log(`\n===== ${allOk ? '✅ 起来了（自检全过）' : '❌ 没起来（照上面 ❌ 那条查）'} =====`)
-
-// ★★ `--open`：起完**直接把界面打开** —— 这就是"像桌面应用那样，点了就有界面"
-//    （`dsh-up.cmd` 默认带这个开关 ⇒ 双击桌面图标 = 起服务 + 开界面，不需要任何参数）
-if (hasFlag('--open') && allOk) {
-  try {
-    spawn('cmd', ['/c', 'start', '""', frontUrl], { detached: true, stdio: 'ignore', shell: false }).unref()
-    console.log(`  🌐 已打开界面：${frontUrl}`)
-  } catch (e) {
-    console.log(`  （自动开界面失败，请手动打开 ${frontUrl}：${e?.message ?? e}）`)
-  }
-}
-if (hasFlag('--json')) console.log(JSON.stringify({ mode: LIVE_MODE ? 'live' : 'arm', arm: armName, ports, root, rows, gen: boot?.gen }, null, 2))
-process.exit(allOk ? 0 : 1)

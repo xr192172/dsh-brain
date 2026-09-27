@@ -168,11 +168,39 @@ if (isMain) {
   if (argv.includes('--dry')) { console.log('\n（--dry：只算了规格，没起一代、没发题）'); process.exit(0) }
 
   // ① 起一代（**不 flip** ⇒ 不会抢现役的 3080）
+  // ★★★ 2026-09-27（R5）：加 `--json` —— 为了读到 `liveStatus` 这个**三值**字段。
+  //   事故形状（铁律 33）：`arm-up` 的 ⑦（现役仍健康）只有 `ok:boolean`，
+  //   于是"探不通（通道不可用）"与"探得通但答错（现役真坏了）"在**这里完全同形**
+  //   ⇒ 本脚本只会说"起一代没过自检"，**归因能力为零**（两种情况给的处置完全不同）。
+  //   R5 之后 `arm-up --json` 顶层带 `liveStatus ∈ {ok, unknown, false}`：
+  //     · `false`    ⇒ "看到了坏结果" ⇒ 归因到**现役受影响**（这才是该警惕的）；
+  //     · `unknown`  ⇒ "看不到"       ⇒ **不许**归因成现役坏了（铁律 12/14）—— 但要如实报。
+  //   ★ 注意：两种都**照样拒跑**（不许因为"可能是通道问题"就放行 —— 铁律 33：unknown 不当通过）。
   console.log('\n-- ① 起一代（arm-up，不 flip）--')
-  const up = spawnSync(NODE, [path.join(HERE, 'arm-up.mjs'), sp.arm], { encoding: 'utf8', timeout: 900000 })
+  const up = spawnSync(NODE, [path.join(HERE, 'arm-up.mjs'), sp.arm, '--json'], { encoding: 'utf8', timeout: 900000 })
   const upOut = (up.stdout ?? '') + (up.stderr ?? '')
   console.log('  ' + (upOut.split('\n').filter((l) => /起来了|没起来/.test(l)).pop() ?? `exit=${up.status}`).trim())
-  if (up.status !== 0) { console.error('[失败] 起一代没过自检 ⇒ 不敢发题'); console.error(upOut.split('\n').slice(-8).join('\n')); process.exit(1) }
+  // 从输出里解出 arm-up 的 --json 块（三态就在里面；解不出 ⇒ liveStatus=null，如实标"读不到"）
+  const upJson = (() => {
+    const i = upOut.lastIndexOf('\n{\n')
+    if (i < 0) return null
+    try { return JSON.parse(upOut.slice(i + 1, upOut.lastIndexOf('}') + 1)) } catch { return null }
+  })()
+  const liveStatus = upJson?.liveStatus ?? null
+  if (up.status !== 0) {
+    console.error('[失败] 起一代没过自检 ⇒ 不敢发题')
+    // ★★ 归因分流（R5 的核心用途）：把"看不到"与"看到坏结果"分开说，别混成一句"没过自检"。
+    if (liveStatus === 'false') {
+      console.error('  ★★ 归因：⑦ 现役仍健康 = **看到了坏结果**（探得通但答不对）⇒ 这才该怀疑"隔离实例把现役搞坏了"')
+    } else if (liveStatus === 'unknown') {
+      console.error('  ★ 归因：⑦ 现役仍健康 = **探不通（通道不可用）** ⇒ **不许**据此说"现役坏了"（铁律 12）')
+      console.error('          可能是负载/超时；先复探一次前门再下结论。')
+    } else {
+      console.error(`  ★ 归因：读不到 liveStatus（--json 解不出或 ⑦ 未参与判定）⇒ **不归因**（诚实记 null）`)
+    }
+    console.error(upOut.split('\n').slice(-8).join('\n'))
+    process.exit(1)
+  }
 
   // ② 发题（+ 收卷）
   console.log('\n-- ② 发题（dsh-delegate --for-arm）--')
@@ -201,9 +229,16 @@ if (isMain) {
   const ev = collectEvidence(dres)
   fs.mkdirSync(outDir, { recursive: true })
   const evFile = path.join(outDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
-  fs.writeFileSync(evFile, JSON.stringify({ spec: sp, evidence: ev }, null, 2) + '\n', 'utf8')
+  // ★★ 2026-09-27（R5）：把 ⑦ 的**三态读数**一起存进证据 —— 事后审计要能回答
+  //   "这一次失败，是'看不到'还是'看到坏结果'"（铁律 32：诊断要靠自洽性，证据得先留住）。
+  fs.writeFileSync(
+    evFile,
+    JSON.stringify({ spec: sp, frontHealth: { liveStatus, liveKind: upJson?.liveKind ?? null, liveAttributableToFront: upJson?.liveAttributableToFront ?? null }, evidence: ev }, null, 2) + '\n',
+    'utf8',
+  )
   console.log(`\n-- ③ 收卷（只采证据，不判分）--`)
   console.log(`  outcome=${ev.outcome}  toolCalls=${ev.toolCalls}  assistantTexts=${ev.assistantTexts}  读数质量=${ev.readingQuality}`)
+  console.log(`  前门健康（三态）= ${liveStatus ?? '(读不到)'}`)
   console.log(`  证据已存：${evFile}`)
 
   // ④ 留痕：判分（**默认不判** ⇒ 记 ran）

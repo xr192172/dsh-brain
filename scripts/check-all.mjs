@@ -212,6 +212,29 @@ const GATES = [
     cmd: ['node', 'scripts/switchboard/test-mgmt-nonblocking.mjs'],
   },
   {
+    id: 'test:selfcheck-tristate',
+    // ★★ 2026-09-27 新增（R5）。事故形状（铁律 33 的**原文场景**）：
+    //   `arm-up.mjs` 的 ⑦（现役仍健康）**诚实地在 `detail` 里写了**
+    //   「探不通（通道不可用）≠ 现役坏了」vs「探得通但答不对 = 现役受影响」，
+    //   **但 `ok` 只有 true/false** ⇒ 两种情形都 false ⇒ **下游读不到差别**：
+    //     · `run-experiment.mjs` 只看 exit code（两者都 exit 1）⇒ 一律拒跑、**归因能力为零**；
+    //     · `--json` 的 `rows[].ok` 同形 ⇒ 机器通道里根本没这个信息。
+    //   ⇒ 「文案诚实地写了"不确定" ≠ 判据诚实地处理了"不确定"」。
+    //   修法 = **只加不换**：`ok` 语义一个字节不改（既有消费者零影响），每行**新增** `status` 三值
+    //     （`ok` / `unknown` / `false`），`--json` 顶层显式带出 `liveStatus`
+    //     （不能指望下游知道去翻哪一行、按什么键）。
+    //   ★ 判据分层：行为层（真调 judgeSelfCheck 三种输入，断 (ok,status) 组合）
+    //     + `ok` 语义未变层（两种失败仍必须 false —— **"不知道"必须拦住，不许放行**）
+    //     + 机器通道层（真跑 `--live --json` 解 JSON）
+    //     + **下游接线层**（防"写了三态但没人读" —— R3 半二 `pool.pruneDead` 正是这个形状）
+    //     + 消融自证（抹掉三值化 ⇒ 必红；含 E1b 反自证）。
+    //   ★★ 本门自己踩过一次**假红**（诚实记录，第 5 次 CRLF 击穿）：
+    //     消融正则按 `\n` 收尾而 `arm-up.mjs` 是 **CRLF** ⇒ 永不匹配 ⇒ "消融没生效" ⇒ 假红。
+    //     修法：**先 `replace(/\r\n/g,'\n')` 归一化再匹配**（铁律 41 的 CRLF 变体）。
+    what: '⑦ 自检三态：ok/unknown/false（行为 + ok 语义未变 + 机器通道 + 下游接线 + 消融）',
+    cmd: ['node', 'scripts/switchboard/test-selfcheck-tristate.mjs'],
+  },
+  {
     id: 'test:boot-health',
     what: '启动健康检查三态（含真实 gen-3083 文本）',
     cmd: ['node', 'scripts/test-boot-health.mjs'],
