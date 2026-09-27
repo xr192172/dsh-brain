@@ -148,6 +148,95 @@ export const SEAT_PROVIDER_NAMES: Record<string, string> = {
 export const EVOLUTION_SEATS = ["dev", "review"] as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 席位工具限制（O8：约束必须落在【机制层】，不能只写在 persona 里）
+//
+// 事故（2026-09-26，现场证据 `out/seat-wrote-this-_analyze-personas.mjs`）：
+//   `architect` 席的 persona 白纸黑字写「默认只读。…不要修改任何文件」，
+//   但它**真的往仓库里写了一个脚本** `scripts/seats/_analyze-personas.mjs`。
+//   ⇒ persona 里的话**只是话**；沙箱是 `workspace-write`（由父会话快照下来，见下），
+//     席位继承父会话**全部 102 个工具**（其中写类 16 个）⇒ 它当然写得成。
+//
+// 机制（已核源码 `node_modules/@deepseek-ai/dsh-subagent/lib/index.js:570-585`）：
+//   子代理权限范围在**委派边界固定**：
+//     · `sandboxMode` = `captureDelegatedPolicyOverrides(parent)` ⇒ **父会话的显式沙箱覆盖**
+//       —— provider **改不了**（没有入口，也不该有：那会让子代理绕过父的沙箱）。
+//     · `approvalPolicy` 一律钉 `'never'` ⇒ 席位**不可能自己提权**。
+//     · 但 `composition.toolFilter` 会经 `childCtx.tools.restrict(toolFilter)` 应用
+//       ⇒ **工具面是 provider 能改的那一层**，而"看不见的工具 = 执行不了的"。
+//   ⇒ 所以本修复的形状 = **改工具面**（不是改沙箱，那是上游的地盘）。
+//
+// ★ 为什么用 `allow`（白名单）而不是 `deny`（黑名单）：
+//   `admits()`（`dsh-tools/lib/index.js:2531`）的语义是
+//     `allow !== undefined && !allow.has(name)` ⇒ 拒（**表里没有就看不见**）
+//     `deny  !== undefined &&  deny.has(name)`  ⇒ 拒
+//   黑名单是 **fail-open**：design-canvas 哪天加一个 `edit_xxx`，席位立刻又能写了。
+//   白名单是 **fail-closed**：新工具**默认不在名单里** ⇒ 默认关。
+//   席位要的是"只读"，只读集合是**小而稳**的 ⇒ 白名单天然合适。
+//
+// ★ 阳性对照（必须与"席位只读"正交 —— 铁律 13）：
+//   `dev` 席**必须保留写工具**（它的职责就是"施工"）。若哪一天三个席位都被禁写，
+//   那不是修好了，是**把能力掐死了** —— 判据见 `scripts/seats/test-seat-toolscope.mjs` 的 P2。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 席位工具档位：
+ *  · `readonly` ⇒ **只认白名单**（fail-closed，新工具默认被挡）
+ *  · `full`     ⇒ 不设 filter（继承父会话工具面；**只给"必须动手"的席位**）
+ */
+export type SeatToolScope = "readonly" | "full";
+
+/**
+ * 只读席位允许的**全局工具名**白名单。
+ *
+ * ★ 名字必须是【全局工具名】—— `tools.restrict()` 对未知名字**直接抛错**
+ *   （`dsh-tools/lib/index.js:2792`，fail-closed，是好事：写错名字会被当场抓住，
+ *     不会静默失效）。所以这里每加一个名字，都由
+ *   `scripts/seats/test-seat-toolscope.mjs` 拿**真实工具面**核对存在性。
+ *
+ * ★ 为什么是这些：
+ *   · `read` / `glob` / `grep` —— 唯一的"取证"三件套（文档、目录、内容）
+ *   · `read_image` —— 看图取证
+ *   · `web_search` —— 上网取证（顾问席经常需要）
+ *   · `ask_user_question` —— **问人**。★ 席位遇到歧义时的**唯一**正确出口是"问"，
+ *     不是"自己猜着改"；把它留在白名单里是有意的。
+ *   · `todo_write` —— 自用便签（不改盘上任何东西）
+ *
+ * ★ 被**故意排除**的（以及为什么）：
+ *   · `write` / `edit` / `pwsh` / `bash` —— 直接改盘/执行
+ *   · `mcp__design-canvas__*` —— 里面有 `edit_code` / `rename_*` / `move_symbol` 等
+ *     一整套改代码的工具。**整个前缀都不给**（比逐个 deny 稳）。
+ *   · `subagent` / `subagent_fork` / `workflow` / `ralph` —— 席位**不再向下委派**：
+ *     那会造出"审阅席又生了一层子代理"，独立性彻底不可核对。
+ *   · `tool_apply` / `self_evolve` —— 上线工具/自进化，是**开发席**的事。
+ */
+export const READONLY_ALLOW: readonly string[] = [
+	"read",
+	"glob",
+	"grep",
+	"read_image",
+	"web_search",
+	"ask_user_question",
+	"todo_write",
+];
+
+/** 每席的工具档位。**默认 readonly**（新席位默认关，fail-closed）。 */
+export const SEAT_TOOL_SCOPE: Record<string, SeatToolScope> = {
+	architect: "readonly", // persona: "默认只读…不写实现代码"
+	review: "readonly", //    persona: "你不写实现、不改文件（默认只读）"
+	dev: "full", //           persona: "你只做施工" ⇒ **必须能写**（阳性对照）
+};
+
+/** 名字 → 档位；未知席位按 `readonly`（fail-closed）。 */
+export function toolScopeForSeat(seat: string): SeatToolScope {
+	return SEAT_TOOL_SCOPE[seat] ?? "readonly";
+}
+
+/** 档位 → `toolFilter`（`full` 返回 `undefined` = 不设限）。 */
+export function toolFilterForSeat(seat: string): { allow: string[] } | undefined {
+	return toolScopeForSeat(seat) === "readonly" ? { allow: [...READONLY_ALLOW] } : undefined;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Provider
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -155,9 +244,10 @@ class SeatProvider {
 	name;
 	/**
 	 * 四项都声明 true：我们只是"预配置"，不削减 in-process driver 的能力。
-	 * 若某席位要限制子代理的工具集，可在 start() 里补 toolFilter
-	 * （in-process backend 会把它作为 scoped `tools.restrict()` 应用，
-	 *   工具从子代理的 prompt 中消失且拒绝执行 —— 一个可见性）。
+	 * ★ 其中 `toolFilter: true` 现在是**真的在用**了（见 `toolFilterForSeat`）——
+	 *   它经 `applyChildComposition` 落成子代理作用域里的 `tools.restrict()`，
+	 *   被挡掉的工具**从子代理的 prompt 中消失且拒绝执行**。
+	 *   （早先这里只是"声明支持"，实际一个 filter 都没给 ⇒ 席位继承全部工具 ⇒ 见 READONLY_ALLOW 的事故注释。）
 	 */
 	capabilities = {
 		outputSchema: true,
@@ -171,12 +261,21 @@ class SeatProvider {
 	#persona;
 	#model;
 	#providerRoute;
+	/** ★ 本席位的工具档位（O8）。`undefined` = 不设限。 */
+	#toolFilter;
 
-	constructor(providerName: string, persona: string, model: string, providerRoute: string) {
+	constructor(
+		providerName: string,
+		persona: string,
+		model: string,
+		providerRoute: string,
+		toolFilter?: { allow: string[] },
+	) {
 		this.name = providerName;
 		this.#persona = persona;
 		this.#model = model;
 		this.#providerRoute = providerRoute;
+		this.#toolFilter = toolFilter;
 	}
 
 	start(request: any) {
@@ -184,6 +283,13 @@ class SeatProvider {
 
 		// 注入席位人格 —— 它 shadow 掉 deployment persona，只对这一个子代理生效。
 		next.persona = this.#persona;
+
+		// ★★★ O8：把席位的工具档位落成机制层的限制。
+		//   不设 ⇒ 保持"继承父会话工具面"（**只给 dev 席**，见 SEAT_TOOL_SCOPE）。
+		//   ★ 注意：**不要**在请求里已有 toolFilter 时覆盖成 undefined —— 让"有"始终赢。
+		if (this.#toolFilter !== undefined) {
+			next.toolFilter = { allow: [...this.#toolFilter.allow] };
+		}
 
 		// 多模型会议室入口：给这一席换 provider route / model。
 		// 留空则完全继承顶层会话的路由（默认行为，第一版就是这个）。
@@ -222,10 +328,17 @@ export function apply(ctx: any, config: any) {
 			continue;
 		}
 		const providerName = SEAT_PROVIDER_NAMES[seat] ?? `council-${seat}`;
-		ctx.subagents.registerProvider(new SeatProvider(providerName, persona, model, provider));
+		const toolFilter = toolFilterForSeat(seat);
+		ctx.subagents.registerProvider(new SeatProvider(providerName, persona, model, provider, toolFilter));
+		// ★ O8：档位必须**在每个席位的启动行里可见可核** —— 不然"到底限没限"又要靠读源码推。
+		const scopeNote =
+			toolFilter === undefined
+				? "工具档位=full（继承父会话；**本席位必须能动手**）"
+				: `工具档位=readonly（allow ${toolFilter.allow.length} 个: ${toolFilter.allow.join(",")}）`;
 		console.log(
 			`[subagent-council] 已注册席位 "${seat}" ⇒ provider="${providerName}"` +
-				`（model="${model || "(继承)"}" / provider="${provider || "(继承)"}"）`,
+				`（model="${model || "(继承)"}" / provider="${provider || "(继承)"}"）` +
+				` · ${scopeNote}`,
 		);
 	}
 

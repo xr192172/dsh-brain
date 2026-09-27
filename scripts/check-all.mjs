@@ -151,6 +151,28 @@ const GATES = [
     cmd: ['node', 'scripts/seats/test-seat-contract.mjs'],
   },
   {
+    id: 'seats-toolscope',
+    // ★★ 2026-09-27 新增（O8）。事故：`architect` 席的 persona 写着「默认只读。…不要修改任何文件」，
+    //   但它**真的往仓库里写了一个脚本**（现场证据 `out/seat-wrote-this-_analyze-personas.mjs`）。
+    //   根因（已核上游源码 `dsh-subagent/lib/index.js:570` `applyChildComposition`）：
+    //     子代理**权限范围在委派边界固定** —— `sandboxMode` 从父会话快照下来（provider 改不了），
+    //     `approvalPolicy` 一律钉 `'never'`（不可能自己提权），
+    //     **但 `composition.toolFilter` 会落成 `childCtx.tools.restrict()`** ⇒ **工具面是能改的那层**。
+    //   修法：只读席位给 **allow 白名单**（fail-closed：新工具默认看不见），施工席（dev）**不设限**。
+    //   ★ 本门验的是"机制真的被触发"（直接调上游 `applyChildComposition` 看它有没有调 restrict），
+    //     不是"源码里有那行字" —— 后者是文本判据，会假绿。
+    what: '席位工具档位：只读席位必须真的被 restrict（直调上游），且 dev 席不被限（阳性对照）',
+    cmd: ['node', 'scripts/seats/test-seat-toolscope.mjs'],
+  },
+  {
+    id: 'seats-toolscope-e2e',
+    // ★ 上一门是**静态**判据（源码文本 + 真实工具面 + 消融）。
+    //   本门是**动态**判据：调上游真函数，看 `tools.restrict` 有没有被调、实参是什么。
+    //   ⇒ 两门一起才叫"证明机制在工作"（铁律 11：数判据为真的次数，不读意图）。
+    what: '席位工具档位（端到端）：直调 applyChildComposition 看 restrict 真的被调用',
+    cmd: ['node', 'scripts/seats/test-seat-toolscope-e2e.mjs'],
+  },
+  {
     id: 'test:patch-anchors',
     what: '上游补丁锚点严格化（两方向）',
     cmd: ['node', 'scripts/test-patch-anchors.mjs'],
