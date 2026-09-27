@@ -1,5 +1,8 @@
 # Design Canvas 两个东西的目录地址（给新会话的地址清单）
 
+> ⚠️ **本文有 4 处与实测不符，已被 `design-canvas-single-source.md` 取代（2026-09-27 23:4x）。**
+> 修正点：① 分支**未分叉**（HEAD 领先 origin/main 13 笔、落后 0，纯快进）；② `design-canvas-dev` **无 .git**（那条 remote 是父仓继承的假象，它被 `.gitignore:35` 忽略）；③ 连接有**两条**通道（stdio **+** 桥接对内核 dist 的进程内深度 import）；④ 配置不止在 web profile —— 同一条 insert 在 **web / exp-base / exp-base-nodc** 三处重复，且内核路径在项目内的桥接包 patch 里也有一份。副本是**三份**不是两份。
+
 > 生成时间：2026-09-27 23:2x
 > 用途：用户要重开一个会话专门处理这两件事，这是它们的**确切地址与身份**。
 
