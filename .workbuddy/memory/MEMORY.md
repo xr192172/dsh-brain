@@ -138,6 +138,11 @@
    · **纪律（提问式）**：写/审任何判据前先问 **"这条路径是不是【用户真正碰的那条】？它有没有【第二条入口】？"**
    · ★ 配套：**归因错了 ⇒ 修法也会错**（原记「persona 只是话」，真因是那条路径**从未把 persona 交出去**）。
    · ★★ 修法要**收敛成单一真相源**；判据要**"跟着委派走"**（认 `this.#x(...)`，不认"随便哪里提到"）⇒ 重构不造假红。
+46. **★★★★ 【"没人清理"必须说清清的是哪个对象】—— 同一个词可能指【内存引用】也可能指【磁盘目录】**
+   · 实例（2026-09-27）：`pruneDead()` **只从内存池摘引用**；磁盘上 54 个死代 `gen-*` 目录 **零删除点、零 `readdirSync`**。
+     ⇒ 我第一版说"零清理机制"**措辞不准**（源码里 `prune` 有 3 处命中）—— 真相是**池干净、盘脏**。
+   · **纪律**：说"有/没有清理"前，先答**"清的是哪个对象"**；**对象错了，整条读数就是假的**（同族 20 口径、32 写入者）。
+   · ★ 佐证：`pool.json` = `{primary:1, sentinel:0, others:[]}`（池干净）vs 盘上 55 个 gen 目录（脏）。
 
 ## ★★★ 当前主线：自进化闭环（**施工从这三份开始读**）
 
@@ -149,37 +154,57 @@
 
 ### ★★ R1–R5 根因链条（**旁路拆除**，全文见 `docs/handover-bypass-structural-diagnosis-2026-09-26.md` §4）
 
-> 总背景：**换代机制本身是好的、而且真的在跑**；是一条**旁路**（`arm-up` → `isolated-instance --force`）
-> 绕过了整台机器 ⇒ 逐个修症状越修越多（一条旁路、六个症状）。**根因修法，不是补丁。**
-> ★ 五棒**全部已落地**（R1 `06739e4` / R1.5 `92449dd` / R2 `55ce17d`+`3f1a362` / R3 `a64bed1` / R4 `6be53af` / R5 本轮）。
-> ★ 细节、封条号、部署陷阱、我的假红假绿**全文在 `topics/current-status.md` 尾部**。三条最易踩：
+> **换代机制本身是好的、且真在跑**；是一条**旁路**（`arm-up` → `isolated-instance --force`）绕过整台机器
+> ⇒ 逐个修症状越修越多（一条旁路、六个症状）。**根因修法，不是补丁。**
+> ★ 五棒**全部已落地**（R1 `06739e4` / R1.5 `92449dd` / R2 `55ce17d`+`3f1a362` / R3 `a64bed1` / R4 `6be53af` / R5）。
+> ★ 细节/封条号/部署陷阱/假红假绿 **全文在 `topics/current-status.md` 尾部**。三条最易踩：
 > ① **换代只换代、不换控制面**（`main.ts` 在控制面进程里 ⇒ 改它必须 `arm-up.mjs --stop` → `--live`）；
 > ② **控制面与前门同进程**，`--live` **幂等**；③ **池剪枝只能走真实 `stand` 路径验证**（注入 `pool.json` 必假绿）。
-★★★ **纪律（用户 2026-09-26）**：*"我不在乎什么最小可行修法或者是最大可行修法，**我只要你干净的**"*
-⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。★ 上表留作**判据依据**（为什么当初不该逐条修症状）。
+★★★ **纪律（用户）**：*"我不在乎什么最小可行/最大可行修法，**我只要你干净的**"* ⇒ **不许把补丁说成方案**。
 
-### ★★★ 2026-09-27 已落地：O8「席位只读」⇒ 机制层约束（`cc702de`）
+### ★★★ 2026-09-27 席位只读的两棒（`cc702de` → `ec2d8ae`）
 
-修掉"persona 只是话"的假约束（architect 席真写过仓库文件）；顺带抓到既存**假绿**「三席已上线」。
-修法 = `SEAT_TOOL_SCOPE`（architect/review 给 `allow` 白名单 7 个只读工具 ⇒ **fail-closed**；dev 不设限 = 阳性对照）。
-门 = `seats-toolscope`（静态 10/0）+ `seats-toolscope-e2e`（**直调上游** 4/0），都在 `check-all`。
-⚠️ **`packages/*/lib/` 被 gitignore** ⇒ 改源码后**必须重编译 + 换代**才生效。
+**棒一（O8，`cc702de`）**：修掉"persona 只是话"的假约束（architect 席真写过仓库文件）；顺带抓到既存假绿「三席已上线」。
+- 修法 = `SEAT_TOOL_SCOPE`（architect/review 给 `allow` 白名单 7 个只读工具 ⇒ **fail-closed**；dev 不设限 = 阳性对照）。
+- 门 = `seats-toolscope`（静态 10/0）+ `seats-toolscope-e2e`（**直调上游** 4/0）。
 
-### ★★★ 2026-09-27 已落地：continuable 路径漏 persona/toolFilter（`ec2d8ae`，铁律 40 教科书案例）
-
-**两道旧门全绿，而现役只读席位仍能写仓库** —— 因为现役委派走的是**另一条路径**。
-上游两条建立子代理的路径各调 provider 的**不同方法**：one-shot 调 `start()`（composition 取
-`descriptor.*`，`dsh-subagent:1168`）；**continuable 调 `prepareContinuable()`**（取 `request.*`，`:824`）。
+**棒二（continuable，`ec2d8ae`）= 铁律 40 教科书案例**：**两道旧门全绿，而现役只读席位仍能写仓库** ——
+因为现役委派走的是**另一条路径**。上游两条路径各调 provider 的**不同方法**：one-shot 调 `start()`
+（composition 取 `descriptor.*`，`dsh-subagent:1168`）；**continuable 调 `prepareContinuable()`**（取 `request.*`，`:824`）。
 而 `SeatProvider.prepareContinuable()` 当时逐字 `return Promise.resolve({})` ⇒ **persona+toolFilter 双双丢失**。
 ★ **现役默认走 continuable**（`run_in_background` 默认真）= **用户真正碰的那条**。
-★ 门 = `scripts/seats/test-seat-toolscope-continuable.mjs`（**8 PASS/0 FAIL**，已进 `check-all`）：
-  判据**"跟着委派走"**（认 `this.#enrich(...)`，不认"随便哪里提到 toolFilter"）+ **双向消融自证**。
+★ 修法 = 抽 `#enrich()` 单一真相源，两路共用；门 = `test-seat-toolscope-continuable.mjs`（**8 PASS/0 FAIL**，已进 `check-all`），
+  判据**"跟着委派走"**（认 `this.#enrich(...)`）+ **双向消融自证**。
 ★ 归因修正：原记「写在 persona 里的约束不是约束」是**错的** —— 真因是这条路径**从未把 persona 交出去**。
+⚠️ **`packages/*/lib/` 被 gitignore** ⇒ 改源码后**必须重编译 + 换代**才生效。
 ★ 全文 + 我踩的三个假红/假绿坑见日更 `2026-09-27.md` 尾部。
-★ **教训（通用）**：判据只查"我知道的那个入口" ⇒ 一旦实现有**第二条路径**就整片失明。问：**"用户碰的是哪条？"**
 ⚠️⚠️ **2026-09-27 新发现（任务 301，未修）**：`toolFilter` **只在 one-shot 路径生效**；
 **continuable 路径由 continuation manager 组装、不查 `provider.capabilities`** ⇒ **席位只读被静默绕过**
 （消融实证：continuable 下 evo_review 真跑 `pwsh`；one-shot 下同一提示被拒）。★ 全文在 `current-status.md` 尾部。
+★ **2026-09-27 已修** = `ec2d8ae`（`#enrich()` 单一真相源）；此条留作**判据依据**（为什么旧门会假绿）。
+
+### ★★★ 2026-09-27 运维盘存（用户三问的取证回合，**未动手改任何东西**）
+
+**问的是**：① 启动为什么混乱（对标 QQ 这种易用 PC 应用）② 决策边界（为什么我不自己拍）③ 能不能抄成熟智能体。
+**取证产物**（都在 `out/`，全是**只读探针**）：`_startup-inventory.mjs` / `_gen-inventory.mjs` /
+`_probe-gen-deletion.mjs` / `_probe-panel2.mjs` / `_architect-verification.md`（核验报告）/
+`_consult-architect-answer.md`（架构师原文）。
+
+**三条实测底账（都可复算）**：
+- **启动**：**10 个入口 / 4 种语言 / 1,198 行**；三处 **0 字节断头路**（`scripts/start.ps1` **已被 git 跟踪**、
+  根 `start`/`stop` 未跟踪）；`packages/switchboard/package.json` **零启动脚本**；根 package.json 17 个脚本**无 `start`**；
+  顶层 **README = 0 个**（顶层 .md 只有 `AGENTS.md`）⇒ **新人没有"从这里开始"**。
+- **死代**：`coordDir = C:\Users\Admin\.dsh\switchboard`，**55 个 gen 目录 / 现役 1 / 死代 54**；
+  字节 现役 83.7 KB + 死代 461.7 KB = 545.4 KB。★ **池干净（`pool.json` = 1 primary/0 sentinel/0 others），盘脏**
+  ⇒ 见铁律 46。
+- **视图**：`?cmd=panel` → `main.ts:559 panelHtml`（69 行），`<title>` = **「DSH 三脑 · 交接投影」**；
+  只覆盖 **换代/交接 + 端口**；**哨兵/池、死代、清理、健康、可用性 全部零命中**。
+  ⇒ 架构师说"补聚合状态视图"**方向对**，但我修正：**视图已在，缺的是覆盖面**（从"只讲交接"扩到"讲可用性"）。
+
+**架构师席裁决（已核验）**：Q1 元判断**采纳**（"混乱的不是启动，是我们对服务生命周期要求超常规"）；
+Q2 判据**采纳**（「是否影响**用户核心控制权**：能否撤销/感知/回退」）；
+Q3 **不采纳**（太薄、零具体框架，"抄了就要放弃自进化"= 自证类比不成立）。
+★ 它的引用**部分行号不准**、P0/P1/P2 **出处记错**（真出处 `docs/BUILD.md:141`）；`journal.jsonl` **不存在**。
 
 ### ★★ 三席上线状态（**2026-09-27 更正后的事实**）
 
@@ -190,30 +215,24 @@
 
 ### ★★★ 用户架构愿景：**一人公司**（2026-09-27，**决定后续所有设计**）
 
-用户原话：*"让用户只和一个 AI 进行讨论，然后这个 AI 去统一调度整支……整个一人公司一样，
-公司内部又划分好像正式的公司一样的职能……他只需要将对应的部分的内容提交给对应的部门，
-**对应的部门内部自己去运转**。比一个人想到什么给什么好得多。"*
-★★★ **配套裁决（同日，推翻了机械路由方案）**：
-*"直接互相发任务不就好了，你这个机械判有什么依据吗，还不是你这个 LLM 编排的，**为什么不让 LLM 自己决定谁发言呢**"*
+用户原话：*"让用户只和一个 AI 进行讨论，然后这个 AI 去统一调度整支……整个一人公司一样……**对应的部门内部自己去运转**。"*
+★★★ **配套裁决**：*"直接互相发任务不就好了……**为什么不让 LLM 自己决定谁发言呢**"*
 ⇒ ★ **纪律：机器不许替 LLM 做语义判断**。"该派给谁"是**语义判断** ⇒ 只能由 LLM 做；
   我们只提供**可执行的事实**（有哪些部门 / 各自管什么 / 交付形状 / 工具域）⇒ 落点 = `AGENTS.md` 花名册。
-★ **机制事实（已核上游源码）**：`send_message`/`interrupt_agent` 是**全局命名工具**，目标可为
-  "your direct child **or a deeper agent created under you**" ⇒ **席位之间可直接互发**；
-  但**发消息不打断当前轮**（"it cannot redirect work already underway"）⇒ 忙碌席位会**排队**。
+★ **机制事实（已核上游源码）**：`send_message`/`interrupt_agent` 是**全局命名工具**，可发给直接子或更深后代
+  ⇒ **席位之间可直接互发**；但**不打断当前轮**（"cannot redirect work already underway"）⇒ 忙碌席位会**排队**。
 ★ **AGENTS.md 注入机制**：`@deepseek-ai/dsh-agent-instructions` 在**首次请求组装时**注入
   （**不是** `session.create` 时 —— 只 create 不发消息 ⇒ 零 instructions，曾因此吃**假红**）；
-  以 `<system-reminder>` 包 `createUserMessage`、`kind:"agent-instructions"`、**住在 `request/header`**
-  ⇒ **每次请求重发**（属"脸"，按铁律 24 重复计费）。文件变了**热更新**。
-★ **已落地件**：`scripts/seats/gen-roster.mjs`（生成器，幂等，`--check` 检漂移）
-  + `AGENTS.md`（花名册，**2,734 B ≈ 900 token**）+ `scripts/seats/seat-contract.mjs` 的职责边界解析扩展。
-  ★ 契约**从 persona 源码解析**，**不许手抄第二份**（G0 单一真相源）；解析失败 **fail-closed**。
+  `kind:"agent-instructions"`、**住在 `request/header`** ⇒ **每次请求重发**（属"脸"，铁律 24）。文件变了**热更新**。
+★ **已落地件**：`scripts/seats/gen-roster.mjs`（生成器，幂等，`--check` 检漂移）+ `AGENTS.md`（**2,734 B ≈ 900 token**）
+  + `seat-contract.mjs` 的职责边界解析。★ 契约**从 persona 源码解析**、**不许手抄第二份**（G0）；解析失败 **fail-closed**。
 
 ### ★★ 未决设计岔路：「秘书席 / 公司隐喻」（用户 2026-09-27 提出，**待用户定**）
 
 用户提议加**秘书席**（记录归纳对话 + 专职沟通），把系统做成"公司"。
-★ **机制事实**：`report` 只解析 **"the reporting child's live direct parent"** ⇒ **通信只在【父↔直接子】、方向向上**；
-  **没有同层对等通道** ⇒ **"部门"存在、"转交"能沿【树】做，但不能【平级转交】。**
-我的判断：① "整理归纳"本质是**上下文压缩**，`conveyor-context` 已在做；② 多一层转发 ⇒ **信息损耗 + 重复动作**；
+★ **机制事实**：`report` 只解析 **"the reporting child's live direct parent"** ⇒ **通信只在【父↔直接子】方向向上**；
+  **无同层对等通道** ⇒ **"部门"存在、"转交"能沿【树】做，但不能【平级转交】。**
+我的判断（**不推进**）：① "整理归纳"本质是**上下文压缩**，`conveyor-context` 已在做；② 多一层转发 ⇒ **信息损耗 + 重复动作**；
 ③ "转交给对应部门"里的**"对应"是判断** ⇒ 又一处可假绿处；④ **先让多部门真的存在**，再谈专职协调位 ——
 否则是"给只有一个人的公司设秘书岗"。★ 若要推进，最该做的是**把"转交"落成显式可审计记录**（唯一不能靠 prompt 解决的部分）。
 
