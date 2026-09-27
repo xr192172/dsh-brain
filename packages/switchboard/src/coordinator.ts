@@ -214,6 +214,34 @@ export class Coordinator {
     return this.pool.current
   }
 
+  /**
+   * ★★ R3 同族（2026-09-27）：**清理池里的死哨兵**。
+   *
+   * 背景：`pool.ts:138` 的 `pruneDead()` 是**纯函数**、有单测（`test-sentinel-pool.mjs` ⑥），
+   * **但从没被生产代码调用过** ⇒ 池里会留下"看不见的死代"，
+   * 而 `?cmd=pool` 是给用户看的**只读投影** ⇒ 用户会看到一个已经崩掉、连不上的哨兵。
+   *
+   * 修法：在这里把 `pruneDead` 接上真实探针（`pidAliveFrom`），供 `?cmd=pool` 调用。
+   *   ★ 只在**读路径**剪枝，不动 `primary`（`primary` 的真相在 lease，且由 `R3` 守卫保证不是尸体）。
+   *   ★ 探针 = `pidAliveFrom`（signal 0），与 `promoteSentinel` 的 precheck 用**同一个函数**
+   *     ⇒ 池里显示的与服务端判定的一致（避免"池说活着、提拔说死了"的两处真相）。
+   *
+   * @returns 被摘掉的死代（供调用方如实登记，不静默丢弃 —— 铁律 33）。
+   */
+  pruneStaleSentinels(): GenRef[] {
+    const { dropped } = this.pool.pruneDead((ref) => pidAliveFrom(ref.pid))
+    if (dropped.length > 0) {
+      this.record(`pruneStaleSentinels: 摘掉 ${dropped.length} 个死哨兵 —— ${dropped.map((g) => `${g.gen}(pid=${g.pid})`).join(', ')}`)
+      // ★ 若被摘掉的正是"本次进程立起的待命代"，`pending` 也必须一并清掉，
+      //   否则 `promoteSentinel` 会拿着一个已死的 cage 去 flip（它只会被 :287 的 precheck 拦住 ⇒ 白折腾一轮）。
+      if (this.pending && dropped.some((g) => g.gen === this.pending?.inst.gen)) {
+        this.pending = null
+        this.record('pruneStaleSentinels: 待命代已死 ⇒ 同步清掉 pending（避免拿着死 cage 去 promote）')
+      }
+    }
+    return dropped
+  }
+
   /** `primary` 的真相在 `lease.json`（只读派生）——池不自己记，避免两处真相打架。 */
   private syncPoolPrimary(): void {
     const cur = this.lease.current.activeGen
@@ -375,11 +403,37 @@ export class Coordinator {
     console.log(`[switchboard] ${icon} 切换${word}: ${r.note}${r.resumeSession ? ' · resume=' + r.resumeSession : ''}`)
   }
 
-  /** 确保当前活跃代持有租约（供 main 在崩溃恢复后调用；修复"热重启时活跃代无租约"）。 */
-  ensureActiveLease(): void {
-    if (!this.lease.isHeld()) {
-      this.lease.grant(this.active.inst.gen, this.active.inst.port, this.active.inst.pid, this.cfg.ttlMs, -1, 'replay')
+  /**
+   * 确保当前活跃代持有租约（供 main 在崩溃恢复后调用；修复"热重启时活跃代无租约"）。
+   *
+   * ★★ R3（2026-09-27）：**先探活，再授予**。
+   *
+   * 为什么必须加这道守卫（诚实版归因，不夸大）：
+   *   · **现役唯一调用点**（`main.ts:260`）是安全的 —— 它紧跟在 `boot()` 的 `spawnGen` 之后，
+   *     `this.active.inst.pid` 是**刚 spawn 出来的活进程**；此时给尸体上租约**不会发生**。
+   *   · 但**函数的契约与实现不匹配**：契约说"确保活跃代持有租约"，实现是"无条件授予"。
+   *     租约是"现役是谁"的**真相源**（`pool.ts` 头部：`primary` 从 lease 只读派生），
+   *     一旦被写上一个死 pid ⇒ 前门指向 corpse、池里写着 corpse、`promoteSentinel` 的
+   *     precheck（本文件 :287）会读到它并把真哨兵误判成"不是本进程立的"。
+   *   · 而**同族代码已经在做相反方向的检查**（:287 / :412 / :677 / :1003 都先 `pidAliveFrom`）
+   *     ⇒ 本函数**缺守卫属于家族内的不一致**，是留给下一个调用点的陷阱。
+   *
+   * 判据与消融见 `scripts/switchboard/test-lease-liveness-guard.mjs`：
+   *   把守卫撤掉，那道门必须变红（消融自证，铁律 21）。
+   *
+   * @returns 是否**真的**授予了租约（false = 活跃代是尸体 ⇒ 拒绝，lease 保持空，调用方可见）
+   */
+  ensureActiveLease(): boolean {
+    if (this.lease.isHeld()) return false
+    if (!pidAliveFrom(this.active.inst.pid)) {
+      // ★ 不静默：留下可读证据（否则"拒绝"与"没调用"在日志上无法区分 —— 铁律 12/33）。
+      this.record(
+        `ensureActiveLease: 拒绝授予 —— 活跃代 ${this.active.inst.gen} 的 pid=${this.active.inst.pid} 已死（lease 保持空，不指向尸体）`,
+      )
+      return false
     }
+    this.lease.grant(this.active.inst.gen, this.active.inst.port, this.active.inst.pid, this.cfg.ttlMs, -1, 'replay')
+    return true
   }
 
   /** 对外暴露租约（main 用于心跳续约与状态查询）。 */

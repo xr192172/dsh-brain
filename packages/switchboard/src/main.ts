@@ -257,7 +257,15 @@ function boot(config: CoordinatorConfig): void {
     }
   }
   // 恢复后确保 bootstrap 活跃代持有租约（热重启时磁盘 lease 可能被 clear，需重新授予活跃代）
-  coord.ensureActiveLease()
+  // ★ R3：本函数现在**返回它有没有真的授予**。`spawnGen` 刚起的代必然活着 ⇒ 正常路径下为 true。
+  //   若为 false，说明 `this.active` 是尸体 —— **不能沉默**：此时 lease 保持空，
+  //   `?cmd=status` 会显示 `lease: null`（下游可见），而不是指向一个不存在的进程。
+  if (!coord.ensureActiveLease()) {
+    console.error(
+      '[switchboard] ensureActiveLease 未授予租约：活跃代进程不存活（lease 保持空，不指向尸体）—— ' +
+        '请查 boot.log 里 bootstrap 代是否已崩。',
+    )
+  }
 
   // 前门 3080
   const host = envStr('SWITCH_HOST', '127.0.0.1')
@@ -372,12 +380,18 @@ function boot(config: CoordinatorConfig): void {
       //   **只读投影** —— `{primary, sentinel, others}`，每一项都带 `port`。
       //   ★ 用户裁决 4：「只有一个端口是 3080 是主端……其他的页面的话**保留端口信息即可**，
       //     就是说也可以**复制端口到浏览器上面自己去打开**」⇒ 这就是那条"端口信息"的出口。
+      // ★★ R3 同族（2026-09-27）：**读之前先剪枝**。
+      //   `pruneDead()` 实现并单测过，但**从没接线** ⇒ 池里会显示死掉的哨兵给用户看。
+      //   这里读路径剪一次，并把摘掉的结果如实回给调用方（`pruned` 字段，不静默丢）。
+      const pruned = coord.pruneStaleSentinels()
       const pv = coord.poolView
       res.end(
         JSON.stringify({
           ok: true,
           cmd: 'pool',
           ...pv,
+          /** ★ 本次读操作摘掉的死哨兵（空数组 = 没死代）。摘掉 ≠ 退役：前门从未指向过它们。 */
+          pruned: pruned.map((g) => ({ gen: g.gen, port: g.port, pid: g.pid })),
           /** ★ 主端（前门）：唯一"稳定定向"的入口（供收藏 / 以后包 Electron）。 */
           mainPort: switchPort,
         }),

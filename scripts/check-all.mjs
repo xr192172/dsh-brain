@@ -178,6 +178,23 @@ const GATES = [
     cmd: ['node', 'scripts/test-patch-anchors.mjs'],
   },
   {
+    id: 'test:lease-liveness-guard',
+    // ★★ 2026-09-27 新增（R3 + 同族）。
+    //   事故形状：**"真相源"能被写上一个死进程**。
+    //   · 半一 `ensureActiveLease()`（`coordinator.ts`）：契约是"确保活跃代持有租约"，
+    //     实现是"无条件授予" ⇒ 一旦活跃代是尸体，租约会指向 corpse。
+    //     ★ 诚实归因：**现役唯一调用点**（`main.ts` 紧跟 `spawnGen`）下**不会发生**，
+    //       所以这不是活的 bug，是**家族内不一致**（同文件 :287/:412/:677/:1003 都先探活）
+    //       ⇒ 留给下一个调用点的陷阱。修法是补守卫 + 返回值 bool 让调用方可分流。
+    //   · 半二 `pool.pruneDead()`（`pool.ts:138`）：**实现并单测过，却从没接线**
+    //     ⇒ `?cmd=pool` 会把死哨兵显示给用户看。这是**真·死代码缺口**。
+    //   判据：行为层（真实 PoolStore + 真实探针，死/活读数必须不同）
+    //        + 接线层（main.ts 真的调 pruneStaleSentinels、真的检查返回值）
+    //        + **消融自证**（撤掉守卫 ⇒ 必须变红；★ 含 C1b 反自证防消融本身假红）。
+    what: '租约/池的活体守卫：死进程不许被授予租约、死哨兵不许留在池里（含消融）',
+    cmd: ['node', 'scripts/switchboard/test-lease-liveness-guard.mjs'],
+  },
+  {
     id: 'test:boot-health',
     what: '启动健康检查三态（含真实 gen-3083 文本）',
     cmd: ['node', 'scripts/test-boot-health.mjs'],
