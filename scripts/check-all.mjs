@@ -109,6 +109,22 @@ const GATES = [
     cmd: ['node', 'scripts/switchboard/test-availability-surface.mjs'],
   },
   {
+    id: 'seat-definitions',
+    // ★★★ 2026-09-27 新增（用户："把这些内化成席位……模仿它写，把子 agent 调过来融合"）。
+    //   背景：三席原先**硬编码**在 packages/subagent-council/src/index.ts 里（TS 常量）；
+    //     persona 是散文、工具档位是三行字典、编排顺序靠调用方硬编码。
+    //   ⇒ 本门把"一席"变成**可外部注册、有职责边界、有工序位置**的对象：
+    //     席位定义落在 seats/library/*.md（模仿 wshobson/agents 的 agent 格式，MIT，
+    //     见 docs/prior-art-subagent-marketplace-2026-09-27.md）。
+    //   ★ 三处"我们是扩展不是照抄"：
+    //     · `tools:` 是**档位**（readonly/full）而非工具名白名单 —— 席位跨底座，写死会绑死底座
+    //     · `model:` 只允许 inherit —— 用户裁决开发期一律 AGNES/Flash，不追求跨模型
+    //     · 增加它**没有**的四块：Rationalization Table / Red Flags / Output Contract / 三态
+    //   ★ 判据照 seats/schema.json 写（不照实现写，铁律 37）；含 A1 消融自证。
+    what: '席位定义：seats/library/*.md 的形状（四字段 + 八章节 + 命名唯一 + 候选带 provenance）',
+    cmd: ['node', 'scripts/seats/check-seat-defs.mjs'],
+  },
+  {
     id: 'plugin-hygiene',
     what: '插件卫生：包完整性 / 残留 / deps 与 bundles / lock 一致 / 遗留物',
     cmd: ['node', 'scripts/check-plugin-hygiene.mjs'],

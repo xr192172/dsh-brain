@@ -1,0 +1,70 @@
+{
+  "$comment": "席位定义格式的机器可读规格。判据脚本 scripts/seats/check-seat-defs.mjs 照本文件执行。改这里 = 改判据。",
+  "version": 1,
+  "source": {
+    "format": "wshobson/agents agent definition (MIT)",
+    "url": "https://github.com/wshobson/agents",
+    "retrieved": "2026-09-27",
+    "doc": "docs/prior-art-subagent-marketplace-2026-09-27.md"
+  },
+  "frontmatter": {
+    "required": ["name", "description", "tools", "model"],
+    "totalMaxChars": 1024,
+    "fields": {
+      "name": {
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+        "maxChars": 64,
+        "why": "仅小写字母/数字/连字符。对应 wshobson/agents 的命名空间规则，防同名遮蔽（铁律 18）。"
+      },
+      "description": {
+        "maxChars": 500,
+        "mustIncludeOneOf": [
+          "Use when",
+          "Use PROACTIVELY when",
+          "Use this skill when",
+          "Use after",
+          "Trigger when",
+          "Auto-loads when",
+          "当",
+          "在"
+        ],
+        "mustStartThirdPerson": true,
+        "forbidden": ["总结工作流", "第一人称"],
+        "why": "只写【何时用】，绝不总结【做什么】—— superpowers 实测：description 里写了工序摘要，agent 会照着摘要做、跳过正文（见 docs/prior-art-github-agent-skills-2026-09-27.md §2.4）"
+      },
+      "tools": {
+        "enum": ["readonly", "full"],
+        "why": "★ 我们改成档位而非工具名白名单 —— 席位跨底座，写死工具名会绑死底座。档位经 SEAT_TOOL_SCOPE 映射。"
+      },
+      "model": {
+        "enum": ["inherit"],
+        "why": "★ 用户裁决（2026-09-25 §11.7）：开发期一律 AGNES/Flash，不追求跨模型。留 inherit 保持与父会话一致。"
+      }
+    }
+  },
+  "body": {
+    "requiredSections": [
+      "## Purpose",
+      "## Core Philosophy",
+      "## Behavioural Traits",
+      "## Key Distinctions",
+      "## Workflow Position",
+      "## Output Contract",
+      "## Rationalization Table",
+      "## Red Flags"
+    ],
+    "minBodyChars": 600,
+    "why": {
+      "Key Distinctions": "★ 我们原先没有：显式声明【我不做谁的活】，防席位越界",
+      "Workflow Position": "★ 我们原先没有：After/Complements/Enables ⇒ 编排顺序由席位自声明，不再硬编码在调用方",
+      "Rationalization Table": "★ superpowers 的招：把已知借口逐条对照现实",
+      "Red Flags": "★ superpowers 的招：给席位一份自我检查清单"
+    }
+  },
+  "libraryRules": {
+    "uniqueNames": true,
+    "candidatesRequireProvenance": true,
+    "provenanceRequiredKeys": ["sourceUrl", "license", "retrieved", "modified"],
+    "why": "铁律 17/28：候选必须带来源与许可；没写许可证的不许进 library/"
+  }
+}
