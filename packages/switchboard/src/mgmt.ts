@@ -18,7 +18,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 
 export const ACTIONS = ['brief', 'tasks', 'verdict', 'experiment', 'result'] as const
 export type Action = (typeof ACTIONS)[number]
@@ -158,6 +158,80 @@ export function execAction(v: Validated, wt: string, nodeExe = process.execPath,
   if (argv.length === 0) return { code: 0, stdout: '', stderr: '' }
   const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 900_000, cwd: wt, env: childEnv(env) })
   return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
+}
+
+/**
+ * ★★★ R4（2026-09-27）：`execAction` 的**异步版** —— 语义逐字相同，但**不阻塞事件循环**。
+ *
+ * ### 为什么必须改（实测病征，铁律 34 已记账）
+ * `spawnSync` 是**同步**的 ⇒ 它在控制面进程里**阻塞事件循环**。
+ * 而**控制面与前门是同一个进程**（实测 pid 相同）⇒
+ * **管理面一跑长任务，前门的代理转发就一起被拖住**：
+ * 实测 `n=90 ok=83 err=7`，`p95=0.66s` 但 **`max=8.23s`**（长尾全是这一段阻塞）。
+ *
+ * ### 不改什么（**安全属性一个字都不动**）
+ * · 仍走 `argvFor()`（**数组**，绝不拼字符串 ⇒ 无注入面）；
+ * · 仍走 `childEnv()`（剔臂身份变量 ⇒ 不泄漏 `DSH_HOME`）；
+ * · 仍**不经 shell**（`spawn` 默认 `shell:false`）；
+ * · 仍有超时（`timeoutMs`，默认与同步版一致 900s）。
+ *
+ * ### 改什么
+ * 同步 `spawnSync` ⇒ **异步 `spawn` + 收口**。调用方 `await` 它 ⇒
+ * 等结果期间事件循环是**空的**，前门照常转发。
+ *
+ * @returns 与 `execAction` **同形**的 `{code, stdout, stderr}`（便于两条路互换、便于对拍）
+ */
+export function execActionAsync(
+  v: Validated,
+  wt: string,
+  nodeExe = process.execPath,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { timeoutMs?: number; maxStdout?: number; maxStderr?: number } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const argv = argvFor(v, wt, nodeExe)
+  if (argv.length === 0) return Promise.resolve({ code: 0, stdout: '', stderr: '' })
+  const timeoutMs = opts.timeoutMs ?? 900_000
+  // ★ 上限与同步版一致（同步版靠调用方 `slice`，这里在收口时就截，
+  //   避免长任务把**整个** stdout 堆在内存里 —— 同步版其实也是先全收再 slice，
+  //   这里只是把同样的语义做得更省：只留尾部 maxStdout 字节）。
+  const maxOut = opts.maxStdout ?? 20000
+  const maxErr = opts.maxStderr ?? 4000
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(argv[0], argv.slice(1), { cwd: wt, env: childEnv(env), shell: false })
+    } catch (e) {
+      resolve({ code: -1, stdout: '', stderr: 'spawn failed: ' + (e instanceof Error ? e.message : String(e)) })
+      return
+    }
+    const outChunks: Buffer[] = []
+    const errChunks: Buffer[] = []
+    let outLen = 0
+    let errLen = 0
+    let settled = false
+    const done = (code: number) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({
+        code,
+        stdout: Buffer.concat(outChunks).toString('utf8').slice(-maxOut),
+        stderr: Buffer.concat(errChunks).toString('utf8').slice(-maxErr),
+      })
+    }
+    // ★ 超时语义与 spawnSync 对齐：到点**杀掉**并给一个可判读的退出码。
+    //   spawnSync 超时时 `status=null` ⇒ 同步版返回 `-1`。这里保持同形（`-1`），
+    //   并在 stderr 里**留下可读证据**（同步版是静默 kill ⇒ 这里更好，且不破坏形状）。
+    const timer = setTimeout(() => {
+      errChunks.push(Buffer.from(`\n[mgmt] execActionAsync 超时(${timeoutMs}ms) ⇒ 已杀子进程\n`, 'utf8'))
+      try { child.kill('SIGKILL') } catch { /* 已退 */ }
+      done(-1)
+    }, timeoutMs)
+    child.stdout?.on('data', (c: Buffer) => { outLen += c.length; outChunks.push(c); if (outLen > maxOut * 4) { outChunks.splice(0, Math.max(0, outChunks.length - 8)); outLen = outChunks.reduce((n, b) => n + b.length, 0) } })
+    child.stderr?.on('data', (c: Buffer) => { errLen += c.length; errChunks.push(c); if (errLen > maxErr * 4) { errChunks.splice(0, Math.max(0, errChunks.length - 8)); errLen = errChunks.reduce((n, b) => n + b.length, 0) } })
+    child.on('error', (e) => { errChunks.push(Buffer.from('spawn error: ' + e.message, 'utf8')); done(-1) })
+    child.on('close', (code) => done(code ?? -1))
+  })
 }
 
 /** 异步实验的台账目录。 */

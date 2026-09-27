@@ -360,7 +360,7 @@ function boot(config: CoordinatorConfig): void {
         )
         res.end(JSON.stringify({ ok: true, cmd: 'mgmt', action: 'experiment', stage: 'started', runId }))
         void (async () => {
-          const r = mgmt.execAction(V.v as mgmt.Validated, wt, process.execPath)
+          const r = await mgmt.execActionAsync(V.v as mgmt.Validated, wt, process.execPath)
           writeFileSync(
             join(dir, `${runId}.json`),
             JSON.stringify(
@@ -372,8 +372,15 @@ function boot(config: CoordinatorConfig): void {
           )
         })()
       } else {
-        const r = mgmt.execAction(V.v, wt, process.execPath)
-        res.end(JSON.stringify({ ok: r.code === 0, cmd: 'mgmt', action: V.v.action, code: r.code, stdout: r.stdout.slice(-20000), stderr: r.stderr.slice(-4000) }))
+        // ★★★ R4（2026-09-27）：**不许在这里同步 spawn**。
+        //   `execAction`（spawnSync）会**阻塞事件循环**，而控制面与前门**同进程**（实测 pid 相同）
+        //   ⇒ 管理面跑一次长命令，前门的代理转发就一起被拖住（实测 `max=8.23s`，p95 只有 0.66s ⇒ 长尾全是这一段）。
+        //   改成**异步**：等结果期间事件循环是空的，前门照常转发。
+        //   ★ 安全属性一个字没动：仍走 `argvFor()`（数组、无注入面）+ `childEnv()`（剔臂身份）+ 不经 shell。
+        void (async () => {
+          const r = await mgmt.execActionAsync(V.v, wt, process.execPath)
+          res.end(JSON.stringify({ ok: r.code === 0, cmd: 'mgmt', action: V.v.action, code: r.code, stdout: r.stdout.slice(-20000), stderr: r.stderr.slice(-4000) }))
+        })()
       }
     } else if (cmd === 'pool') {
       // ★★ 2026-09-26 哨兵模型（用户裁决，见 docs/launcher-sentinel-impl-2026-09-26.md）：

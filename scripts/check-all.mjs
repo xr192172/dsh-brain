@@ -195,6 +195,23 @@ const GATES = [
     cmd: ['node', 'scripts/switchboard/test-lease-liveness-guard.mjs'],
   },
   {
+    id: 'test:mgmt-nonblocking',
+    // ★★ 2026-09-27 新增（R4）。事故形状：**管理面把前门拖死**。
+    //   `mgmt.ts` 的 `execAction` 用 `spawnSync` ⇒ **同步阻塞事件循环**；
+    //   而**控制面与前门是同一个进程**（实测 pid 相同）⇒ 管理面一跑长命令，
+    //   前门的代理转发一起被拖住（实测 `n=90 ok=83 err=7`，`p95=0.66s` 但 **`max=8.23s`**）。
+    //   修法：新增 `execActionAsync`（异步 spawn + 收口），**安全属性一个字不动**
+    //     （仍 `argvFor()` 数组 ⇒ 无注入面 / 仍 `childEnv()` ⇒ 剔臂身份 / 仍不经 shell / 仍有超时）。
+    //   ★ 判据是**行为**的（不是"源码里有 spawnSync 吗"那种会假绿的文本判据）：
+    //     真的起一个忙 1200ms 的子进程，量**等待期间事件循环的 drift**。
+    //     实测：同步 1228.9ms vs 异步 12.2ms（差 100×）⇒ 消融后回到 1234.1ms。
+    //   ★★ 本门自己踩过一次假红（已修，如实记录）：第一版 `done()` 在 `spawnSync`
+    //     **返回之后**立刻收口 ⇒ 心跳在同一瞬间被清掉、**从没观察到阻塞** ⇒ 同步版读数 0.0ms。
+    //     ⇒ 这就是"判据读不到差别 ≠ 没有差别"（铁律 15）；修法是让测量窗口跨完整时间跨度。
+    what: '管理面不阻塞事件循环：同步/异步 drift 必须差一个量级（行为判据 + 消融）',
+    cmd: ['node', 'scripts/switchboard/test-mgmt-nonblocking.mjs'],
+  },
+  {
     id: 'test:boot-health',
     what: '启动健康检查三态（含真实 gen-3083 文本）',
     cmd: ['node', 'scripts/test-boot-health.mjs'],
