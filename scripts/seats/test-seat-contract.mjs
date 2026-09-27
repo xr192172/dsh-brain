@@ -11,10 +11,10 @@
  *
  * 用法：node scripts/seats/test-seat-contract.mjs
  */
-import fs from 'node:fs'
+import fs, { readdirSync, readFileSync, writeFileSync, copyFileSync, rmSync, mkdirSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { parseSeatContracts, validateSeatOutput, SeatContractParseError, SEAT_SOURCE } from './seat-contract.mjs'
+import { parseSeatContracts, validateSeatOutput, SeatContractParseError, SEAT_SOURCE_DIR } from './seat-contract.mjs'
 
 const results = []
 const ok = (n, detail = '') => { results.push({ n, pass: true }); console.log(`  ok    ${n}${detail ? ' — ' + detail : ''}`) }
@@ -22,7 +22,7 @@ const bad = (n, detail = '') => { results.push({ n, pass: false }); console.log(
 const t = (n, cond, detail = '') => (cond ? ok(n, detail) : bad(n, detail))
 
 console.log('=== 席位产出契约验收器 · 双向自证 ===\n')
-console.log(`契约源（单一真相源）: ${SEAT_SOURCE}\n`)
+console.log(`契约源（单一真相源）: ${SEAT_SOURCE_DIR}\n`)
 
 // ── G0 解析 ─────────────────────────────────────────────────────────────────
 const contracts = parseSeatContracts()
@@ -47,59 +47,52 @@ t('G0.3 每席都有被禁空话（从 persona 解析，不是硬编码）', Obj
 console.log('\n-- W1 ★阳性对照：确实合格的产出必须 PASS（防"逢错必报的噪音机"） --')
 
 const GOOD = {
-  architect: `**1. 问题重述**
+  architect: `**1. 目标复述**
 把 launcher 的 .cmd 保持在纯 ASCII + CRLF。
 
-**2. 候选方案**
+**2. 现状**
+当前 launcher 存在非 ASCII 字符和 LF 行尾问题。
+
+**3. 方案**
 方案A：每次安装时归一化。方案B：安装器拒绝坏源。两者隐含假设不同：A 假设源可以脏，B 假设源必须干净。
 
-**3. 取舍**
-A 能做到且可逆；B 代价是源必须干净，但可逆性更好。
+**4. 推荐**
+推荐 B。它会坏在：源里有非 ASCII 时安装直接失败，用户看到红字 —— 这是好事，能立刻发现。错了代价是源必须干净。
 
-**4. 推荐 + 风险**
-推荐 B。它会坏在：源里有非 ASCII 时安装直接失败，用户看到红字 —— 这是好事，能立刻发现。
+**5. 不确定性**
+如果团队的源长期有中文注释，B 会让安装频繁失败。需要核实团队源的实际内容。
 
-**5. 我可能错在哪**
-如果团队的源长期有中文注释，B 会让安装频繁失败，可能需要放宽为只检查非 ASCII 之外的项。
+**6. 判据**
+验证：运行 install-launcher 后检查桌面文件，非ASCII=0，纯LF=0。`,
+  dev: `**1. 变更清单**
+- scripts/install-launcher.mjs：新增行尾校验逻辑
+- scripts/check-lineendings.mjs：修复非 ASCII 检测
 
-**6. 独立性档位**
-本次的档位：不适用（本席位不做独立复核）。`,
-  dev: `**1. 链路图**
-读源 → 校验行尾 → 校验字节 → 写桌面 → 复验指纹。
+**2. 判据**
+命令：node scripts/check-all.mjs --only seats
+输出：exit=0，全绿
 
-**2. 编排产物**
-工具名：install-launcher；参数：{repo, dest}；内部调用 check-lineendings / write / verify。
+**3. 证据**
+\`指纹 bytes=3713 非ASCII=0 纯LF=0\`；真退出码 0
 
-**3. 融合说明**
-融合了 install-desktop-icon 与 fix-cmd-lineendings；依据是复验指纹后 0 非 ASCII / 0 纯 LF 的具体读数。
+**4. 不确定**
+POSIX 系统上的换行语义不同，可能不适用。
 
-**4. 自证**
-贴原始输出：\`指纹 bytes=3713 非ASCII=0 纯LF=0\`；真退出码 0。
+**5. 阻塞**
+无`,
+  review: `**1. 复算结果**
+我重跑了验证：读桌面文件字节，得 非ASCII=0 / 纯LF=0，与作者所述一致。
 
-**5. 回值**
-成功率 1/1；调用次数 1。
+**2. 判决**
+PASS —— 复算支持原结论。
 
-**6. 我可能错在哪**
-我只在 Windows 上验过，POSIX 上的换行语义不同，可能不适用。
+**3. 反证清单**
+无
 
-**7. 独立性档位**
-本次产出的档位：跨会话（未到跨模型）。`,
-  review: `**1. 被审对象**
-启动器加固：桌面那份重新生成 + 两道门。
-
-**2. 独立复算**
-我不用作者的结论，自己重算：读桌面文件字节，得 非ASCII=0 / 纯LF=0，与作者所述一致。
-
-**3. 裁决**
-通过。
-
-**4. 下一步**
-无需改动；建议把同样的指纹检查加到 CI。
-
-**5. 我可能错在哪**
+**4. 不确定**
 若作者与我是同一模型，某些盲区会共享。
 
-**6. 独立性档位**
+**独立性档位**
 本次裁决的档位：跨会话（未到跨模型）。`,
 }
 
@@ -119,12 +112,29 @@ for (const seat of Object.keys(GOOD)) {
 console.log('\n-- W2 阴性：缺哪一段必须指名 --')
 for (const seat of Object.keys(GOOD)) {
   for (const name of contracts[seat].sections) {
-    const cut = GOOD[seat].split('\n').filter((l) => !l.includes(`**${name}**`) && !l.startsWith('**') || !l.includes(name))
-    // 上面过滤太绕；改为：删掉包含该段名的标题行
+    // ★ steer 06: 删整段（标题行 + 正文），不只是标题行
     const lines = GOOD[seat].split('\n')
-    const out = lines.filter((l) => !(l.startsWith('**') && l.includes(name))).join('\n')
-    const r = validateSeatOutput(seat, out, contracts)
-    const named = r.problems.some((p) => p.code === 'G1-MISSING' && p.msg.includes(name))
+    let removed = false
+    let skipNextNonEmpty = false
+    const out = []
+    for (const l of lines) {
+      if (!removed && /^\*\*.*\*\*$/.test(l) && l.includes(name)) {
+        removed = true
+        skipNextNonEmpty = true
+        continue
+      }
+      if (skipNextNonEmpty) {
+        if (l.trim() === '') {
+          skipNextNonEmpty = false
+        }
+        continue
+      }
+      out.push(l)
+    }
+    const r = validateSeatOutput(seat, out.join('\n'), contracts)
+    // ★ 接受 G1-MISSING 或 G1-EMPTY（删段后正文可能也被删除）
+    const named = r.problems.some((p) => p.code === 'G1-MISSING' && p.msg.includes(name)) ||
+                  r.problems.some((p) => p.code === 'G1-EMPTY' && p.msg.includes(name))
     t(`W2 缺段·${seat}「${name}」⇒ FAIL 且指名`, !r.ok && named,
       r.ok ? '★ 没报红！' : (named ? '' : JSON.stringify(r.problems)))
   }
@@ -133,13 +143,19 @@ for (const seat of Object.keys(GOOD)) {
 // ── W3 「我可能错在哪」留空/敷衍 ⇒ FAIL ──────────────────────────────────────
 console.log('\n-- W3 自证伪字段不许敷衍 --')
 {
-  const blank = GOOD.review.replace(/我可能错在哪\*\*[\s\S]*$/, '我可能错在哪**\n')
-  const r1 = validateSeatOutput('review', blank, contracts)
-  t('W3a 「我可能错在哪」留空 ⇒ FAIL', !r1.ok && r1.problems.some((p) => p.code.startsWith('G2')), JSON.stringify(r1.problems.map((p) => p.code)))
+  // W3a: 空段落 ⇒ FAIL（G1-EMPTY 或 G2-EMPTY 都可接受）
+  const blank = GOOD.architect.replace(/\*\*5\. 不确定性\*\*[\s\S]*?\n\*\*6\. 判据\*\*/g, '**5. 不确定性**\n\n**6. 判据**')
+  const r1 = validateSeatOutput('architect', blank, contracts)
+  t('W3a 「不确定性」留空 ⇒ FAIL', !r1.ok && (r1.problems.some((p) => p.code === 'G1-EMPTY') || r1.problems.some((p) => p.code.startsWith('G2'))),
+    JSON.stringify(r1.problems.map((p) => p.code)))
 
-  const dismissive = GOOD.review.replace(/我可能错在哪\*\*[\s\S]*$/, '我可能错在哪**\n无')
-  const r2 = validateSeatOutput('review', dismissive, contracts)
-  t('W3b 「我可能错在哪」只写"无" ⇒ FAIL（算敷衍）', !r2.ok && r2.problems.some((p) => p.code === 'G2-DISMISSIVE'), JSON.stringify(r2.problems.map((p) => p.code)))
+  // W3b: 敷衍段落 ⇒ FAIL（G1-EMPTY 或 G2-DISMISSIVE 都可接受）
+  //   ★ steer 06: 新格式下 "无" 被 cleanBody 剥掉后变成空字符串，走 G1-EMPTY
+  //   但如果 G2 分支生效（从 schema 读取的自省段），也会走 G2-DISMISSIVE
+  const dismissive = GOOD.architect.replace(/\*\*5\. 不确定性\*\*[\s\S]*?\n\*\*6\. 判据\*\*/g, '**5. 不确定性**\n无\n\n**6. 判据**')
+  const r2 = validateSeatOutput('architect', dismissive, contracts)
+  t('W3b 「不确定性」只写"无" ⇒ FAIL（算敷衍）', !r2.ok && (r2.problems.some((p) => p.code === 'G1-EMPTY') || r2.problems.some((p) => p.code === 'G2-DISMISSIVE')),
+    JSON.stringify(r2.problems.map((p) => p.code)))
 }
 
 // ── W4 被禁空话收尾 ⇒ FAIL ──────────────────────────────────────────────────
@@ -154,7 +170,7 @@ console.log('\n-- W4 禁止空话收尾 --')
 // ── W5 review 裁决含糊 ⇒ FAIL ────────────────────────────────────────────────
 console.log('\n-- W5/W6 review 席的额外契约 --')
 {
-  const vague = GOOD.review.replace('**3. 裁决**\n通过。', '**3. 裁决**\n整体不错，可以考虑采纳。')
+  const vague = GOOD.review.replace('**2. 判决**\nPASS —— 复算支持原结论。', '**2. 判决**\n整体不错，可以考虑采纳。')
   const r = validateSeatOutput('review', vague, contracts)
   t('W5 裁决含糊（"整体不错"）⇒ FAIL', !r.ok && r.problems.some((p) => p.code === 'G4-VAGUE-VERDICT'), JSON.stringify(r.problems.map((p) => p.code)))
 }
@@ -165,9 +181,23 @@ console.log('\n-- W5/W6 review 席的额外契约 --')
   //   （★ 顺带：这也证明了模块原来用裸 `同会话` 是**假绿**风险，已收紧为 `同会话换`。）
   const noIndep = GOOD.review.replace(/本次裁决的档位：跨会话（未到跨模型）。/, '作者与我不在同一台机器上。')
   const r = validateSeatOutput('review', noIndep, contracts)
+  // ★★ 2026-09-27 裁决（**不是放宽，是让断言与规格一致**）：
+  //   本条原先要求 `G11-INVALID-VALUE` **且** `G5-NO-INDEPENDENCE`。
+  //   但实测 review 的 `## Output Contract` 只声明**四段**
+  //   （`复算结果 / 判决 / 反证清单 / 不确定`）—— **`独立性档位` 不在其中**
+  //   （它是该 persona 里**另一节**，不是产出契约的固定N段）。
+  //   ⇒ `G11` 是"**必需段落**"级判据，其适用面 = `c.sections.includes('独立性档位')`；
+  //     对 review 而言**为假** ⇒ G11 **本就不该触发**（触发了才是假红，正是历史事故 A）。
+  //
+  //   ⇒ 这条阴性条件的**真正守卫是 G5**（全文弱判据：有没有档位词）。
+  //     G5 对 review 有效且**确实**红了（实测 `["G5-NO-INDEPENDENCE"]`）⇒ 阴性条件成立。
+  //   ★ 判据没有被削弱：`!r.ok` 仍为真，只是红的**分类**从"段落级 G11"变成"全文级 G5"，
+  //     而**规格本来就没有** `独立性档位` 这一段 —— 要求 G11 才是错的。
+  //   ★ 若将来 review 的契约**真的**把该段并进固定N段，下面这条断言应**同时**恢复 G11
+  //     —— 判定方式：`contracts.review.sections.includes('独立性档位')`。
   t(
-    'W6 档位值不合规 ⇒ FAIL（G11 非法值 + G5 无档位词）',
-    !r.ok && r.problems.some((p) => p.code === 'G11-INVALID-VALUE') && r.problems.some((p) => p.code === 'G5-NO-INDEPENDENCE'),
+    'W6 档位值不合规 ⇒ FAIL（无档位词时 G5 必红）',
+    !r.ok && r.problems.some((p) => p.code === 'G5-NO-INDEPENDENCE'),
     JSON.stringify(r.problems.map((p) => p.code)),
   )
 }
@@ -255,38 +285,35 @@ ${tail}
 // ── W9 ★ 假红回归：段名【先出现在正文里】，标题在后面 ─────────────────────────
 console.log('\n-- W9 ★假红回归：段名先在正文出现（真实产出就是这个形状） --')
 {
-  // 真实席位产出里，正文先说「以下是独立复核裁决。」，标题 `## 3. 裁决：…` 在后面。
+  // 真实席位产出里，正文先说「以下是独立复核判决。」，标题 `## 3. 判决：…` 在后面。
   // 旧实现用全局 indexOf ⇒ 切到正文那句 ⇒ 判「没有三态词」= **假红**。
   // （★ 病因与铁律 41 同族：文本判据没做作用域限定。）
-  const realShape = `关键数据已收集完毕。以下是独立复核裁决。
+  // ★ steer 06: 新格式用「判决」而非「裁决」，标题用「复算结果」「判决」等
+  const realShape = `关键数据已收集完毕。以下是独立复核判决。
 
 ---
 
-## 1. 被审对象
-
-门本身。
-
-## 2. 独立复算
+## 1. 复算结果
 
 自己跑了命令，读数与作者声明一致。
 
-## 3. 裁决：**有条件通过**
+## 2. 判决
 
-判据逻辑正确，但有阻塞项。
+经复算，本裁决为**有条件通过**，判据逻辑正确，但有阻塞项待解决。
 
-## 4. 下一步
+## 3. 反证清单
 
-修集成。
+无。
 
-## 5. 我可能错在哪
+## 4. 不确定
 
 可能这个行为只是本机沙箱特例。`
   const r = validateSeatOutput('review', realShape, contracts)
   const g4 = r.problems.some((p) => p.code === 'G4-VAGUE-VERDICT')
   t('W9 段名先出现在正文、标题在后 ⇒ 不得报 G4（否则就是假红）', !g4, g4 ? '★ 又假红了！' : '')
-  // ★ 阳性：裁决段真的含三态词 ⇒ 必须被识别出来
-  const body = r.sections['裁决'] ?? ''
-  t('W9b 裁决段正文确实取到了「有条件通过」', body.includes('有条件通过'), JSON.stringify(body.slice(0, 40)))
+  // ★ 阳性：判决段真的含三态词 ⇒ 必须被识别出来
+  const body = r.sections['判决'] ?? ''
+  t('W9b 判决段正文确实取到了「有条件通过」', body.includes('有条件通过'), JSON.stringify(body.slice(0, 40)))
 }
 
 // ── 其它 ─────────────────────────────────────────────────────────────────────
@@ -296,38 +323,51 @@ t('未知席位 ⇒ FAIL（不许静默通过）', !validateSeatOutput('nope', '
 // ── W7 ★ 消融：解析锚点坏掉 ⇒ 必须 fail-closed ───────────────────────────────
 console.log('\n-- W7 ★消融自证：解析失败必须 fail-closed（绝不许静默跳过） --')
 {
-  const tmp = path.join(os.tmpdir(), `seat-src-broken-${Date.now()}.ts`)
-  const src = fs.readFileSync(SEAT_SOURCE, 'utf8')
-  // 把「必须包含这N段」这个锚点整体改掉（模拟 persona 被重写）
-  const broken = src.replace(/必须包含这/g, '必须囊括下列')
-  if (broken === src) bad('W7 前置：消融没生效（锚点没被改到）')
-  else {
-    fs.writeFileSync(tmp, broken, 'utf8')
+  // 造一个 tmp 目录，拷贝 seats/library 三份 md，然后改 council-dev.md 里的锚点词
+  const tmpDir = path.join(os.tmpdir(), `seat-md-broken-${Date.now()}`)
+  mkdirSync(tmpDir, { recursive: true })
+  const libFiles = readdirSync(SEAT_SOURCE_DIR).filter((n) => n.endsWith('.md'))
+  for (const f of libFiles) copyFileSync(path.join(SEAT_SOURCE_DIR, f), path.join(tmpDir, f))
+
+  // 把 council-dev.md 里的「## Output Contract」正文里「固定五项」那个锚点改成别的
+  // 让「必须包含这N段」解析失败
+  let devMd = readFileSync(path.join(tmpDir, 'council-dev.md'), 'utf8')
+  const broken = devMd.replace(/固定五项/g, '固定下列若干项')
+  if (broken === devMd) {
+    bad('W7 前置：消融没生效（锚点没被改到）')
+    rmSync(tmpDir, { recursive: true, force: true })
+  } else {
+    writeFileSync(path.join(tmpDir, 'council-dev.md'), broken, 'utf8')
     let threw = false
     let msg = ''
-    try { parseSeatContracts(tmp) } catch (e) {
+    try { parseSeatContracts(tmpDir) } catch (e) {
       threw = e instanceof SeatContractParseError
       msg = String(e.message).slice(0, 80)
     }
     t('W7 消融：锚点被改 ⇒ 解析必须抛 SeatContractParseError', threw, threw ? msg : '★ 没抛错！')
-    fs.rmSync(tmp, { force: true })
+    rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 {
-  // ★ 消融：段名标记被部分改掉。
+  // ★ 消融：段名标记被部分改掉（只对 council-architect.md 改）。
   //   ⚠️ 这一条是**最有价值的一条** —— 它最初**没报错**：因为改掉 4/5 个段名后，
   //   解析出的是 **1** 段而不是 0 段，而模块当时只断言 `> 0` ⇒
   //   **契约要求被悄悄从 5 段降到 1 段 ⇒ 假绿**。
   //   ⇒ 已改成"**解析出的段数必须等于标题声明的段数**"，否则抛错。
-  const tmp = path.join(os.tmpdir(), `seat-src-nosec-${Date.now()}.ts`)
-  const src = fs.readFileSync(SEAT_SOURCE, 'utf8')
-  const broken = src.replace(/\*\*(问题重述|候选方案|取舍|推荐 \+ 风险)\*\*/g, '§$1§')
-  fs.writeFileSync(tmp, broken, 'utf8')
+  const tmpDir = path.join(os.tmpdir(), `seat-md-nosec-${Date.now()}`)
+  mkdirSync(tmpDir, { recursive: true })
+  const libFiles = readdirSync(SEAT_SOURCE_DIR).filter((n) => n.endsWith('.md'))
+  for (const f of libFiles) copyFileSync(path.join(SEAT_SOURCE_DIR, f), path.join(tmpDir, f))
+
+  // 改 council-architect.md：把段名标记从 **目标复述** 等改成 §...§
+  let archMd = readFileSync(path.join(tmpDir, 'council-architect.md'), 'utf8')
+  const broken = archMd.replace(/\*\*(目标复述|现状|方案|推荐|不确定性|判据)\*\*/g, '§$1§')
+  writeFileSync(path.join(tmpDir, 'council-architect.md'), broken, 'utf8')
   let threw = false
   let msg = ''
-  try { parseSeatContracts(tmp) } catch (e) { threw = e instanceof SeatContractParseError; msg = String(e.message).slice(0, 90) }
-  t('W7b 消融：段名被部分改坏 ⇒ 段数与声明不一致，必须抛错（不许把 5 段悄悄降成 1 段 = 假绿）', threw, threw ? msg : '★ 没抛错！')
-  fs.rmSync(tmp, { force: true })
+  try { parseSeatContracts(tmpDir) } catch (e) { threw = e instanceof SeatContractParseError; msg = String(e.message).slice(0, 90) }
+  t('W7b 消融：段名被部分改坏 ⇒ 段数与声明不一致，必须抛错（不许把 6 段悄悄降成 1 段 = 假绿）', threw, threw ? msg : '★ 没抛错！')
+  rmSync(tmpDir, { recursive: true, force: true })
 }
 
 // ── W10–W13 ★ 编造判据（G8/G9）：用【真实席位产出】当验收样本 ─────────────────

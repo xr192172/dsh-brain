@@ -54,11 +54,19 @@
       "## Red Flags"
     ],
     "minBodyChars": 600,
+    "selfDoubtSections": [
+      {
+        "architect": "不确定性",
+        "dev": "不确定",
+        "review": "不确定"
+      }
+    ],
     "why": {
       "Key Distinctions": "★ 我们原先没有：显式声明【我不做谁的活】，防席位越界",
       "Workflow Position": "★ 我们原先没有：After/Complements/Enables ⇒ 编排顺序由席位自声明，不再硬编码在调用方",
       "Rationalization Table": "★ superpowers 的招：把已知借口逐条对照现实",
-      "Red Flags": "★ superpowers 的招：给席位一份自我检查清单"
+      "Red Flags": "★ superpowers 的招：给席位一份自我检查清单",
+      "selfDoubtSections": "★ G2 判据的作用对象：凡是\"自省/不确定性\"性质的段落都要过 G2-EMPTY + G2-DISMISSIVE"
     }
   },
   "toolScopeConsistency": {

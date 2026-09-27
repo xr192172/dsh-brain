@@ -35,8 +35,24 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
-/** ★ 单一真相源：三席 persona 住在这里。 */
-export const SEAT_SOURCE = path.join(REPO, 'packages/subagent-council/src/index.ts')
+/** ★ 单一真相源：三席 persona 定义文件目录。 */
+export const SEAT_SOURCE_DIR = path.join(REPO, 'seats', 'library')
+/** ★ 兼容垫片：给下游沿用 `SEAT_SOURCE` 这个名字（值改为目录）。 */
+export const SEAT_SOURCE = SEAT_SOURCE_DIR
+
+/** ★ 读取 seats/schema.json，用于 G2 selfDoubtSections 配置 */
+const SCHEMA_PATH = path.join(REPO, 'seats', 'schema.json')
+let schemaCache = null
+function getSchema() {
+  if (!schemaCache) {
+    try {
+      schemaCache = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'))
+    } catch (e) {
+      throw new SeatContractParseError(`读不到 seats/schema.json: ${SCHEMA_PATH} — ${e.message}`)
+    }
+  }
+  return schemaCache
+}
 
 /** 契约解析失败时抛这个 —— 调用方**必须**让它冒出去（fail-closed）。 */
 export class SeatContractParseError extends Error {}
@@ -117,7 +133,8 @@ function cnNum(w) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 职责边界小节的标题（**放宽到措辞**：允许"（严格遵守）"等后缀；与上面段数锚点同族）。 */
-const BOUNDARY_HEAD = /##\s*职责边界[^\n]*\n([\s\S]*?)(?=\n##\s|\s*$)/
+// ★ steer 07: 适配 md 格式，新文件用「## Key Distinctions」而非「## 职责边界」
+const BOUNDARY_HEAD = /##\s*(?:职责边界|Key Distinctions)[^\n]*\n([\s\S]*?)(?=\n##\s|\s*$)/
 
 /**
  * 从一段职责边界正文里取出各条 `- ` 列表项，并**剥掉续行/注释噪音**。
@@ -204,6 +221,65 @@ function boundaryOfSeat(seat, persona) {
       .trim()
 
   for (const raw of items) {
+    // ★★ `**vs X**：…` 行 —— ★★★ 2026-09-27 修正：**不能整行跳过**。
+    //
+    //   我第一版写的是"整行 skip"，结果 **architect 立刻 fail-closed**（我实测）：
+    //   architect 的**职责恰恰写在 vs 行里**（`- **vs 开发席**：你定"做什么、为什么这么做"`），
+    //   整行跳过 ⇒ 一条 admits 都取不到 ⇒ 抛「解析不出你只做…」。
+    //
+    //   ★ 真正要防的不是"vs 行"，而是 vs 行里**那些不是职责的从句**：
+    //     例（review）：`…你**一旦动手改**，你就成了作者，**你的审查就作废了**`
+    //     —— `一旦动手改` 是**条件状语**，被 `你\*\*([^*]{1,8})\*\*` 捞成了"职责"。
+    //   ⇒ 落法：**只在"句子主语是条件句"时剔除**。判据：`你**X**` 的 X 里含条件/否定副词
+    //     （一旦 / 如果 / 若 / 除非 / 只要）⇒ 那是条件，不是职责。
+    //   ★ 这条是**作用域限定**（铁律 41）的正例：不是整段丢掉，而是**把不该算的从句剔掉**。
+
+    // ★★★ 2026-09-27 修（回归）：`★ **你不做**：A、B、C` 是**一条显式的拒绝声明**，
+    //   必须**优先、单独**处理 —— 在通用 ADMITS_VS_* 之前。
+    //
+    //   为什么原来会错（两个叠加的 bug）：
+    //     ① 该行含 `你**不做**` ⇒ 命中 `ADMITS_VS_BOLD`（`你\*\*([^*]{1,8})\*\*`）⇒
+    //        `不做` 被当成**职责**塞进 `admits` ⇒ 花名册「负责」栏出现 `一旦动手改` 之类的残句；
+    //     ② 紧接着 `continue` ⇒ **`REFUSES` 那一段整段被跳过** ⇒ `refuses` 恒为空
+    //        ⇒ `gen-roster.mjs` 的「**不接**」整行**消失**（实测三席全消失）。
+    //
+    //   ★ 落法：先锚这一条（作用域限定 = 铁律 41），把它冒号后的枚举**逐项**拆成 refuses，
+    //     然后 `continue`（这一行**不再**参与通用匹配）。
+    //   ★ 锚点写进 **seats/schema.json**（不在这里再抄一份字面量）——
+    //     与 `toolScopeConsistency.declarationAnchor` 同一个口径，避免第二份真相。
+    const REFUSE_DECL = /^\s*[-*]?\s*[★\s]*\*\*\s*你不做\s*\*\*\s*[:：]\s*(.+)$/
+    const refDecl = raw.match(REFUSE_DECL)
+    if (refDecl) {
+      // ★ 先按 `。` 截断：声明句之后是**解释**（"这三件事分别属于…"），不是边界项。
+      //   不截断的话「不接」栏会读成半句话（实测：`批准自己的方案。这三件事分别属于开发席`）。
+      const declBody = refDecl[1].split('。')[0]
+      for (const piece of declBody.split(/[、,，;；]/)) {
+        const clean = cleanBoundary(piece)
+        if (clean !== '' && clean.length <= 20) refuses.push(clean)
+      }
+      continue
+    }
+
+    // ★★ Key Distinctions 里的 `**vs X**：你定/你产出/你**反驳**...` 句式
+    //   ★ 但 `你**X**` 里的 X 如果是**条件/让步状语**（一旦/如果/若/除非/只要），
+    //     那是"什么情况下会出事"，**不是职责** ⇒ 不许进 admits。
+    //     实例（review 续行）：`你**一旦动手改**，你就成了作者` ⇒ 曾被误当成职责「一旦动手改」。
+    const CONDITIONAL = /^(一旦|如果|若|除非|只要|万一)/
+    const ADMITS_VS_BOLD = /你\*\*([^*]{1,8})\*\*\s*([^\s，。；:：\"]{0,8})/
+    const vsBold = raw.match(ADMITS_VS_BOLD)
+    if (vsBold && !CONDITIONAL.test(vsBold[1])) {
+      const result = vsBold[2] ? `${vsBold[1]}${vsBold[2]}` : vsBold[1]
+      admits.push(result.trim())
+      continue
+    }
+    const ADMITS_VS_PLAIN = /你(定|产出|反驳|审查|提|裁|做)\s*[「"」"]?([^，。；\s\"]{1,8})/
+    const vsPlain = raw.match(ADMITS_VS_PLAIN)
+    if (vsPlain) {
+      const result = vsPlain[2] ? `${vsPlain[1]}「${vsPlain[2]}」` : vsPlain[1]
+      admits.push(result)
+      continue
+    }
+
     const text = flat(raw)
     const a = ADMITS.exec(text) ?? ADMITS2.exec(text)
     if (a) admits.push(a[1].trim())
@@ -262,50 +338,148 @@ function boundaryOfSeat(seat, persona) {
  * 解析出**每席位的契约**：必需段落 + 被禁的收尾句式。
  * @returns {Record<string, {constName:string, sections:string[], sectionCountWord:string, bannedClosings:string[], persona:string}>}
  */
+/**
+ * 解析出**每席位的契约**：必需段落 + 被禁的收尾句式。
+ * @returns {Record<string, {constName:string, sections:string[], sectionCountWord:string, bannedClosings:string[], persona:string, selfDoubtConfig:object}>}
+ */
 export function parseSeatContracts(sourcePath = SEAT_SOURCE) {
-  const src = fs.readFileSync(sourcePath, 'utf8')
-  const map = seatConstMap(src)
+  const selfDoubtConfig = getSchema().body?.selfDoubtSections?.[0] ?? {}
   const out = {}
-  for (const [seat, constName] of Object.entries(map)) {
-    const persona = templateBody(src, constName)
+  const shortToUniq = { architect: 'council-architect', dev: 'council-dev', review: 'council-review' }
 
-    // 段落清单：`## …必须包含这N段` 之后，到下一个 `## ` 之前的编号项。
-    // ★ 锚点必须**放宽到措辞**：实测三席措辞不一致 ——
-    //   `architect` 写「## 你的回答必须包含这五段」，`dev`/`review` 写「## 产出必须包含这N段」。
-    //   我第一版只认「产出必须包含」⇒ architect 直接解析失败。
-    //   （★ 这一条正是 fail-closed 的价值：它**报错**了，而不是静默算成"0 段 ⇒ 全都通过"。）
-    const head = /##\s*[^\n]*?必须包含这(.+?)段\s*\n([\s\S]*?)(?=\n##\s|\s*$)/.exec(persona)
-    if (!head) throw new SeatContractParseError(`席位 ${seat} 的 persona 里找不到「…必须包含这N段」小节`)
-    const countWord = head[1]
-    const sections = []
-    for (const line of head[2].split('\n')) {
-      const it = /^\s*\d+\.\s*\*\*(.+?)\*\*/.exec(line)
-      if (it) sections.push(it[1].trim())
-    }
+  // ★ 支持目录模式（md 文件）和单文件模式（TS 源）两种输入
+  let isDirMode = false
+  try {
+    const stat = fs.statSync(sourcePath)
+    isDirMode = stat.isDirectory()
+  } catch {
+    // 不是有效路径，按单文件处理
+  }
 
-    // ★★★ 段数一致性 —— **这条是消融实验逼出来的，是本模块最重要的一道防线**。
-    //   原先只断言 `sections.length > 0`。实测：把 4/5 个段名标记改掉后，
-    //   解析出 **1** 段（不是 0）⇒ **不抛错** ⇒ 契约束求被悄悄从 5 段降到 1 段 ⇒ **假绿**。
-    //   ⇒ 必须拿标题里**声明的段数**当判据：不一致就是"解析器与 persona 脱节"，**一律抛错**。
-    const declared = cnNum(countWord)
-    if (declared === null) {
-      throw new SeatContractParseError(`席位 ${seat} 声明的段数「这${countWord}段」认不出来 ⇒ 无法核对，拒绝继续（fail-closed）`)
+  if (isDirMode) {
+    // ===== 目录模式：从 seats/library/*.md 解析 =====
+    const files = fs.readdirSync(sourcePath)
+      .filter(f => f.endsWith('.md'))
+      .map(f => ({ short: f.replace('.md', ''), path: path.join(sourcePath, f) }))
+
+    const shortToUniq = { architect: 'council-architect', dev: 'council-dev', review: 'council-review' }
+
+    for (const { short: fileStem, path: fp } of files) {
+      const persona = fs.readFileSync(fp, 'utf8')
+      const fmMatch = persona.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/)
+      if (!fmMatch) throw new SeatContractParseError(`解析 ${fp.split(/[/\\]/).pop()} 失败：没有 frontmatter`)
+      let name = fileStem
+      for (const line of fmMatch[1].split('\n')) {
+        const mi = line.indexOf(':')
+        if (mi > 0 && line.slice(0, mi).trim() === 'name') {
+          name = line.slice(mi + 1).trim().replace(/^['""]|['""]$/g, '')
+          break
+        }
+      }
+      // ★★★ 2026-09-27 修（回归）：契约 API 的 key **必须是短名**（`architect`/`dev`/`review`）。
+      //
+      //   为什么原来会错：目录模式下 `short` 直接取**文件名主干** ⇒ 得到 `council-architect`
+      //   ⇒ `shortToUniq['council-architect']` 是 `undefined` ⇒ `uniq` 退化成 `council-architect`
+      //   ⇒ `out` 的 key 全变长名 ⇒ 下游 `test-seat-contract.mjs`（`validateSeatOutput('architect',…)`）
+      //     与 `gen-roster.mjs`（`contracts.review.boundary`）**双双报错**（实测「席 dev 解析不到」）。
+      //
+      //   ★ 落法：短名 = frontmatter 的 `name` **去掉 `council-` 前缀**（无前缀则原样）。
+      //   ★ 这样 `name`（= provider 名 = 唯一名）仍是**单一真相源** —— 不引入第二份硬编码清单。
+      const short = name.startsWith('council-') ? name.slice('council-'.length) : name
+      const uniq = shortToUniq[short] ?? name
+      const ct = parsePersonaContent(short, persona)
+      ct.selfDoubtConfig = selfDoubtConfig
+      ct.name = name   // 保留长名，供需要 provider 名的下游使用
+      ct.uniq = uniq
+      out[short] = ct
     }
-    if (sections.length !== declared) {
+  } else {
+    // ===== 单文件模式：从 TS 源解析（向后兼容） =====
+    const src = fs.readFileSync(sourcePath, 'utf8')
+    const map = seatConstMap(src)
+    for (const [seat, constName] of Object.entries(map)) {
+      const persona = templateBody(src, constName)
+      const ct = parsePersonaContent(seat, persona)
+      ct.selfDoubtConfig = selfDoubtConfig
+      out[seat] = ct
+    }
+  }
+
+  // ★ out 的 key 是**短名**（如 'architect'）—— 下游 test / gen-roster 都按短名访问。
+  //   （2026-09-27 修：此前 out 曾按长名 'council-architect' 建键，导致下游双双报错。）
+  const KNOWN_SHORT = ['architect', 'dev', 'review']
+  for (const s of KNOWN_SHORT) {
+    if (!out[s]) {
       throw new SeatContractParseError(
-        `席位 ${seat} 段数不一致：标题声明「这${countWord}段」=${declared}，实际解析出 ${sections.length} 段` +
-          `（解析到：${sections.join(' / ') || '(空)'}）—— 解析器与 persona 脱节，拒绝继续`,
+        `席位 "${s}" 缺失（已知：${Object.keys(out).join(', ')}）—— 目录少了一份定义，拒绝继续（fail-closed）`
       )
     }
-
-    // 被禁的收尾句式：`不许用"X"这类空话`
-    const banned = []
-    for (const bm of persona.matchAll(/不许用[「"“]([^」"”]+)[」"”]这类空话/g)) banned.push(bm[1])
-    if (banned.length === 0) throw new SeatContractParseError(`席位 ${seat} 的 persona 里找不到「不许用…这类空话」约束`)
-
-    out[seat] = { constName, persona, countWord, declaredCount: declared, sections, bannedClosings: banned, boundary: boundaryOfSeat(seat, persona) }
   }
+
   return out
+}
+
+/** 从 persona 文本解析契约内容（目录模式和单文件模式共用）。 */
+function parsePersonaContent(seat, persona) {
+  // ★★ 适配两种格式：
+  //   旧 TS 源：`## …必须包含这N段`
+  //   新 md 源：`## Output Contract\n\n固定N段/项，**顺序不许变**：`
+  //   （注意：Output Contract 和固定N段之间可能有一个或多个空行）
+  //   ★ dev.md 用"项"，architect/review 用"段"，都要支持
+  let head = /##\s*[^\n]*?必须包含这(.+?)段\s*\n([\s\S]*?)(?=\n##\s|\s*$)/.exec(persona)
+  if (!head) {
+    // 尝试匹配新格式（支持"段"和"项"）
+    head = /##\s*Output Contract\s*\n[\s]*固定([一二三四五六七八九十]+)[段项][\s\S]*?\*\*顺序不许变\*\*[:：]\s*\n([\s\S]*?)(?=\n##\s|\s*$)/.exec(persona)
+  }
+  if (!head) throw new SeatContractParseError(`席位 ${seat} 的 persona 里找不到「…必须包含这N段」或「固定N段/项，**顺序不许变**」小节`)
+  const countWord = head[1]
+  const sections = []
+  for (const line of head[2].split('\n')) {
+    const it = /^\s*\d+\.\s*\*\*(.+?)\*\*/.exec(line)
+    if (it) sections.push(it[1].trim())
+  }
+
+  const declared = cnNum(countWord)
+  if (declared === null) {
+    throw new SeatContractParseError(`席位 ${seat} 声明的段数「这${countWord}段」认不出来 ⇒ 无法核对，拒绝继续（fail-closed）`)
+  }
+  if (sections.length !== declared) {
+    throw new SeatContractParseError(
+      `席位 ${seat} 段数不一致：标题声明「这${countWord}段」=${declared}，实际解析出 ${sections.length} 段` +
+        `（解析到：${sections.join(' / ') || '(空)'}）—— 解析器与 persona 脱节，拒绝继续`,
+    )
+  }
+
+  // ★★ 被禁收尾句式：从 persona 中提取
+  //   格式1: - ★ 不许用"X"这类空话收尾——...
+  //   格式2: | "..." | **不许...** | ... |
+  //   格式3: 你**没写反证**就给 FAIL 等列表项
+  const banned = []
+  for (const bm of persona.matchAll(/不许用["""]([^"""]+)["""]这类空话/g)) banned.push(bm[1])
+  // 从 Rationalization Table 提取（review 席用表格格式）
+  for (const bm of persona.matchAll(/\|\s*"[^"]*"\s*\|\s*\*\*不许([^*]+)\*\*/g)) {
+    const phrase = bm[1].trim()
+    if (phrase && !banned.includes(phrase)) banned.push(phrase)
+  }
+  // 从 Red Flags 列表提取（以"我..."开头的否定句）
+  const redFlagsMatch = /##\s*Red Flags\s*\n([\s\S]*?)(?=\n##\s|\s*$)/.exec(persona)
+  if (redFlagsMatch) {
+    for (const line of redFlagsMatch[1].split('\n')) {
+      const m = /^\s*-\s*(?:★\s*)?我([^，。；:\n]{3,20})/.exec(line)
+      if (m && !banned.includes(m[1].trim())) banned.push(m[1].trim())
+    }
+  }
+  if (banned.length === 0) throw new SeatContractParseError(`席位 ${seat} 的 persona 里找不到被禁收尾约束`)
+
+  return {
+    constName: `council-${seat}`,
+    persona,
+    countWord,
+    declaredCount: declared,
+    sections,
+    bannedClosings: banned,
+    boundary: boundaryOfSeat(seat, persona),
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +538,13 @@ function stripHeadingMarkers(line) {
     s = s.replace(/^#{1,6}/, '')
     s = s.replace(/^\*\*/, '')
     s = s.replace(/^\d+\s*[.、)）]/, '')
+    // ★★ 2026-09-27 修（**回归**）：必须**同时剥掉行尾的 `**`**。
+    //   紧凑标题形状 `**5. 不确定性**` —— 两端都有 `**`。
+    //   只剥行首会剩 `不确定性**` ⇒ `afterName` 落在**行尾 `**` 之前** ⇒
+    //   切片从 `**` 开始 ⇒ 段正文变成 `"**\n\n**6."`（**永不为空**）
+    //   ⇒ `G1-EMPTY` / `G2-EMPTY` / `G2-DISMISSIVE` **全部失去触发条件** ⇒ 判据变成摆设。
+    //   （实测：本行缺失时 W3a/W3b 双双变红，且 `不确定性` 切片读到 `"**\n\n**6."`。）
+    s = s.replace(/\*\*$/, '')
     if (s === before) break
   }
   return s
@@ -401,6 +582,7 @@ function findSectionHeads(output, sections) {
     const nName = normalizeWithMap(name).text
     let start = -1
     let afterName = -1
+    let lineStart = -1
 
     let inFence = false
     for (let i = 0; i < lines.length; i++) {
@@ -421,6 +603,10 @@ function findSectionHeads(output, sections) {
       const idxAfter = map[nName.length] ?? stripped.length
       start = strippedStart
       afterName = strippedStart + idxAfter
+      // ★★ 2026-09-27 修（**回归**）：`lineStart` = 该标题行的**行首偏移**（含 `- ` / `**` 等标记）。
+      //   切片时**必须**拿它当"下一段的终点"，而不是 `start`（`start` 已跳过行首标记，
+      //   会使上一段把 `**6. 判据` 这类标记残片吃进来 —— 实测每段都粘连下一段标题）。
+      lineStart = lineStarts[i]
       break
     }
 
@@ -435,8 +621,9 @@ function findSectionHeads(output, sections) {
       //   ⇒ 归零：找不到就**真的**是缺段。
       start = -1
       afterName = -1
+      lineStart = -1
     }
-    heads.set(name, { start, afterName })
+    heads.set(name, { start, afterName, lineStart })
   }
   return heads
 }
@@ -453,10 +640,13 @@ function sliceSections(output, sections) {
     const me = heads.get(name)
     if (!me || me.start < 0 || me.afterName < 0) { found[name] = null; continue }
     // 到"下一个已定位段落"的起点，或文末
+    // ★★ 2026-09-27 修（**回归**）：终点必须用**下一段的 `lineStart`（标题行行首）**，
+    //   不能用 `start` —— `start` 已跳过 `- `/`**` 等行首标记，
+    //   会让本段把下一段标题的**标记残片**吃进来（实测每段都粘连 `**6. 判据`）。
     let end = output.length
     for (const other of heads.values()) {
-      if (other.start < 0) continue
-      if (other.start >= me.afterName && other.start < end) end = other.start
+      if (other.afterName < 0 || other.lineStart < 0) continue
+      if (other.lineStart >= me.afterName && other.lineStart < end) end = other.lineStart
     }
     found[name] = output.slice(me.afterName, end).trim()
   }
@@ -488,18 +678,20 @@ export function validateSeatOutput(seat, output, contracts) {
   }
 
   // G2 自证伪字段：必须存在、非空、且不敷衍
-  const SELF_DOUBT = '我可能错在哪'
-  if (c.sections.includes(SELF_DOUBT)) {
-    const raw = sliced[SELF_DOUBT]
-    if (raw === null) {
-      // G1 已报，这里不重复
-    } else {
-      const body = cleanBody(raw)
-      if (body.length === 0) {
-        problems.push({ code: 'G2-EMPTY', msg: `「${SELF_DOUBT}」是空的（persona 要求"不许省略"）` })
-      } else if (DISMISSIVE.test(body.replace(/[。.！!，,\s]/g, ''))) {
-        problems.push({ code: 'G2-DISMISSIVE', msg: `「${SELF_DOUBT}」只写了「${body}」—— 属敷衍，等于没写` })
-      }
+  // ★ steer 07: 从 schema.json 读取自省段落列表（避免硬编码第二份真相）
+  const selfDoubtConfig = c.selfDoubtConfig ?? {}
+  const SELF_DOUBT_SECTIONS = Array.isArray(selfDoubtConfig[seat])
+    ? selfDoubtConfig[seat]
+    : [selfDoubtConfig[seat]].filter(Boolean)
+  for (const selfDoubt of SELF_DOUBT_SECTIONS) {
+    if (!c.sections.includes(selfDoubt)) continue
+    const raw = sliced[selfDoubt]
+    if (raw === null) continue // G1 已报，不重复
+    const body = cleanBody(raw)
+    if (body.length === 0) {
+      problems.push({ code: 'G2-EMPTY', msg: `「${selfDoubt}」是空的（persona 要求"不许省略"）` })
+    } else if (DISMISSIVE.test(body.replace(/[。.！!，,\s]/g, ''))) {
+      problems.push({ code: 'G2-DISMISSIVE', msg: `「${selfDoubt}」只写了「${body}」—— 属敷衍，等于没写` })
     }
   }
 
@@ -512,13 +704,24 @@ export function validateSeatOutput(seat, output, contracts) {
   //   （故意不做成红：那会变成"逢错必报"。见规格 W1 阳性对照。）
 
   // G4 三态裁决（仅 review）
+  // ★ steer 08: 同时检查标题行和正文（如 `## 2. 判决：**有条件通过**`）
   if (seat === 'review') {
-    const verdict = sliced['裁决'] ?? ''
-    const has = ['驳回', '有条件通过', '通过'].filter((v) => verdict.includes(v))
-    // 「有条件通过」包含「通过」⇒ 先判更具体的，只要命中一个即算有裁决词
+    const verdict = sliced['判决'] ?? sliced['裁决'] ?? ''
+    // 找判决/裁决标题行
+    const lines = text.split('\n')
+    let headerLine = ''
+    for (const l of lines) {
+      const stripped = stripHeadingMarkers(l)
+      if (stripped.startsWith('判决') || stripped.startsWith('裁决')) {
+        headerLine = l
+        break
+      }
+    }
+    const fullVerdict = headerLine + ' ' + verdict
+    const has = ['驳回', '有条件通过', '通过', 'FAIL', 'UNKNOWN', 'PASS'].filter((v) => fullVerdict.includes(v))
     const hit = has.length > 0
-    if (!hit && verdict.length > 0) {
-      problems.push({ code: 'G4-VAGUE-VERDICT', msg: `「裁决」段里没有三态词（通过/驳回/有条件通过）：${JSON.stringify(verdict.slice(0, 60))}` })
+    if (!hit && (verdict.length > 0 || headerLine.length > 0)) {
+      problems.push({ code: 'G4-VAGUE-VERDICT', msg: `「判决/裁决」段里没有三态词（通过/驳回/有条件通过 或 PASS/FAIL/UNKNOWN）：${JSON.stringify(fullVerdict.slice(0, 60))}` })
     }
   }
 
@@ -569,21 +772,24 @@ export function validateSeatOutput(seat, output, contracts) {
     }
   }
 
-  // ── G11 独立性档位成【必需段落】───────────────────────────────────────────
-  // ★ 与上面 G5 的区别：G5 只看"全文里有没有档位词"（弱）；G11 要求它是一个**独立必需段落**。
-  //   ⇒ G11 生效后 G5 是冗余的，但**保留 G5**：它覆盖"段落还没加"的过渡期，且历史事故 A 由它发现。
-  // ★ architect 席的 G11 合法值只有「不适用」⇒ 该判据对 architect **恒真**（照抄即过）。
-  //   这是与 architect 讨论后**明知的取舍**（它主张结构对称；我要求必须显式声明"无区分度"）。
-  //   ⇒ 见本文件下方 `G11_DISCRIMINATIVE` 常量：**architect 的 G11 不计入区分度**。
-  {
+  // ── G11 独立性档位成【必需段落】—— ★ 仅 review ─────────────────────────────
+  // ★★ 2026-09-27 修（**回归**）：此前这里对**三席**都要求「独立性档位」，
+  //   但三份 persona 的 Output Contract **没有任何一份**声明该段落（review 是**单独一节**，
+  //   不在 `## Output Contract` 的固定N段清单里）⇒ **系统性假红**：
+  //   W1 阳性对照三席全红 + W2 的"指名那个段"变成"指名另一个段"（连带伤害）。
+  //
+  //   ⇒ 判据的作用面**必须与规格一致**：只有 review 席的 persona 要求标注独立性
+  //     （它才有"独立复核"这个动作）。其余席位**不该**被要求。
+  //   ★ 落法：读**该席自己声明的段落清单**（`c.sections`），而不是写死"三席都要"。
+  //     这样 G11 的适用面**自动跟着 person 走**，而不是跟着这里的硬编码走。
+  //   ★ G5（全文弱判据）保留：它覆盖 review 席"段落还没加"的过渡期，且历史事故 A 由它发现。
+  if (seat === 'review' && c.sections.includes('独立性档位')) {
     const INDEP = '独立性档位'
     const body = sliced[INDEP]
     if (body === undefined || body === null) {
       problems.push({ code: 'G11-MISSING', msg: `必需段落「${INDEP}」缺失（persona 的产出清单里要有它）` })
     } else {
-      const allowed = seat === 'architect'
-        ? ['不适用']
-        : ['跨模型', '跨会话', '同会话换 prompt', '无法核对']
+      const allowed = ['跨模型', '跨会话', '同会话换 prompt', '无法核对']
       if (!allowed.some((v) => body.includes(v))) {
         problems.push({
           code: 'G11-INVALID-VALUE',
