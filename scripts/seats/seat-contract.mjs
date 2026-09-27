@@ -94,6 +94,170 @@ function cnNum(w) {
   return null
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ G12 · 职责边界解析（P3 路由判据的**唯一数据来源**）
+//
+// ## 为什么要有这一层（2026-09-27）
+//
+// 上面那句「契约从 persona 源码解析，**不许手抄第二份**」是本模块最重要的纪律。
+// 而 persona 里其实有**两节**是契约：
+//   · 「## 产出必须包含这N段」 —— 回答**长什么样**（已被上面解析）
+//   · 「## 职责边界（严格遵守）」—— 回答**这活该不该给我**（**本节才解析**）
+//
+// 用户要的「把对应的部分提交给对应的部门」缺的正是第二节：
+// 没有它，路由只能靠 LLM 自由发挥（`docs/single-front-brain-delegation.md` §5④ 明确禁止）。
+// ⇒ 本节把「职责边界」也从散文变成**可执行数据**，且仍然**不手抄**。
+//
+// ## 解析的是【句式】，不是【关键词】—— 这条是区分度的生死线
+//
+// 三席的边界**大量用否定句写**（"你不写实现代码"、"你【不】裁值不值得采纳"），
+// 而否定句里**含**别的席位的正面词（architect 的"不写**实现**代码"含 dev 的"施工/实现"语义）。
+// ⇒ 若按关键词匹配，architect 会被自己的否定句判成"它会写实现" ⇒ **每席都命中每席** ⇒ 区分度归零。
+// ⇒ 一律按**句式标记**取：`你【只做X】` = admits；`你不…` / `你【不】…` = refuses。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 职责边界小节的标题（**放宽到措辞**：允许"（严格遵守）"等后缀；与上面段数锚点同族）。 */
+const BOUNDARY_HEAD = /##\s*职责边界[^\n]*\n([\s\S]*?)(?=\n##\s|\s*$)/
+
+/**
+ * 从一段职责边界正文里取出各条 `- ` 列表项，并**剥掉续行/注释噪音**。
+ *
+ * ★ 必须按"条目"归并续行：dev 的第 1 条正文跨两行（第 2 行以 `  ★` 开头续写）。
+ *   若逐行当独立条目，`admits` 就会把续行误判成一条独立边界（形状噪声）。
+ */
+function boundaryItems(body) {
+  const items = []
+  for (const raw of body.split('\n')) {
+    const line = raw.replace(/\s+$/, '')
+    if (/^\s*[-*]\s+/.test(line) || /^\s*·\s+/.test(line)) {
+      items.push(line.replace(/^\s*[-*·]\s+/, '').trim())
+    } else if (items.length > 0 && line.trim() !== '') {
+      // 续行：并到上一条（**不许丢弃** —— 丢弃会让"边界少一条"变成静默）
+      items[items.length - 1] += ' ' + line.trim()
+    }
+  }
+  return items
+}
+
+/**
+ * ★★ 从【条目文本】里抽「它只做什么」与「它不做什么」。
+ *
+ * 中间那堆 `**` / `【】` / `★` 全是 markdown 强调，**先抹平再匹配**，
+ * 否则同一句话因加粗与否而失配 ⇒ 假红（本模块已因此栽过，见 `cleanBody` 注释）。
+ */
+function boundaryOfSeat(seat, persona) {
+  const m = BOUNDARY_HEAD.exec(persona)
+  if (!m) {
+    // ★ fail-closed：与段数一致性同族。**绝不**"解析不到就返回空集"
+    //   —— 空集会让路由判据退化成"谁都不匹配 ⇒ 全拒派"，那是**假红**；
+    //   而若后来有人把空集当"无限制"，又变成**假绿**。两种都不可接受。
+    throw new SeatContractParseError(
+      `席位 ${seat} 的 persona 里找不到「## 职责边界」小节 ⇒ 路由判据没有数据来源，拒绝继续（fail-closed）`,
+    )
+  }
+  const items = boundaryItems(m[1])
+
+  /** 抹平 markdown 强调标记（保留正文）。 */
+  const flat = (s) => s.replace(/[*`_]/g, '').replace(/【/g, '').replace(/】/g, '')
+
+  const admits = []
+  const refuses = []
+
+  // ★ admits：`你只做X` / `你只裁X`（「只」是**排他**标记 —— 它自己就表达了边界）
+  //   例：architect「你【只做设计与判断】，不写实现代码」 ⇒ admits = 设计与判断
+  //       dev      「你【只做施工】：…」              ⇒ admits = 施工
+  //       review   「你【只裁值不值得采纳】」          ⇒ **在引言里，不在节内**（见下）
+  const ADMITS = /你(?:是|只|负责)?\s*只\s*(?:做|裁|负责)?\s*([^，。；:：]{1,24})/
+  // ★ 节内的另一种正面写法：`你裁的是「X」`（review 席第 3 条这么写）——
+  //   它**没有「只」字**，但句子里有「裁的是」这个**排他性谓语**。
+  const ADMITS2 = /你(?:裁|做|负责)的(?:是|就是)\s*[「"“]?([^」"”，。；]{1,24})/
+
+  // ★ refuses：`你不X` / `你不负责X` / `你【不】X` 或 `【不】X`（并列省略主语）
+  //   ★★ 必须做【作用域限定】（铁律 41 —— 本模块已因此栽过两次，这是第三次）：
+  //     实测 review 席第 3 条里有一句 "（你不知道就写"不知道"）"，
+  //     它不是边界、只是**括号里的操作说明**，但全局正则把它当成了一条 refuse。
+  //     ⇒ 「你」必须出现在**子句开头**（行首 / `；` / `——` / `。` 之后），不允许从句中命中。
+  //   ★★ 且必须**全局扫**（`/g`）：dev 第 4 条写「你【不】提战略方案、【不】改别人的职责边界」
+  //     —— 两个并列否定，只取第一个会**静默丢掉**第二条边界（判据少一条 = 路由漏一类任务）。
+  const REFUSES = /(?:^|[；;。]|——)\s*(?:你|本席位)?\s*[【\[]?不[】\]]?\s*(?:负责|做|写|改|提|裁|替)?\s*([^，。；;]{1,24})/g
+
+  /**
+   * ★★ 边界词清洗（实测两轮才做对，见下方注释）。
+   *
+   * 目标形状：一个**短、名词性、可直接读**的边界（`把它做出来` / `战略方案`）。
+   * 实测踩到的三个形状（都出自 dev / review 的真实 persona）：
+   *   ① `值不值得采纳" —— 那是审批脑（评审团）的事` ⇒ 引号 + 破折号 + **解释**
+   *   ② `实现、不改文件（默认只读）`               ⇒ 顿号并列 + **括号补充**
+   *   ③ `【不】改别人的职责边界`                    ⇒ 方括号标记（`flat` 已剥）
+   *
+   * ⇒ 规则：**在第一个破折号 / 冒号 / 顿号 / 括号处截断**，再剥剩余引号。
+   *   ★ 截断是**对的**，不是信息丢失：破折号之后是**解释**（"那是谁的事"），
+   *     解释不该进"不接"栏 —— 它会让那一栏读起来像半句话（顶层 AI 看得出歧义）。
+   *   ★ 顿号截断同样对：`不改文件、不改目录` 里的第二项由 REFUSES 的 `/g` 各自捕获，
+   *     不靠这里的字符串切分。
+   */
+  const cleanBoundary = (s) =>
+    String(s ?? '')
+      .split(/——|—|[:：]|[（(【\[]|、/)[0]
+      .replace(/["“”「」『』'''`]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  for (const raw of items) {
+    const text = flat(raw)
+    const a = ADMITS.exec(text) ?? ADMITS2.exec(text)
+    if (a) admits.push(a[1].trim())
+    for (const r of text.matchAll(REFUSES)) {
+      const clean = cleanBoundary(r[1])
+      if (clean !== '' && clean.length <= 20) refuses.push(clean)
+    }
+  }
+
+  // ★★ 回退：节内一条 admits 都抽不到时，去 **persona 引言**取（席位定义句）。
+  //   这**不是放宽判据**，而是承认一个真实结构差异：
+  //   review 席把正面职责写在引言（「你【只裁值不值得采纳】」），节内只列否定边界。
+  //   ★ 回退**必须显式标记来源**（`admitsFrom`）—— 静默回退 = 判据读者分不清
+  //     "节内真有职责" 与 "节内没有、我从别处补的"（铁律 33：不确定要能被下游读到）。
+  let admitsFrom = 'boundary'
+  if (admits.length === 0) {
+    const lead = flat(persona.split('\n').slice(0, 3).join(' '))
+    const a = ADMITS.exec(lead) ?? ADMITS2.exec(lead)
+    if (a) {
+      admits.push(a[1].trim())
+      admitsFrom = 'lead'
+    }
+  }
+
+  if (admits.length === 0) {
+    throw new SeatContractParseError(
+      `席位 ${seat} 的「职责边界」节与引言里都解析不出「你只做… / 你裁的是…」（admits）⇒ 路由判据对该席无正面依据，拒绝继续（fail-closed）`,
+    )
+  }
+
+  // ── ★★ keywords：职责边界节里**作者自己加粗**的动作/交付物词 ─────────────
+  //
+  // 依据：persona 作者把关键动作都加粗了（`**编排**` / `**融合**` / `**复核**`）。
+  //   ★ 这是**自带的信号**，不是我的手抄映射 —— 仍然符合 G0。
+  //   ★ 为什么需要它：`admits` 是抽象职责（"施工"），与任务描述的语言距离太远；
+  //     加粗词是具体动作（"编排"），匹配能力显著更强（实测见 test-route-task.mjs 的压力组）。
+  //
+  // ★ 过滤（**必须做，否则噪音会造出假判**）：
+  //   · 虚词/连词/指代（不是、前提、保证、来源、就是你自己…）—— 它们不是动作
+  //   · 含引号的（`【不】裁"值不值得采纳"`）—— 那是**引用别人的话**，不是自己的动作
+  //   · 长度 < 2 或 > 8
+  const KEYWORD_STOP = /^(不是|前提|保证|来源|真实含义|上下文隔离|独立性|一个工具|同功能的更优实现|两个脚本融合|两份设计融合|我做对了|就是你自己|不同 ?agent|如实标注本次落在哪一档)$/
+  const keywords = []
+  for (const bm of m[1].matchAll(/\*\*([^*\n]{2,12})\*\*/g)) {
+    const w = bm[1].trim()
+    if (w.length < 2 || w.length > 8) continue
+    if (/["“”「」'']/.test(w)) continue // 引用别人的话，不是本席动作
+    if (KEYWORD_STOP.test(w)) continue
+    keywords.push(w)
+  }
+
+  return { admits, refuses, itemCount: items.length, admitsFrom, keywords: [...new Set(keywords)] }
+}
+
 /**
  * 解析出**每席位的契约**：必需段落 + 被禁的收尾句式。
  * @returns {Record<string, {constName:string, sections:string[], sectionCountWord:string, bannedClosings:string[], persona:string}>}
@@ -139,7 +303,7 @@ export function parseSeatContracts(sourcePath = SEAT_SOURCE) {
     for (const bm of persona.matchAll(/不许用[「"“]([^」"”]+)[」"”]这类空话/g)) banned.push(bm[1])
     if (banned.length === 0) throw new SeatContractParseError(`席位 ${seat} 的 persona 里找不到「不许用…这类空话」约束`)
 
-    out[seat] = { constName, persona, countWord, declaredCount: declared, sections, bannedClosings: banned }
+    out[seat] = { constName, persona, countWord, declaredCount: declared, sections, bannedClosings: banned, boundary: boundaryOfSeat(seat, persona) }
   }
   return out
 }

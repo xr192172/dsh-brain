@@ -199,6 +199,36 @@ const GATES = [
     cmd: ['node', 'scripts/seats/test-seat-toolscope-e2e.mjs'],
   },
   {
+    id: 'seats-toolscope-continuable',
+    // ★★★ 2026-09-27 新增。**这是本项目最教科书的一次"门全绿但机制没生效"**。
+    //
+    //   事故链：`seats-toolscope`（静态）+ `seats-toolscope-e2e`（动态）**两门全绿**，
+    //   而现役的只读席位（architect / review）**仍然能写仓库**。
+    //   根因：上游有**两条**建立子代理的路径，各自调 provider 的**不同方法**：
+    //     · one-shot    ⇒ `provider.start()`              → composition 取 `descriptor.*`（上游 :1168）
+    //     · continuable ⇒ `provider.prepareContinuable()` → composition 取 `request.*`   （上游 :824）
+    //   而 `SeatProvider.prepareContinuable()` 当时逐字 `return Promise.resolve({})`
+    //   ⇒ **continuable 路径上 persona 与 toolFilter 双双丢失**。
+    //   ⇒ 两道旧门查的都是 `start()`，**结构上不可能发现**（铁律 40：被检查的都干净、用户碰的那个没人管）。
+    //
+    //   ★ 现役委派**默认走 continuable**（`run_in_background` 默认真）⇒ 这正是用户真正碰的那条路径。
+    //
+    //   本门判据（含三态 + 双向消融）：
+    //     A1 ★ 阳性标尺：`start()` 能把 toolFilter 送到上游（证明判据看得见"正确形状"）
+    //     A2 ★★★ 核心：`prepareContinuable()` 也必须送到
+    //     A3 ★ 同族：persona 也必须送到（职责边界全靠它）
+    //     B1/B2 归因钉死 + **正交对照**：两条路径的 composition 来源**必须不同**
+    //            （若相同 ⇒ 只修 start() 就够，本门存在理由消失 ⇒ 需重新归因）
+    //     B3 上游：能力校验只在 start() 跑（⇒ 即使 request 里有也没人拦）
+    //     C1/C2 ★ 消融自证：判据在【漏掉的形状】判红、在【委派给 #enrich 的修复形状】判绿
+    //            ⇒ 不会因一次重构就报假红（铁律 41：长期假红的门会被整体绕过，比没门更糟）
+    //   ★ "跟着委派走"是本门的设计要点：判据认 `this.#enrich(...)` 这种抽法，
+    //     但不认"随便哪里提到 toolFilter"（作用域限定，铁律 41）。
+    //   ★ 全静态 ⇒ 在 check-all 里稳定；行为侧的实证是 `out/_ablate-review-toolfilter.mjs`（continuable 真跑 pwsh）。
+    what: '席位工具档位（continuable 路径）：两条建立路径必须都把 persona/toolFilter 送到上游',
+    cmd: ['node', 'scripts/seats/test-seat-toolscope-continuable.mjs'],
+  },
+  {
     id: 'seats-evo-online',
     // ★★★ 2026-09-27 新增：**三席上线**的判据。
     //   事故形状（真实）：现役 profile 只 insert 了包内默认的 `seat: architect`

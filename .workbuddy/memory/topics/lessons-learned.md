@@ -1156,3 +1156,55 @@ prompt 里的文档副本）都要问一句：**它的门在哪？用户碰的�
      ★ 这才是防这类假绿的**唯一**可靠手段。
 - ★★ **附带教训**：**缩进本身不带"我在哪个块里"的信息** ⇒ 想判"顶层派发"必须**按块结构**判
   （看是否在 `if (isMain…) {` 块内），放松成"任意缩进"会**造假红**（会把函数体内的 `process.exit` 算进去）。
+
+---
+
+# 附录：环境约束全文（2026-09-27 从 MEMORY.md 下沉，append-only）
+
+> ★ MEMORY.md 因超限被注入截断（>28KB）⇒ 本节逐字下沉，**一条没删**。
+> MEMORY.md 现只保留本节的**压缩版**（见其「环境约束」节）。
+
+## 环境约束（本机工具层，每次都要遵守）
+
+> ★ **详细证据全文在 `topics/lessons-learned.md`**；此处只留**要遵守什么**。
+
+1. **Bash 开头先修 PATH**：`export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin:/c/Program Files/nodejs:/c/Program Files/Git/cmd"`。
+2. **PowerShell 通道基本不可用**（stdout 被吞；从 node spawn 是 ENOENT）⇒ **自动化走纯文件通道**（脚本自己 `writeFileSync`）。
+   ★ 但 `Get-CimInstance Win32_Process` **可用** ⇒ 读进程身份就找它（经 node 调 PS 绝对路径）。★ 本机 **`wmic` 已不存在**。
+3. **不能在工具内起长期服务** ⇒ 例外：`scripts/relaunch-switchboard.cmd`（走**计划任务** ⇒ 父进程是 Task Scheduler 服务 ⇒ 跨调用存活）
+   —— 但**在本 shell 会阻塞** ⇒ 当**后台任务**跑，恢复结论**另开一次调用**去看端口/探针。派活前先探 `:3080`。
+4. 排查会话内容**别**把 node stdout 重定向到文件（判为二进制）。
+5. **`grep -oE` / `find` / `timeout` 不可靠** ⇒ 提取/统计写 node 脚本或用 Grep 工具；限时用 Bash 工具自带 timeout。
+6. **clone/fetch 用系统 git**（`C:\Program Files\Git\cmd\git.exe`）；PortableGit 写嵌套 ref 静默失败 ⇒ 验 `git branch -r` 非空。
+7. **`git -C` 不认 MSYS 路径** ⇒ 一律 `D:/…`（该报错极易被误判成"目录不存在"）。
+8. **工作区**：`D:\project_develop` 唯一开发根；`_` 前缀 = 非项目；**远端是唯一真相源**。
+9. **Code Mode**：只能直接调 `run_code`，其余工具写在程序里 `tools.<name>(...)` ⇒ persona 用**否定+禁止**式硬规则。
+   通用：**否定+禁止 ＞ 说明+让它判断**。
+10. **同一文件并行编辑** ⇒ 后写者按旧快照覆盖（**两边都报成功、静默丢改动**）⇒ **同文件编辑串行**，改完 grep 验关键标记。
+11. **`node -e` 带正则/反引号/花括号会被 bash 抢插值** ⇒ **写 `.mjs` 再跑**。
+    ★★ 对"发给 DSH 的长消息"同样致命（`syntax error` 但**退出码仍是 0**）⇒ 长消息一律**写文件再发**。
+12. **`npm run <script>` 在 Agent shell 被拦** ⇒ 直接 `node scripts/<x>.mjs`。
+13. **构建**：`cd packages/switchboard && node scripts/build.mjs`（用仓库内 tsc）。
+14. **推送**：`GIT_TERMINAL_PROMPT=0 git push origin master`；
+    ★ **唯一可信判据 = `git ls-remote origin refs/heads/master`**（push 输出与本地 `origin/master` 都会骗人）。
+15. **命令可能被执行两次**（沙箱被拒→提权重跑）⇒ 写入类**按跑两次设计** + 写完**立刻校验**，别信脚本自己的输出。
+16. **多会话共用仓库 ⇒ 提交有分寸**：先 `git status` 看清哪些不是自己的；`git add <自己的路径>` 为主。
+17. **命令里别混「中文 + Markdown 的 `**` + 重定向」**（曾造出乱名 0 字节文件并被提交）
+    ⇒ 长文本写**消息文件**再 `-F`；`git add -A` 后**扫一眼加了哪些**；删乱名文件要用 `readdir` 的真名。
+18. **真日期看 `date`，不看注入的 `<current_time>`**（实测滞后一天以上）。
+19. **★ dev 模式（沙箱全开）**：启控制面时带 `DSH_SWITCHBOARD_DEV=1` ⇒ 派生的**每一代**都是"沙箱全开 + 审批 never"。
+    ★ 副作用：**真全开**；"只禁互读互写"要靠 `packages/arm-isolation`（**未接线**）。
+20. **★ 换代（蓝绿）真触发点 = 控制面 `:31800` 的 `?cmd=`**（**不是** `:3080` —— 后者只返回前端 HTML）。
+    `?cmd=handover&profile=<profile>` **异步**（立即返回 `stage:"started"`）⇒ **必须轮询** `?cmd=status`；
+    成功判据 = `lease.json` 的 `activeGen/pid/generation` 都变 + 台账 `result:"success"` + **前门健康**。
+    ★ **`preset` ≠ `profile`**；★ **要生效必须重启控制面本身**；★ **谁的进程谁重启**（别人的进程 `process.kill` 会 EPERM）。
+21. **★ 门层的票**：**别自拼 `record --paths` 去对指纹**（连续两次被拦）。可靠流程 =
+    `git add` → 试提交（门拦住并自动开票）→ `approve <自动票> --by witness:agent-<谁>` → 再提交；
+    自批时**提交信息里逐字写明"批准者与作者是同一个 agent"**。
+22. **★ 控制面 `?cmd=` 命令面（唯一权威清单，核过 `main.ts:277-433`）**：
+    `handover`(≡`apply`/`restart`，异步，`&profile=`/`&fail=`/`&fast=1`) / `assembly`(只读投影) /
+    `mgmt`(`&action=brief|tasks|verdict|experiment|result`) / `status` / `preflight` + `preflight-result` /
+    `result` / `flow` / `panel`(HTML) / `fail`(注入)。★ 除 `handover` 系与 `preflight` 外都是**同步只读**。
+23. **★★★ `.cmd` 输出是 GBK(936)** ⇒ node 里读它必须 `new TextDecoder('gbk')`；
+    按 utf8 解码 ⇒ 中文病征全乱码 ⇒ 正则匹配不上 ⇒ **假绿**（判据要**两路并存**：中文句式 + **与编码无关的英文片段**）。
+    ★ 同类：**测含空格的路径必须加引号** —— 不加会被空格切开、**根本没执行到目标**（铁律 7 同族）。

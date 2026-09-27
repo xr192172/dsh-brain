@@ -278,7 +278,25 @@ class SeatProvider {
 		this.#toolFilter = toolFilter;
 	}
 
-	start(request: any) {
+	/**
+	 * ★★★ 单一真相源：把"这一席的身份"（persona + 工具域 + 路由）写进请求。
+	 *
+	 * ## 为什么必须抽成一个方法（2026-09-27 事故）
+	 *
+	 * 上游有**两条**建立子代理的路径，它们分别调 provider 的**不同方法**：
+	 *   · one-shot    ⇒ `provider.start()`              → 取 `descriptor.*` 当 composition
+	 *   · continuable ⇒ `provider.prepareContinuable()` → 取 `request.*`  当 composition
+	 * （上游 `dsh-subagent/lib/index.js` :824 / :1168；两条最终都进 `applyChildComposition`）
+	 *
+	 * 原先 `start()` 里写了一份富化、`prepareContinuable()` 逐字 `Promise.resolve({})`
+	 * ⇒ **continuable 路径上 persona 与 toolFilter 双双丢失**：
+	 *   只读席位（architect / review）在**现役委派链路**上**不受任何限制**，
+	 *   而且连职责边界（写在 persona 里）都没注入。
+	 * ★ 讽刺之处：上一轮修 O8 时，两道门（静态 + e2e）**全绿** —— 因为它们查的都是 `start()`。
+	 *
+	 * ⇒ 纪律：**两条路径必须走同一份富化**。谁再写第二个副本，门 A2/A3 会红。
+	 */
+	#enrich(request: any): any {
 		const next: any = { ...request };
 
 		// 注入席位人格 —— 它 shadow 掉 deployment persona，只对这一个子代理生效。
@@ -299,11 +317,22 @@ class SeatProvider {
 			if (this.#model) next.agentOptions.model = this.#model;
 		}
 
-		return startInProcessRun(next, {});
+		return next;
 	}
 
-	prepareContinuable() {
-		return Promise.resolve({});
+	start(request: any) {
+		return startInProcessRun(this.#enrich(request), {});
+	}
+
+	/**
+	 * continuable 路径的入口。
+	 *
+	 * ★ 上游拿它的返回值当 `composition` 的来源（`:824`）⇒ **必须与 `start()` 同源**。
+	 *   这里交出去的就是 `#enrich()` 的产物；`{ seed }` 之外的键上游不认，多给无害。
+	 * ★ 曾经这里逐字 `Promise.resolve({})` —— 那正是本席"只读"在现役失效的**全部原因**。
+	 */
+	prepareContinuable(request: any) {
+		return Promise.resolve(this.#enrich(request));
 	}
 }
 

@@ -8,57 +8,46 @@
 > · **接手先读**：`topics/next-task-handover.md`（顶部 = 本轮回执）
 > · **进度/未闭合**：`topics/current-status.md`
 > · **日更**（append-only，尾部最新）：`.workbuddy/memory/YYYY-MM-DD.md`
-> ⚠️ **本文件已三次超限被注入截断**（>40KB）⇒ **加新条目必须同时压缩/下沉旧的**（铁律 25 的执行面）。
+> ⚠️ **本文件已【四次】超限被注入截断**（2026-09-27 实测 32,907 B 触发截断 —— **安全上限 ≈ 28KB**）。
+> ⇒ **加新条目必须同时压缩/下沉旧的**（铁律 25 的执行面）。**30KB 即视为红线**。
 > ⚠️ 铁律编号**不复用**（跨文件引用靠编号：lessons-learned 与日更里都按这套号说话）。
+> ★ **瘦身操作手册**：全文逐字下沉到 `topics/lessons-learned.md` 或 `topics/current-status.md`，本文件只留**一行索引**。
 
-## 环境约束（本机工具层，每次都要遵守）
+## 环境约束（本机工具层）—— **压缩版；全文见 `topics/lessons-learned.md` 附录**
 
-1. **Bash 调用开头先修 PATH**：`export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin:/c/Program Files/nodejs:/c/Program Files/Git/cmd"`。
-2. **PowerShell 通道基本不可用**（stdout 被吞；从 node 里 spawn 是 ENOENT）⇒ **自动化走纯文件通道**（脚本自己 `writeFileSync`）。
-   ★ 但 `Get-CimInstance Win32_Process` **可用** ⇒ **要读进程身份就找它**（经 node 调 PS 绝对路径）。
-3. **不能在工具内起长期服务** ⇒ switchboard 由**用户终端**拉起；★ 例外见 19/20。
-   ⚠️ 用户重启电脑后不会自动拉起 ⇒ 派活前先探 `:3080`（`scripts/relaunch-switchboard.cmd` 走计划任务可跨调用存活，但**在本 shell 会阻塞** ⇒ 当后台任务跑，恢复结论另开一次调用去看）。
+> ★ 2026-09-27 从本文件下沉（原 5,152 B ⇒ 现 ~1.6KB）。**动手前若有疑问，去读附录的逐字版。**
+
+1. Bash 开头先修 PATH（System32 / Windows / usr bin / nodejs / Git cmd）。
+2. **PowerShell 通道基本不可用**（stdout 被吞；node spawn 是 ENOENT）⇒ 自动化走**纯文件通道**；
+   ★ 但 `Get-CimInstance Win32_Process` **可用**（读进程身份用它；本机 `wmic` 已不存在）。
+3. **不能在工具内起长期服务** ⇒ 例外 `scripts/relaunch-switchboard.cmd`（计划任务 ⇒ 跨调用存活），
+   但它**在本 shell 会阻塞** ⇒ 当**后台任务**跑 + **另开一次调用**看端口/探针。派活前先探 `:3080`。
 4. 排查会话内容**别**把 node stdout 重定向到文件（判为二进制）。
-5. **`grep -oE` / `find` / `timeout` 不可靠** ⇒ 提取/统计写 node 脚本或用 Grep 工具；限时用 Bash 工具自带 timeout。
-6. **clone/fetch 用系统 git**（`C:\Program Files\Git\cmd\git.exe`）；PortableGit 写嵌套 ref 静默失败 ⇒ 验 `git branch -r` 非空。
-7. **`git -C` 不认 MSYS 路径** ⇒ 一律 `D:/…`；该报错极易被误判成"目录不存在"。
+5. **`grep -oE` / `find` / `timeout` 不可靠** ⇒ 写 node 脚本或用 Grep 工具；限时用 Bash 自带 timeout。
+6. **clone/fetch 用系统 git**（`C:\Program Files\Git\cmd\git.exe`）；PortableGit 写嵌套 ref 静默失败。
+7. **`git -C` 不认 MSYS 路径** ⇒ 一律 `D:/…`（该报错易被误判成"目录不存在"）。
 8. **工作区**：`D:\project_develop` 唯一开发根；`_` 前缀 = 非项目；**远端是唯一真相源**。
-9. **Code Mode**：只能直接调 `run_code`，其余工具写在程序里 `tools.<name>(...)` ⇒ persona 用**否定+禁止**式硬规则。
-   通用：**否定+禁止 ＞ 说明+让它判断**。
-10. **同一文件两个 Edit 并行 ⇒ 后者按旧快照覆盖**（两边都报成功、静默丢改动）⇒ **同文件编辑串行**，改完 grep 验关键标记。
-11. **`node -e` 带正则/反引号/花括号会被 bash 抢插值** ⇒ **写 `.mjs` 再跑**。
-    ★★ 对"发给 DSH 的长消息"同样致命 —— 含反引号/花括号的中文长文本写在 `session-drive.mjs prompt "<长文本>"` 里
-    **实测被 bash 吃掉一半**（`syntax error` 但**退出码仍是 0**）⇒ **长消息一律写文件再发**：
-    `out/_tasks/send-msg.mjs <sid> <消息文件> [steer|queue]`。
+9. **Code Mode**：只能直接调 `run_code`，其余写在程序里 `tools.<name>(...)` ⇒ persona 用**否定+禁止**式。
+10. **同文件并行编辑** ⇒ 后写者按旧快照覆盖（**两边都报成功、静默丢改动**）⇒ **同文件编辑串行** + 改完 grep 验标记。
+11. **`node -e` 带正则/反引号/花括号被 bash 抢插值** ⇒ **写 `.mjs` 再跑**；**发给 DSH 的长消息一律写文件再发**
+    （含反引号/花括号的中文长文本走命令行会被吃掉一半，**退出码仍是 0**）。
 12. **`npm run <script>` 在 Agent shell 被拦** ⇒ 直接 `node scripts/<x>.mjs`。
-13. **构建**：`cd packages/switchboard && node scripts/build.mjs`（用仓库内 tsc）。
-14. **推送**：`GIT_TERMINAL_PROMPT=0 git push origin master`；
-    ★ **唯一可信判据 = `git ls-remote origin refs/heads/master`**（push 输出与本地 `origin/master` 都会骗人）。
-15. **命令可能被执行两次**（沙箱被拒→提权重跑）⇒ 写入类**按跑两次设计** + 写完**立刻校验**，别信脚本自己的输出。
-16. **多会话共用仓库 ⇒ 提交有分寸**：先 `git status` 看清哪些不是自己的；`git add <自己的路径>` 为主；
-    周期性查"有没有该提交却没跟踪的文件"。
-17. **命令里别混「中文 + Markdown 的 `**` + 重定向」**（曾因此造出乱名 0 字节文件并被提交）
-    ⇒ 长文本一律写**消息文件**再 `-F`；`git add -A` 后**扫一眼加了哪些**；删乱名文件要用 `readdir` 的真名。
+13. **构建**：`cd packages/switchboard && node scripts/build.mjs`。
+14. **推送唯一可信判据 = `git ls-remote origin refs/heads/master`**（push 输出与本地 `origin/master` 都会骗人）。
+15. **命令可能被执行两次**（沙箱被拒→提权重跑）⇒ 写入类**按跑两次设计** + 写完**立刻校验**。
+16. **多会话共用仓库 ⇒ 提交有分寸**：先 `git status` 看清哪些不是自己的；`git add <自己的路径>` 为主。
+17. **命令里别混「中文 + Markdown 的 `**` + 重定向」**（曾造出乱名 0 字节文件并被提交）
+    ⇒ 长文本写**消息文件**再 `-F`；`git add -A` 后**扫一眼加了哪些**。
 18. **真日期看 `date`，不看注入的 `<current_time>`**（实测滞后一天以上）。
-19. **★ dev 模式（沙箱全开）怎么开**：启控制面时带 `DSH_SWITCHBOARD_DEV=1` ⇒ 派生的**每一代**都是"沙箱全开 + 审批 never"
-    （机制 = 控制面把 `DSH_PERMISSION_MODE=danger-full-access` 写进子代 env；上游 `dsh-base/cordis.patch.yml:175/191` 已留的钩子）。
-    ★ 副作用：**真全开**；"只禁互读互写"要靠 `packages/arm-isolation`（**未接线**）。
-20. **★ 换代（蓝绿）真触发点 = 控制面 `:31800` 的 `?cmd=`**（**不是** `:3080` —— 后者只返回前端 HTML）。
-    `?cmd=handover&profile=<profile>` 是**异步**的（立即返回 `stage:"started"`）⇒ **必须轮询** `?cmd=status`；
-    成功判据 = `lease.json` 的 `activeGen/pid/generation` 都变 + 台账 `result:"success"` + 补一条**前门健康**。
-    ★ **`preset` ≠ `profile`**（换错会起个坏代、被回滚）。★ **要生效必须重启控制面本身**；★ **谁的进程谁重启**（别人的进程 `process.kill` 会 EPERM）。
-21. **★ 门层的票**：**别自拼 `record --paths` 去对指纹**（连续两次指纹不匹配被拦）。
-    可靠流程 = `git add` → 试提交（门拦住并自动开票）→ `approve <自动票> --by witness:agent-<谁>` → 再提交；
-    自批时**提交信息里逐字写明"批准者与作者是同一个 agent"**。
-22. **★ 控制面 `?cmd=` 命令面（唯一权威清单，2026-09-26 核过源码 `main.ts:277-433`）**：
-    `handover`(≡`apply`/`restart`，异步，`&profile=`/`&fail=`/`&fast=1`) / `assembly`(只读投影) /
-    `mgmt`(`&action=brief|tasks|verdict|experiment|result`) / `status` / `preflight` + `preflight-result` /
-    `result` / `flow` / `panel`(HTML) / `fail`(注入)。★ 除 `handover` 系与 `preflight` 外都是**同步只读**。
-23. **★★★ `.cmd` 的输出是 GBK(936)** ⇒ 在 node 里读它必须 `new TextDecoder('gbk')`；按 utf8 解码 ⇒ 中文病征全变乱码
-    ⇒ 正则匹配不上 ⇒ **假绿**（判据要**两路并存**：中文句式 + 与编码无关的英文片段，如 `'-click'`）。
-    ★ 同类：**测含空格的路径必须加引号** —— 不加会被空格切开、**根本没执行到目标**，
-    而报出的 `'C:\Users\Admin\Desktop\DSH' 不是内部或外部命令` 是"我调用错了"的信号，**不是被检对象的问题**（铁律 7 同族）。
-    ★ 顺带：本机 `wmic` **已不存在**（读进程改用 `Get-CimInstance Win32_Process`）。
+19. **dev 模式**：启控制面时带 `DSH_SWITCHBOARD_DEV=1` ⇒ 每一代都"沙箱全开 + 审批 never"（**真全开**）。
+20. **换代真触发点 = 控制面 `:31800` 的 `?cmd=handover`**（**不是** `:3080`）；**异步 ⇒ 必须轮询 `?cmd=status`**；
+    成功 = `lease.json` 的 `activeGen/pid/generation` 都变 + 台账 `success` + **前门健康**。
+    ★ `preset` ≠ `profile`；★ 要生效**必须重启控制面本身**；★ **谁的进程谁重启**。
+21. **门层的票**：**别自拼 `record --paths`**；走 `git add` → 试提交（门自动开票）→ `approve <票>` → 再提交。
+22. **控制面 `?cmd=` 命令面**：`handover`/`assembly`/`mgmt`/`status`/`preflight`/`result`/`flow`/`panel`/`fail`
+    （除 `handover` 系与 `preflight` 外都**同步只读**）。
+23. **★★★ `.cmd` 输出是 GBK(936)** ⇒ 必须 `new TextDecoder('gbk')`；按 utf8 读 ⇒ **假绿**（判据要**两路并存**）。
+    ★ 测含空格的路径**必须加引号**（不加 = 根本没执行到目标，报错信息是"我调用错了"的信号）。
 
 ## 铁律（违反会立刻坏事）—— **一行式；全文与证据见 `topics/lessons-learned.md`**
 
@@ -125,9 +114,8 @@
 33. **★★★ 【文案诚实地写了"不确定"】≠【判据诚实地处理了"不确定"】**：文案只进 `detail`、不进 `ok` ⇒ 白写。
     ⇒ 凡"可能读不到"的判据，`ok` 必须**三分**：`true` / **`unknown`（不判红、显式记、复探）** / `false`。
     ★ **`unknown` 不许当"通过"**（假绿，铁律 14）；也**不许当"失败"**（假红）。★ 判据的"不确定"必须能被**下游读到并分流**。
-34. **★★★ 判断"现役被影响了"之前，先排除【控制面自己把通道占了】**：`mgmt.ts:159` 的 `spawnSync` **同步阻塞事件循环**
-    ⇒ 派活期间代理转发被拖住（实测 `n=90 ok=83 err=7`，`p95=0.66s` 但 **`max=8.23s`**）。
-    ★ 消融法：**同代码、同探针、只换"谁拉起的"**。
+34. **★★★ 判断"现役被影响了"之前，先排除【控制面自己把通道占了】**（`mgmt.ts` 同步 spawn 阻塞事件循环）。
+    ★ 消融法：**同代码、同探针、只换"谁拉起的"**（实测 `n=90 ok=83 err=7`，`p95=0.66s` 但 **`max=8.23s`**）。
 35. **★★★ 问设计岔路之前，必须先把【当前命令面/现状】摆出来**（用户：*"我不知道现在有哪些命令"*）
     ⇒ 凡"该选甲还是乙"：先摆 ① 有哪些动词 ② 各起什么效果 ③ 改了会动到什么，**再**问选哪个。
 36. **★★ 逃生阀必须有台账**：① 默认关闭、**要显式动词**触发 ② **每次使用记账留痕** ③ 上线即可审计。
@@ -171,6 +159,7 @@
       ③ 给该门补**阳性对照**（"已知样本必须在被检列表里"）—— 防这类假绿的**唯一**可靠手段。
     · ★★ **缩进本身不带"我在哪个块里"** ⇒ 判"顶层派发"必须**按块结构**判，放松成"任意缩进"会**造假红**。
 
+
 ## ★★★ 当前主线：自进化闭环（**施工从这三份开始读**）
 
 | 想做什么 | 读哪份 | 说明 |
@@ -179,94 +168,72 @@
 | 训练场 + Agent 工厂 | `docs/training-ground-and-skill-sieve-2026-09-25.md` | 筛网口径（三级公民）/ 自进化的定义 / 完整流程 |
 | **闭环现状与命令** | `.workbuddy/memory/topics/next-task-handover.md` | **接手先读**；顶部 = 本轮回执 |
 
-### ★★ 当前施工棒次：R1–R5 根因链条（**旁路拆除**，见 `docs/handover-bypass-structural-diagnosis-2026-09-26.md` §4）
+### ★★ R1–R5 根因链条（**旁路拆除**，全文见 `docs/handover-bypass-structural-diagnosis-2026-09-26.md` §4）
 
 > 总背景：**换代机制本身是好的、而且真的在跑**；是一条**旁路**（`arm-up` → `isolated-instance --force`）
 > 绕过了整台机器 ⇒ 逐个修症状越修越多（一条旁路、六个症状）。**根因修法，不是补丁。**
 
-| 棒 | 内容 | 状态 |
+| 棒 | 内容 | 状态 / 封条 |
 |---|---|---|
-| **R1** | `spawnGen` 的 `DSH_HOME` 从"继承 `process.env`"⇒ **显式必填入参** | ✅ `06739e4`（R0，封条 `pa-20260926-f6875c`） |
-| **R1.5** | 摆放（`WORK_DIR`/`coordDir`/`genAssembly`）**必须与 home 同源** ⇒ 影子依赖变被检查约束 | ✅ `92449dd`（R0，封条 `pa-20260926-2f5c08`） |
-| **R2** | 起代一律走 `?cmd=handover`；`--force` 只由显式 `--rebuild` 触发（+记账） | ✅ `55ce17d` + `3f1a362` |
-| R3 | `ensureActiveLease()` 加 `pidAlive` 活体守卫 | ✅ `a64bed1`（R0，封条 `pa-20260927-8bdbf5`）—— ★ 含**同族第二半**（`pool.pruneDead` 死代码接线） |
-| R4 | `mgmt.ts:159` 的 `spawnSync` ⇒ 异步 spawn + 轮询 | ✅ `6be53af`（R0，封条 `pa-20260927-580b56`） |
-| R5 | ⑦ 的 `ok` 三值化（`ok`/`unknown`/`false`，铁律 33） | ✅ 本轮做（详见下方 R5 索引块）—— ★ 原来是 `ok`/`slow`/`unreachable`，落地时定为**第三值叫 `unknown`** |
+| R1 | `spawnGen` 的 `DSH_HOME` ⇒ **显式必填入参** | ✅ `06739e4`（R0 `pa-20260926-f6875c`） |
+| R1.5 | 摆放必须与 home **同源** ⇒ 影子依赖变被检查约束 | ✅ `92449dd`（R0 `pa-20260926-2f5c08`） |
+| R2 | 起代一律走 `?cmd=handover`；`--force` 只由显式 `--rebuild` 触发 | ✅ `55ce17d` + `3f1a362` |
+| R3 | `ensureActiveLease()` 加 `pidAlive` 活体守卫（+ 同族 `pool.pruneDead` 接线） | ✅ `a64bed1`（R0 `pa-20260927-8bdbf5`） |
+| R4 | `mgmt.ts` 的 `spawnSync` ⇒ 异步 spawn + 轮询 | ✅ `6be53af`（R0 `pa-20260927-580b56`） |
+| R5 | ⑦ 的 `ok` 三值化（第三值定为 `unknown`） | ✅ 本轮做 |
 
-★ **细节已逐字下沉**到 `topics/current-status.md` 的
-「附录：MEMORY.md 2026-09-26 第四次瘦身前的正文」（append-only，**一条没删**）。
-本文件只留**索引**；要动手前先读那份。
-★ **R1/R1.5/R2 已修掉"一条旁路 ⇒ 六个症状"的根因**（EADDRINUSE / 僵尸 lease / 复活死 pid /
-现役也撞 / ⑦ 假红 / `poolPort=none`）⇒ 上表留作**判据依据**（为什么当初不该逐条修症状）。
-★★★ **纪律（用户 2026-09-26 点破）**：*"我不在乎什么最小可行修法或者是最大可行修法，
-**我只要你干净的**……我哪怕你重写都无所谓"* ⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。
-
-**未闭合**（启动器 / 哨兵 / 判据缺口 / 既存红 / 并发安全 …十余条）详见 `topics/current-status.md`。
-★ ★★★ **更正（2026-09-27 实测）：现役【只上线了 architect 一席】，dev/review 从未注册。**
-  逐字证据：`~/.dsh/switchboard/gen-3082/boot.log` 里只有
-  `[subagent-council] 已注册席位 "architect" ⇒ provider="council-architect"` **一条**，零 `dev`/`review`。
-  根因：`packages/subagent-council/cordis.patch.yml` 是 `seat: architect`（`seats: []`），
-  且 `~/.dsh/profiles/web/cordis.patch.yml` **没有覆盖它**；那两席只在**隔离实例**挂过
-  （`out/_evoseats-test/a/dshhome/profiles/web/cordis.patch.yml:70-77`）。
-  ⇒ 本文件此前写的"**三席已上线**"是**假绿**（铁律 11：判机制有没有在跑 ⇒ 去历史记录里数「判据为真的次数」）。
-  ★ 三席的**代码与 persona 契约都已就位**（段数 六/七/六，G10/G11 门在跑），**只是没挂进现役 profile**。
-  ★ 若要上线：加 `evo-dev`/`evo-review` 两条 insert ⇒ ★ **必须用不同 id**（`subagent-council` 这个 id
-  已被包内 patch insert 过 ⇒ 重复 insert = `duplicate loader entry id` = 整树装配失败，铁律 2）。
-★ **座位相关的一切，先读 `docs/agent-seats-spec-2026-09-26.md` 与
-`packages/subagent-council/src/index.ts` 的 `SEAT_PERSONAS`（单一真相源）。**
+★ **R1/R1.5/R2 已修掉"一条旁路 ⇒ 六个症状"的根因**（EADDRINUSE / 僵尸 lease / 复活死 pid / 现役也撞 / ⑦ 假红 / `poolPort=none`）
+⇒ 上表留作**判据依据**（为什么当初不该逐条修症状）。
+★★★ **纪律（用户 2026-09-26）**：*"我不在乎什么最小可行修法或者是最大可行修法，**我只要你干净的**"*
+⇒ ★ **不许把补丁说成方案**；**先问"病根在哪"**。
+★ **R3/R4/R5 全文 + 部署陷阱见 `topics/current-status.md` 尾部**。三条最易踩：
+① **换代只换代、不换控制面**（`main.ts` 在控制面进程里 ⇒ 改它必须 `arm-up.mjs --stop` → `--live`）；
+② **控制面与前门同进程**，`--live` **幂等**；③ **池剪枝只能走真实 `stand` 路径验证**（注入 `pool.json` 必假绿）。
 
 ### ★★★ 2026-09-27 已落地：O8「席位只读」⇒ 机制层约束（`cc702de`）
 
-一举两得：①**修掉 persona 约束落不到机制的假约束**（architect 席真写过仓库文件）；
-② 抓到既存**假绿**「三席已上线」——实测**现役只有 architect 一席**。
+修掉"persona 只是话"的假约束（architect 席真写过仓库文件）；顺带抓到既存**假绿**「三席已上线」。
 修法 = `SEAT_TOOL_SCOPE`（architect/review 给 `allow` 白名单 7 个只读工具 ⇒ **fail-closed**；dev 不设限 = 阳性对照）。
 门 = `seats-toolscope`（静态 10/0）+ `seats-toolscope-e2e`（**直调上游** 4/0），都在 `check-all`。
-⚠️ **`packages/*/lib/` 被 gitignore** ⇒ 改源码后**必须重编译 + 换代**才生效。★ 全文在 `current-status.md` 尾部。
+⚠️ **`packages/*/lib/` 被 gitignore** ⇒ 改源码后**必须重编译 + 换代**才生效。
+⚠️⚠️ **2026-09-27 新发现（任务 301，未修）**：`toolFilter` **只在 one-shot 路径生效**；
+**continuable 路径由 continuation manager 组装、不查 `provider.capabilities`** ⇒ **席位只读被静默绕过**
+（消融实证：continuable 下 evo_review 真跑 `pwsh`；one-shot 下同一提示被拒）。★ 全文在 `current-status.md` 尾部。
 
-### ★★★ 2026-09-27 已落地：R3「真相源不许指向死进程」（`a64bed1`）
+### ★★ 三席上线状态（**2026-09-27 更正后的事实**）
 
-`lease.json` 是"现役是谁"的真相源 ⇒ 被写上死 pid 会污染前门/池/promote precheck。**两半性质不同**：
-- **半一 `ensureActiveLease()`** = **家族内不一致，不是活的 bug**（现役唯一调用点紧跟 `spawnGen`，pid 必活）；
-  但同文件四条路（`:287/:412/:677/:1003`）都先探活 ⇒ 补守卫 + 返回值改 `bool` 让调用方**能分流**。
-- **半二 `pool.pruneDead()`（`pool.ts:138`）** = **真·死代码缺口**：实现+单测都有、**零生产调用**
-  ⇒ `?cmd=pool` 会把**已崩的哨兵显示给用户**。修法：`pruneStaleSentinels()` 接线 + `pruned` 字段如实回传。
-- 门 = `scripts/switchboard/test-lease-liveness-guard.mjs`（**16/0**），在 `check-all`。
+★ **现役已是三席**（`1566527`，`gen-3083`，boot.log 三行注册齐）—— 此前那句"假绿"已于本轮闭合。
+★ 三席 persona/契约的**单一真相源** = `packages/subagent-council/src/index.ts` 的 `SEAT_PERSONAS`；
+  座位相关的一切先读 `docs/agent-seats-spec-2026-09-26.md`。
+★ 加新席位 ⇒ **必须用不同 id**（`subagent-council` 已被包内 patch insert 过；重复 = `duplicate loader entry id` = 整树装配失败，铁律 2）。
 
-### ★★★ 2026-09-27 已落地：R4「管理面不许阻塞事件循环」（`6be53af`）
+### ★★★ 用户架构愿景：**一人公司**（2026-09-27，**决定后续所有设计**）
 
-`mgmt.ts` 的 `execAction` 用 `spawnSync` ⇒ **同步阻塞事件循环**；而**控制面与前门同进程**
-⇒ 管理面跑长命令时前门转发被拖住（实测 `p95=0.66s` 但 **`max=8.23s`**）。
-修法 = `execActionAsync`（**安全属性一个字不动**：仍 `argvFor` 数组 / 仍 `childEnv` / 仍不经 shell / 仍超时）。
-门 = `scripts/switchboard/test-mgmt-nonblocking.mjs`（**15/0**，**行为**判据：量事件循环 drift）。
-**强证据是受控对照**：同步 n=1/1553ms vs 异步 n=87/6ms（**264×**）；live 侧 action 只 50~60ms ⇒ 判据弱（已如实标注）。
-
-### ★★★ 2026-09-27 已落地：R5「⑦ 的 `ok` 三值化」（铁律 33 原文场景）
-
-`arm-up.mjs` 的 ⑦ 诚实写在 `detail` 里分辨「探不通 ≠ 探得通但答错」，**但 `ok` 只有 true/false**
-⇒ 两种情形同形 ⇒ **下游（只看 exit code）归因能力为零**。
-修法 = **只加不换**：`ok` 语义一字节不改，每行**新增 `status` 三值**（`ok`/`unknown`/`false`），
-`--json` **顶层**显式带 `liveStatus`/`liveKind`/`liveAttributableToFront`。
-★ **`unknown` 不许当通过、也不许当失败**（铁律 14/33）⇒ 下游只改**归因文案**，**拒跑不变**。
-门 = `scripts/switchboard/test-selfcheck-tristate.mjs`（**26/0**）；运行时实证 = `out/_r5-runtime-verify.mjs`（**9/0**，含**正交对照**）。
-★ 前置结构修：`arm-up.mjs` 原先**不可 import** ⇒ 加 `isMain` 守卫（**铁律 44 的现场**）。
-
-★ **R3/R4/R5 三段全文（含部署事实与我的假红假绿）都在 `topics/current-status.md` 尾部**，本文件只留上表。
-⚠️⚠️ **两条部署事实**（R3 期间实测）：① **换代只换代，不换控制面** —— `main.ts` 在控制面进程里，
-`?cmd=handover` **不重启它**（实测换代后 `?cmd=pool` 仍无 `pruned`）⇒ **改 `main.ts` 必须
-`arm-up.mjs --stop` → `--live`**；② **控制面与前门同进程**，且 `--live` **幂等**（已应答就只自检不重启）。
-★★★ **反面教材（我的假红）**：往 `pool.json` **注入**死哨兵测剪枝 ⇒ 必然 `pruned:[]`
-（`PoolStore` 内存缓存 state + 单一写者 ⇒ 注入到不了活实例、反被 `commit()` 覆盖）
-⇒ **池剪枝只能走真实 `stand` 路径验证**；陷阱已钉进门里（B7）。
+用户原话：*"让用户只和一个 AI 进行讨论，然后这个 AI 去统一调度整支……整个一人公司一样，
+公司内部又划分好像正式的公司一样的职能……他只需要将对应的部分的内容提交给对应的部门，
+**对应的部门内部自己去运转**。比一个人想到什么给什么好得多。"*
+★★★ **配套裁决（同日，推翻了机械路由方案）**：
+*"直接互相发任务不就好了，你这个机械判有什么依据吗，还不是你这个 LLM 编排的，**为什么不让 LLM 自己决定谁发言呢**"*
+⇒ ★ **纪律：机器不许替 LLM 做语义判断**。"该派给谁"是**语义判断** ⇒ 只能由 LLM 做；
+  我们只提供**可执行的事实**（有哪些部门 / 各自管什么 / 交付形状 / 工具域）⇒ 落点 = `AGENTS.md` 花名册。
+★ **机制事实（已核上游源码）**：`send_message`/`interrupt_agent` 是**全局命名工具**，目标可为
+  "your direct child **or a deeper agent created under you**" ⇒ **席位之间可直接互发**；
+  但**发消息不打断当前轮**（"it cannot redirect work already underway"）⇒ 忙碌席位会**排队**。
+★ **AGENTS.md 注入机制**：`@deepseek-ai/dsh-agent-instructions` 在**首次请求组装时**注入
+  （**不是** `session.create` 时 —— 只 create 不发消息 ⇒ 零 instructions，曾因此吃**假红**）；
+  以 `<system-reminder>` 包 `createUserMessage`、`kind:"agent-instructions"`、**住在 `request/header`**
+  ⇒ **每次请求重发**（属"脸"，按铁律 24 重复计费）。文件变了**热更新**。
+★ **已落地件**：`scripts/seats/gen-roster.mjs`（生成器，幂等，`--check` 检漂移）
+  + `AGENTS.md`（花名册，**2,734 B ≈ 900 token**）+ `scripts/seats/seat-contract.mjs` 的职责边界解析扩展。
+  ★ 契约**从 persona 源码解析**，**不许手抄第二份**（G0 单一真相源）；解析失败 **fail-closed**。
 
 ### ★★ 未决设计岔路：「秘书席 / 公司隐喻」（用户 2026-09-27 提出，**待用户定**）
 
-用户提议加一个**秘书席**（记录归纳对话 + 专职与其它 agent/席位沟通），把系统做成"公司"。
-★ **机制事实**（已核上游源码）：`report` 只解析 **"the reporting child's live direct parent"**
-⇒ **通信只在【父↔直接子】之间、方向向上**；**没有同层对等通道**（兄弟席位不能直接对话）。
-⇒ **"部门"存在、"转交"能沿【树】做，但不能【平级转交】。**
-我的判断：① "整理归纳"本质是**上下文压缩**，`conveyor-context` 已在做；
-② 多一层转发 ⇒ **信息损耗 + 重复动作**（用户级记忆 §4 的教训）；③ "转交给对应部门"里的**"对应"是判断**
-⇒ 落在哪层就是**又一处可假绿处**；④ **先让多部门真的存在**（dev/review 上线，见上文），再谈专职协调位 ——
+用户提议加**秘书席**（记录归纳对话 + 专职沟通），把系统做成"公司"。
+★ **机制事实**：`report` 只解析 **"the reporting child's live direct parent"** ⇒ **通信只在【父↔直接子】、方向向上**；
+  **没有同层对等通道** ⇒ **"部门"存在、"转交"能沿【树】做，但不能【平级转交】。**
+我的判断：① "整理归纳"本质是**上下文压缩**，`conveyor-context` 已在做；② 多一层转发 ⇒ **信息损耗 + 重复动作**；
+③ "转交给对应部门"里的**"对应"是判断** ⇒ 又一处可假绿处；④ **先让多部门真的存在**，再谈专职协调位 ——
 否则是"给只有一个人的公司设秘书岗"。★ 若要推进，最该做的是**把"转交"落成显式可审计记录**（唯一不能靠 prompt 解决的部分）。
 
 ## ★ 归属与前史（**别把上游的矛盾写成自己的罪状**）
