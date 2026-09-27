@@ -13,41 +13,35 @@
 > ⚠️ 铁律编号**不复用**（跨文件引用靠编号：lessons-learned 与日更里都按这套号说话）。
 > ★ **瘦身操作手册**：全文逐字下沉到 `topics/lessons-learned.md` 或 `topics/current-status.md`，本文件只留**一行索引**。
 
-## 环境约束（本机工具层）—— **压缩版；全文见 `topics/lessons-learned.md` 附录**
+## 环境约束（本机工具层）—— **一行式；全文见 `topics/lessons-learned.md` 附录**
 
-> ★ 2026-09-27 从本文件下沉（原 5,152 B ⇒ 现 ~1.6KB）。**动手前若有疑问，去读附录的逐字版。**
+> ★ 2026-09-27 二次下沉（原 5,152 B ⇒ 1.6KB ⇒ 现 ~1.1KB）。**动手前若有疑问，去读附录的逐字版。**
 
-1. Bash 开头先修 PATH（System32 / Windows / usr bin / nodejs / Git cmd）。
-2. **PowerShell 通道基本不可用**（stdout 被吞；node spawn 是 ENOENT）⇒ 自动化走**纯文件通道**；
-   ★ 但 `Get-CimInstance Win32_Process` **可用**（读进程身份用它；本机 `wmic` 已不存在）。
-3. **不能在工具内起长期服务** ⇒ 例外 `scripts/relaunch-switchboard.cmd`（计划任务 ⇒ 跨调用存活），
-   但它**在本 shell 会阻塞** ⇒ 当**后台任务**跑 + **另开一次调用**看端口/探针。派活前先探 `:3080`。
-4. 排查会话内容**别**把 node stdout 重定向到文件（判为二进制）。
-5. **`grep -oE` / `find` / `timeout` 不可靠** ⇒ 写 node 脚本或用 Grep 工具；限时用 Bash 自带 timeout。
-6. **clone/fetch 用系统 git**（`C:\Program Files\Git\cmd\git.exe`）；PortableGit 写嵌套 ref 静默失败。
-7. **`git -C` 不认 MSYS 路径** ⇒ 一律 `D:/…`（该报错易被误判成"目录不存在"）。
-8. **工作区**：`D:\project_develop` 唯一开发根；`_` 前缀 = 非项目；**远端是唯一真相源**。
-9. **Code Mode**：只能直接调 `run_code`，其余写在程序里 `tools.<name>(...)` ⇒ persona 用**否定+禁止**式。
-10. **同文件并行编辑** ⇒ 后写者按旧快照覆盖（**两边都报成功、静默丢改动**）⇒ **同文件编辑串行** + 改完 grep 验标记。
-11. **`node -e` 带正则/反引号/花括号被 bash 抢插值** ⇒ **写 `.mjs` 再跑**；**发给 DSH 的长消息一律写文件再发**
-    （含反引号/花括号的中文长文本走命令行会被吃掉一半，**退出码仍是 0**）。
-12. **`npm run <script>` 在 Agent shell 被拦** ⇒ 直接 `node scripts/<x>.mjs`。
-13. **构建**：`cd packages/switchboard && node scripts/build.mjs`。
-14. **推送唯一可信判据 = `git ls-remote origin refs/heads/master`**（push 输出与本地 `origin/master` 都会骗人）。
-15. **命令可能被执行两次**（沙箱被拒→提权重跑）⇒ 写入类**按跑两次设计** + 写完**立刻校验**。
-16. **多会话共用仓库 ⇒ 提交有分寸**：先 `git status` 看清哪些不是自己的；`git add <自己的路径>` 为主。
-17. **命令里别混「中文 + Markdown 的 `**` + 重定向」**（曾造出乱名 0 字节文件并被提交）
-    ⇒ 长文本写**消息文件**再 `-F`；`git add -A` 后**扫一眼加了哪些**。
-18. **真日期看 `date`，不看注入的 `<current_time>`**（实测滞后一天以上）。
-19. **dev 模式**：启控制面时带 `DSH_SWITCHBOARD_DEV=1` ⇒ 每一代都"沙箱全开 + 审批 never"（**真全开**）。
-20. **换代真触发点 = 控制面 `:31800` 的 `?cmd=handover`**（**不是** `:3080`）；**异步 ⇒ 必须轮询 `?cmd=status`**；
-    成功 = `lease.json` 的 `activeGen/pid/generation` 都变 + 台账 `success` + **前门健康**。
-    ★ `preset` ≠ `profile`；★ 要生效**必须重启控制面本身**；★ **谁的进程谁重启**。
-21. **门层的票**：**别自拼 `record --paths`**；走 `git add` → 试提交（门自动开票）→ `approve <票>` → 再提交。
-22. **控制面 `?cmd=` 命令面**：`handover`/`assembly`/`mgmt`/`status`/`preflight`/`result`/`flow`/`panel`/`fail`
-    （除 `handover` 系与 `preflight` 外都**同步只读**）。
-23. **★★★ `.cmd` 输出是 GBK(936)** ⇒ 必须 `new TextDecoder('gbk')`；按 utf8 读 ⇒ **假绿**（判据要**两路并存**）。
-    ★ 测含空格的路径**必须加引号**（不加 = 根本没执行到目标，报错信息是"我调用错了"的信号）。
+| # | 遵守什么 |
+|---|---|
+| E1 | Bash 开头先修 PATH（System32 / Windows / usr bin / nodejs / Git cmd）。 |
+| E2 | **PowerShell 通道基本不可用**（stdout 被吞；node spawn ENOENT）⇒ 走**纯文件通道**；★ 例外 `Get-CimInstance Win32_Process` **可用**（`wmic` 已不存在）。 |
+| E3 | **不能在工具内起长期服务**；★ 例外 `scripts/relaunch-switchboard.cmd`（计划任务 ⇒ 跨调用存活）但**在本 shell 会阻塞** ⇒ 当**后台任务**跑 + **另开一次调用**看端口/探针。派活前先探 `:3080`。 |
+| E4 | 排查会话内容**别**把 node stdout 重定向到文件（判为二进制）。 |
+| E5 | **`grep -oE`/`find`/`timeout` 不可靠** ⇒ 写 node 脚本或用 Grep 工具；限时用 Bash 自带 timeout。 |
+| E6 | **clone/fetch 用系统 git**（`C:\Program Files\Git\cmd\git.exe`）；PortableGit 写嵌套 ref 静默失败。 |
+| E7 | **`git -C` 不认 MSYS 路径** ⇒ 一律 `D:/…`（该报错易被误判成"目录不存在"）。 |
+| E8 | **工作区**：`D:\project_develop` 唯一开发根；`_` 前缀 = 非项目；**远端是唯一真相源**。 |
+| E9 | **Code Mode**：只能直接调 `run_code`，其余写在程序里 `tools.<name>(...)` ⇒ persona 用**否定+禁止**式。 |
+| E10 | **同文件并行编辑** ⇒ 后写者按旧快照覆盖（**两边都报成功、静默丢改动**）⇒ **同文件编辑串行** + 改完 grep 验标记。 |
+| E11 | **`node -e` 带正则/反引号/花括号被 bash 抢插值** ⇒ **写 `.mjs` 再跑**；★ **发给 DSH 的长消息一律写文件再发**（中文长文本走命令行会被吃掉一半，**退出码仍是 0**）。 |
+| E12 | **`npm run <script>` 在 Agent shell 被拦** ⇒ 直接 `node scripts/<x>.mjs`。 |
+| E13 | **构建**：`cd packages/switchboard && node scripts/build.mjs`。 |
+| E14 | **推送唯一可信判据 = `git ls-remote origin refs/heads/master`**（push 输出与本地 `origin/master` 都会骗人）。 |
+| E15 | **命令可能被执行两次**（沙箱被拒→提权重跑）⇒ 写入类**按跑两次设计** + 写完**立刻校验**。 |
+| E16 | **多会话共用仓库 ⇒ 提交有分寸**：先 `git status` 看清哪些不是自己的；`git add <自己的路径>` 为主。 |
+| E17 | **命令里别混「中文 + Markdown 的 `**` + 重定向」**（曾造出乱名 0 字节文件并被提交）⇒ 长文本写**消息文件**再 `-F`；`git add -A` 后**扫一眼加了哪些**。 |
+| E18 | **真日期看 `date`，不看注入的 `<current_time>`**（实测滞后一天以上）。 |
+| E19 | **dev 模式**：启控制面时带 `DSH_SWITCHBOARD_DEV=1` ⇒ 每一代都"沙箱全开 + 审批 never"（**真全开**）。 |
+| E20 | **换代真触发点 = 控制面 `:31800` 的 `?cmd=handover`**（**不是** `:3080`）；**异步 ⇒ 必须轮询 `?cmd=status`**；成功 = `lease.json` 的 `activeGen/pid/generation` 都变 + 台账 `success` + **前门健康**。★ `preset` ≠ `profile`；★ 要生效**必须重启控制面本身**；★ **谁的进程谁重启**。 |
+| E21 | **门层的票**：**别自拼 `record --paths`**；走 `git add` → 试提交（门自动开票）→ `approve <票>` → 再提交。 |
+| E22 | **控制面 `?cmd=` 命令面**：`handover`/`assembly`/`mgmt`/`status`/`preflight`/`result`/`flow`/`panel`/`fail`（除 `handover` 系与 `preflight` 外都**同步只读**）。 |
+| E23 | **★★★ `.cmd` 输出是 GBK(936)** ⇒ 必须 `new TextDecoder('gbk')`；按 utf8 读 ⇒ **假绿**（判据要**两路并存**）。★ 测含空格的路径**必须加引号**（不加 = 根本没执行到目标）。 |
 
 ## 铁律（违反会立刻坏事）—— **一行式；全文与证据见 `topics/lessons-learned.md` 附录「铁律全文」**
 
@@ -111,38 +105,23 @@
 36. **★★ 逃生阀必须有台账**：① 默认关闭、**要显式动词**触发 ② **每次使用记账留痕** ③ 上线即可审计。
 37. **★★★ 填细节前，功能必须先落成【带编号的清单】；每条细节必须能写回它服务哪个编号**
    ★ 落法：清单 `F0…Fn` 先写进文档；实现每步写 `→ F<编号>`；写不回去的**删掉**；自检**照编号写**。
-38. **★★★ 模块级"空模板"常量【不许浅拷贝返回】**（`return { ...EMPTY }` 含数组 ⇒ 同进程全实例共享）
-   · 指纹：**单实例单测永远全绿**；`a.others === b.others` 为 `true` ⇒ 确诊。
-   · 修法：`freshEmpty()` 工厂 + `.slice()` + 返回**快照**；**删掉常量**。扫同族：`scripts/scan-shallow-share.mjs`。
+38. **★★★ 模块级"空模板"常量【不许浅拷贝返回】**（`return { ...EMPTY }` 含数组 ⇒ 同进程全实例共享）。
+   指纹：**单实例单测永远全绿**；`a.others === b.others` 为 `true` ⇒ 确诊。修法：`freshEmpty()` + `.slice()` + 返回**快照**。扫同族 `scripts/scan-shallow-share.mjs`。
 39. **★★★ 不许在【用户桌面】上起任何可见窗口做实验**（`start`/GUI/弹窗**一律不许可**；要弹窗**先问**）。
    ★ **换通道前先证明新通道看得见阳性对照**；**一次改多变量后不许归因**。
-   工具：`out/_find-dialog.mjs`（Win32 API **必须显式 CharSet.Unicode**）/ `out/_check-probes.mjs`。
-40. **★★★ 派生物必须被门覆盖，判据要落在【用户真正碰的那个对象】上** ——
-   **最坏的形状 = 被检查的都干净、用户碰的那个没人管**。
+40. **★★★ 派生物必须被门覆盖，判据要落在【用户真正碰的那个对象】上** —— **最坏的形状 = 被检查的都干净、用户碰的那个没人管**。
    ★ 落法：门覆盖派生物 + **指纹重算 & 逐字节比对** + 三态 `PASS/FAIL/SKIP`；**生成器自己把关**。
-41. **★★★ 文本型判据（`indexOf` / 正则）必须做【作用域限定】** —— 跨作用域命中 = **假红**。
-   ① **唯一阶段锚点**标定作用域；② 自证要钉死"为什么改"（**旧写法必须报假红、新判据不报**）；
-   ③ **段名匹配**只认行首标题形且**跳过 ``` 代码块**；④ **先做行尾归一化**（`\r\n`→`\n`）；消融必配**反自证**。
-   ★ **长期假红的门会被当噪音整体绕过 —— 比没有门更糟**。
+41. **★★★ 文本型判据（`indexOf` / 正则）必须做【作用域限定】** —— 跨作用域命中 = **假红**；**长期假红的门比没有门更糟**。
 42. **★★★ "禁止编造"必须落成【可执行判据】** —— 凡产出把**某符号**说成在**某文件/某行** ⇒ **真去那里找**，找不到即红。
-   ★ 判据**必须收窄到"引证"**（放宽成"同段出现文件名+新符号" ⇒ 实测 **6 条发现 5 条误报**）；
-   无引证的新符号**只报 `unlocated` 不判红**（三态）。★ 靠自报抓不住编造，只能机器查。
+   ★ 判据**必须收窄到"引证"**；无引证的新符号**只报 `unlocated` 不判红**（三态）。
 43. **★★★ 【我改了】≠【我认为我改了】—— 讨论优于一次性交接**。凡"我改了"**必须贴产物**（文件:行 / 输出 / diff）。
-   ★ **讨论能工作必须有五条**：① 反驳也带坐标 ② 不许"有道理但先这样"收尾 ③ **「未收敛（分歧保留）」是合法终态**
-   ④ 每轮显式标 `收敛/未收敛` ⑤ "我改了"贴产物。★ **门与讨论不可互替**。
-44. **★★★ 改一个文件的【结构】前，先查"有没有别的门靠它的【现有形态】在工作"**
-   · 修法纪律：① 先 grep 谁在**读这个文件的形态**；② 修完**看那道门的"被检数量/阳性计数"有没有变**；
-   ③ 给该门补**阳性对照** —— 防这类假绿的**唯一**可靠手段。
-   · ★★ **缩进本身不带"我在哪个块里"** ⇒ 判"顶层派发"必须**按块结构**判，放松成"任意缩进"会**造假红**。
-45. **★★★★ 【判据只查"我知道的那个入口" ⇒ 一旦实现有第二条路径就整片失明】**（`ec2d8ae`）。
-   · **纪律（提问式）**：写/审任何判据前先问 **"这条路径是不是【用户真正碰的那条】？它有没有【第二条入口】？"**
-   · ★ 配套：**归因错了 ⇒ 修法也会错**（原记「persona 只是话」，真因是那条路径**从未把 persona 交出去**）。
-   · ★★ 修法要**收敛成单一真相源**；判据要**"跟着委派走"**（认 `this.#x(...)`，不认"随便哪里提到"）⇒ 重构不造假红。
+   ★ **「未收敛（分歧保留）」是合法终态**。★ **门与讨论不可互替**。
+44. **★★★ 改一个文件的【结构】前，先查"有没有别的门靠它的【现有形态】在工作"** —— 修完**看那道门的"被检数量/阳性计数"有没有变** + 补**阳性对照**。
+   ★★ **缩进本身不带"我在哪个块里"** ⇒ 判"顶层派发"必须**按块结构**判（放松成"任意缩进"会**造假红**）。
+45. **★★★★ 【判据只查"我知道的那个入口" ⇒ 一旦实现有第二条路径就整片失明】**（`ec2d8ae`）
+   ⇒ 先问 **"这条路径是不是【用户真正碰的那条】？它有没有【第二条入口】？"**；★ **归因错了 ⇒ 修法也会错**；修法收敛成**单一真相源** + 判据**"跟着委派走"**。
 46. **★★★★ 【"没人清理"必须说清清的是哪个对象】—— 同一个词可能指【内存引用】也可能指【磁盘目录】**
-   · 实例（2026-09-27）：`pruneDead()` **只从内存池摘引用**；磁盘上 54 个死代 `gen-*` 目录 **零删除点、零 `readdirSync`**。
-     ⇒ 我第一版说"零清理机制"**措辞不准**（源码里 `prune` 有 3 处命中）—— 真相是**池干净、盘脏**。
-   · **纪律**：说"有/没有清理"前，先答**"清的是哪个对象"**；**对象错了，整条读数就是假的**（同族 20 口径、32 写入者）。
-   · ★ 佐证：`pool.json` = `{primary:1, sentinel:0, others:[]}`（池干净）vs 盘上 55 个 gen 目录（脏）。
+   ⇒ 实例：**池干净（`pool.json` = 1/0/0）、盘脏（54 个死代目录零删除点）**。**对象错了，整条读数就是假的**。
 
 ## ★★★ 当前主线：自进化闭环（**施工从这三份开始读**）
 
@@ -164,53 +143,42 @@
 
 ### ★★★ 2026-09-27 席位只读的两棒（`cc702de` → `ec2d8ae`）
 
-**棒一（O8，`cc702de`）**：修掉"persona 只是话"的假约束（architect 席真写过仓库文件）；顺带抓到既存假绿「三席已上线」。
-- 修法 = `SEAT_TOOL_SCOPE`（architect/review 给 `allow` 白名单 7 个只读工具 ⇒ **fail-closed**；dev 不设限 = 阳性对照）。
-- 门 = `seats-toolscope`（静态 10/0）+ `seats-toolscope-e2e`（**直调上游** 4/0）。
-
-**棒二（continuable，`ec2d8ae`）= 铁律 40 教科书案例**：**两道旧门全绿，而现役只读席位仍能写仓库** ——
-因为现役委派走的是**另一条路径**。上游两条路径各调 provider 的**不同方法**：one-shot 调 `start()`
-（composition 取 `descriptor.*`，`dsh-subagent:1168`）；**continuable 调 `prepareContinuable()`**（取 `request.*`，`:824`）。
-而 `SeatProvider.prepareContinuable()` 当时逐字 `return Promise.resolve({})` ⇒ **persona+toolFilter 双双丢失**。
-★ **现役默认走 continuable**（`run_in_background` 默认真）= **用户真正碰的那条**。
-★ 修法 = 抽 `#enrich()` 单一真相源，两路共用；门 = `test-seat-toolscope-continuable.mjs`（**8 PASS/0 FAIL**，已进 `check-all`），
-  判据**"跟着委派走"**（认 `this.#enrich(...)`）+ **双向消融自证**。
+**棒一（`cc702de`）**：修掉"persona 只是话"的假约束（architect 席真写过仓库文件）。修法 = `SEAT_TOOL_SCOPE`（只读席给 `allow` 白名单 7 个工具 ⇒ **fail-closed**；dev 不设限 = 阳性对照）。
+门 = `seats-toolscope`（静态）+ `seats-toolscope-e2e`（**直调上游**）。
+**棒二（`ec2d8ae`）= 铁律 45 教科书案例**：**两道旧门全绿，而现役只读席位仍能写仓库** —— 因为现役委派走的是**另一条路径**（one-shot 调 `start()` / **continuable 调 `prepareContinuable()`**，后者当时逐字 `return Promise.resolve({})` ⇒ persona + toolFilter **双双丢失**）。
+★ **现役默认走 continuable** = **用户真正碰的那条**。修法 = 抽 `#enrich()` 单一真相源两路共用；门 = `test-seat-toolscope-continuable.mjs`（**8/0**，已进 `check-all`），判据**"跟着委派走"**（认 `this.#enrich(...)`）+ **双向消融自证**。
 ★ 归因修正：原记「写在 persona 里的约束不是约束」是**错的** —— 真因是这条路径**从未把 persona 交出去**。
 ⚠️ **`packages/*/lib/` 被 gitignore** ⇒ 改源码后**必须重编译 + 换代**才生效。
-★ 全文 + 我踩的三个假红/假绿坑见日更 `2026-09-27.md` 尾部。
-⚠️⚠️ **2026-09-27 新发现（任务 301，未修）**：`toolFilter` **只在 one-shot 路径生效**；
-**continuable 路径由 continuation manager 组装、不查 `provider.capabilities`** ⇒ **席位只读被静默绕过**
-（消融实证：continuable 下 evo_review 真跑 `pwsh`；one-shot 下同一提示被拒）。★ 全文在 `current-status.md` 尾部。
-★ **2026-09-27 已修** = `ec2d8ae`（`#enrich()` 单一真相源）；此条留作**判据依据**（为什么旧门会假绿）。
+★ 全文在工作区日更 `2026-09-27.md` 与 `topics/current-status.md`。
 
-### ★★★ 2026-09-27 运维盘存（用户三问的取证回合，**未动手改任何东西**）
+### ★★★ 2026-09-27 运维盘存（用户三问取证，**只读探针，未改任何东西**）
 
-**问的是**：① 启动为什么混乱（对标 QQ 这种易用 PC 应用）② 决策边界（为什么我不自己拍）③ 能不能抄成熟智能体。
-**取证产物**（都在 `out/`，全是**只读探针**）：`_startup-inventory.mjs` / `_gen-inventory.mjs` /
-`_probe-gen-deletion.mjs` / `_probe-panel2.mjs` / `_architect-verification.md`（核验报告）/
-`_consult-architect-answer.md`（架构师原文）。
+**问**：① 启动为什么混乱 ② 决策边界（为什么我不自己拍）③ 能不能抄成熟智能体。
+**三条实测底账（可复算）**：**启动** = 10 个入口 / 4 种语言 / 1,198 行，三处 **0 字节断头路**，顶层 **README = 0 个**；
+**死代** = 55 个 gen 目录（现役 1 / 死代 54，≈545 KB），★ **池干净、盘脏**（铁律 46）；
+**视图** = `?cmd=panel` → `main.ts:559 panelHtml`（69 行），只覆盖换代/交接 + 端口 ⇒ **视图已在，缺的是覆盖面**。
+**架构师席裁决（已核验）**：Q1 元判断**采纳** / Q2 判据**采纳**（「是否影响用户核心控制权」）/ Q3 **不采纳**（太薄、零具体框架）。
+★ 它引用**部分行号不准**、P0/P1/P2 **出处记错**（真出处 `docs/BUILD.md:141`）；`journal.jsonl` **不存在**。
+★ 取证产物全在 `out/`：`_startup-inventory.mjs` / `_gen-inventory.mjs` / `_probe-gen-deletion.mjs` / `_probe-panel2.mjs` / `_architect-verification.md` / `_consult-architect-answer.md`。
 
-**三条实测底账（都可复算）**：
-- **启动**：**10 个入口 / 4 种语言 / 1,198 行**；三处 **0 字节断头路**（`scripts/start.ps1` **已被 git 跟踪**、
-  根 `start`/`stop` 未跟踪）；`packages/switchboard/package.json` **零启动脚本**；根 package.json 17 个脚本**无 `start`**；
-  顶层 **README = 0 个**（顶层 .md 只有 `AGENTS.md`）⇒ **新人没有"从这里开始"**。
-- **死代**：`coordDir = C:\Users\Admin\.dsh\switchboard`，**55 个 gen 目录 / 现役 1 / 死代 54**；
-  字节 现役 83.7 KB + 死代 461.7 KB = 545.4 KB。★ **池干净（`pool.json` = 1 primary/0 sentinel/0 others），盘脏**
-  ⇒ 见铁律 46。
-- **视图**：`?cmd=panel` → `main.ts:559 panelHtml`（69 行），`<title>` = **「DSH 三脑 · 交接投影」**；
-  只覆盖 **换代/交接 + 端口**；**哨兵/池、死代、清理、健康、可用性 全部零命中**。
-  ⇒ 架构师说"补聚合状态视图"**方向对**，但我修正：**视图已在，缺的是覆盖面**（从"只讲交接"扩到"讲可用性"）。
+### ★★★ 2026-09-27 席位定义外置 + 向外部市场格式「**兼容**」迁移（**本轮主线，全文见 `topics/current-status.md` 尾部**）
 
-**架构师席裁决（已核验）**：Q1 元判断**采纳**（"混乱的不是启动，是我们对服务生命周期要求超常规"）；
-Q2 判据**采纳**（「是否影响**用户核心控制权**：能否撤销/感知/回退」）；
-Q3 **不采纳**（太薄、零具体框架，"抄了就要放弃自进化"= 自证类比不成立）。
-★ 它的引用**部分行号不准**、P0/P1/P2 **出处记错**（真出处 `docs/BUILD.md:141`）；`journal.jsonl` **不存在**。
+★ **用户定的性质 = 兼容，不是照抄**：原话 *"我们的范围不是比它更广吗？我们的 Skill Tree 的字段不是完全包括它吗？……我们还有**工具面**等的设定 ⇒ 我们要的是**兼容它**。"*
+⇒ 落法 = 我们的 schema 是它的**超集**（它只有 3 个 frontmatter 字段；我们有 8 个必需章节 + 工具档位 + provenance 四项 + **F5 一致性门**）。
+★ **迁移目标 = 把硬编码换成"一份源 → 生成物 → CI gates drift"**（对齐它的可移植原则⑤）。
+★ **落地形态**：`seats/schema.json`（规格）+ `seats/library/*.md`（源）+ `scripts/seats/gen-seat-registry.mjs`（生成器）
++ `seat-registry.generated.ts`（生成物）+ **两道门**（`seat-definitions` + `seat-registry-drift`）。
+★ **provider 名 = 席位唯一名** = `council-architect` / `council-dev` / `council-review`（旧短名走**垫片**）。
+★ **未闭合（必须报）**：① `seat-contract.mjs` 源切换**仍在 DSH（`ZyXHyy`）手里**（旧源 `/api/...` 已失效 ⇒ 抛错）；
+② `seats-check.mjs` ②③ 红 —— **根因已查明 = 迁移真的改了内容**（新 md 无旧 persona 章节名）⇒ **需显式裁决**；
+③ **F5b 消融上次 sed 空转 ⇒ 不算通过，待重做**；④ 本棒改动**尚未提交**。
 
 ### ★★ 三席上线状态（**2026-09-27 更正后的事实**）
 
 ★ **现役已是三席**（`1566527`，`gen-3083`，boot.log 三行注册齐）—— 此前那句"假绿"已于本轮闭合。
-★ 三席 persona/契约的**单一真相源** = `packages/subagent-council/src/index.ts` 的 `SEAT_PERSONAS`；
-  座位相关的一切先读 `docs/agent-seats-spec-2026-09-26.md`。
+★ 三席 persona/契约的**单一真相源（迁移后）** = `seats/library/*.md` ⇒ 经 `gen-seat-registry.mjs` 生成到
+  `packages/subagent-council/src/seat-registry.generated.ts`。**别再手改生成物**（第二道门会报漂移）。
+★ 转座位相关先读 `docs/agent-seats-spec-2026-09-26.md`。
 ★ 加新席位 ⇒ **必须用不同 id**（`subagent-council` 已被包内 patch insert 过；重复 = `duplicate loader entry id` = 整树装配失败，铁律 2）。
 
 ### ★★★ 用户架构愿景：**一人公司**（2026-09-27，**决定后续所有设计**）
@@ -236,35 +204,26 @@ Q3 **不采纳**（太薄、零具体框架，"抄了就要放弃自进化"= 自
 ③ "转交给对应部门"里的**"对应"是判断** ⇒ 又一处可假绿处；④ **先让多部门真的存在**，再谈专职协调位 ——
 否则是"给只有一个人的公司设秘书岗"。★ 若要推进，最该做的是**把"转交"落成显式可审计记录**（唯一不能靠 prompt 解决的部分）。
 
+## 主题索引（**按需读**，全在 `.workbuddy/memory/topics/`）
+
+**接手指南（下一项）** `next-task-handover.md`（**新会话先读，顶部 = 回执结构**） ·
+**教训全文 / 铁律证据** `lessons-learned.md` ·
+**当前状态 / 未闭合** `current-status.md` ·
+`runtime-and-launch.md`（端口/启动器/凭据/会话存储） ·
+`profile-and-gen-integrity.md`（改配置/加插件/换代后能力变了） ·
+`prompt-cache.md` · `compaction-engine.md` · `generation-swap.md` · `self-evolution-design.md` ·
+`project-governance.md`（资产边界**别重造**/文档可信度） · `asset-topology.md`（分不清资产/副本） ·
+`tool-refinement-handover.md`（另一条线 L2~L4） · `architecture-handover.md`（另一条线：三角色 + 三段流水线）
+
+**入口级文档**：`docs/revised-architecture-2026-09-20.md`（架构权威记录） / `docs/ideas-spec.md` /
+`docs/self-evolution-gap-analysis.md`（缺口 G1–G8） / `docs/where-we-are.md` / `docs/main-chain-ledger.md`。
+
 ## ★ 归属与前史（**别把上游的矛盾写成自己的罪状**）
 
 - `D:\project_develop\ai-base`（Go，**用户的前一个项目**）= 多条设计的先例来源（内含 `agent-shell`）。
 - **fork / 前缀缓存：设计更早是用户的，实现是上游的**（`docs/fork-provenance-ai-base-vs-dsh.md`）⇒ **收敛，不是谁抄谁**。
-- 从 ai-base 拿来、上游没有的两条：① **前缀缓存敏感的凭据轮换**（⇒ 实验硬纪律：**臂间与轮内都不许轮换凭据/池**）；
-  ② `stripTrailingUnpairedToolCalls` 的两个用例。
-- `ai-base/AGENTS.md` 三条：不直接读写 `graph.json`；**策略（压缩/融合/评分维度）必须走接口**；
-  **不跨层调用**（从 DSH 侧够过去只能走 MCP 面）。
-
-## 主题索引（**按需读**，全在 `.workbuddy/memory/topics/`）
-
-| 主题 | 文件 | 什么时候读 |
-|---|---|---|
-| **接手指南（下一项）** | `next-task-handover.md` | **新会话接手先读这个**（顶部 = 回执结构） |
-| 教训全文（环境约束+铁律的证据 + 瘦身前存档） | `lessons-learned.md` | 要引用实证细节 / 追"为什么定这条" |
-| 当前状态 / 下一步 | `current-status.md` | 接手前看进度：到哪了、未闭合项 |
-| 运行时与启动 | `runtime-and-launch.md` | 端口 / 启动器 / 凭据 / 会话存储格式 |
-| profile 与 gen 一致性 | `profile-and-gen-integrity.md` | 改配置 / 加插件 / 换代后能力变了 |
-| prompt 缓存 | `prompt-cache.md` | 命中率、四类前缀改写源、指标口径 |
-| 压缩引擎 | `compaction-engine.md` | 压缩补丁、兜底契约、诊断埋点 |
-| 换代 vs 重启 | `generation-swap.md` | 要替换代码时、三级策略、写入竞态 |
-| 自进化设计 | `self-evolution-design.md` | 判据阶梯、能力库、委派、多模型会议室 |
-| 项目治理 | `project-governance.md` | 资产边界（**别重造**）、文档可信度 |
-| 资产拓扑 | `asset-topology.md` | 分不清资产/副本、**design-canvas 真身与副本** |
-| 工具完善（另一条线） | `tool-refinement-handover.md` | 派给另一会话全权执行（L2~L4） |
-| 架构线（另一条线） | `architecture-handover.md` | 第三条线（三角色 + 三段流水线） |
-
-**入口级文档**：`docs/revised-architecture-2026-09-20.md`（当前架构权威记录） / `docs/ideas-spec.md`
-/ `docs/self-evolution-gap-analysis.md`（缺口 G1–G8） / `docs/where-we-are.md` / `docs/main-chain-ledger.md`。
+- 从 ai-base 拿来、上游没有的两条：① **前缀缓存敏感的凭据轮换**（⇒ 实验硬纪律：**臂间与轮内都不许轮换凭据/池**）；② `stripTrailingUnpairedToolCalls` 的两个用例。
+- `ai-base/AGENTS.md` 三条：不直接读写 `graph.json`；**策略（压缩/融合/评分维度）必须走接口**；**不跨层调用**（从 DSH 侧够过去只能走 MCP 面）。
 
 > ⏭ **交接**：新会话接手 → 先读 `topics/next-task-handover.md`（自包含；顶部即本轮回执）。
 > 下一项、未闭合项、操作纪律、验证命令**全在那里**；本文件只放**每次都要遵守**的东西。

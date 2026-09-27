@@ -180,7 +180,10 @@ const KNOWN = [
   },
   {
     id: 'council-architect', package: '@dsh-brain/subagent-council', path: 'packages/subagent-council',
-    provider: 'council-architect', tool: 'council_architect', seat: 'architect',
+    // ★★★ 2026-09-27 迁移：`seat` 从旧短名 `architect` 改成**席位唯一名** `council-architect`
+    //   （= `seats/library/council-architect.md` 的 `name`，也 = provider 名）。
+    //   ★ `provider`/`tool`/`id` **本来就已经是正确值**（architect 席迁移前后同名）⇒ 未动。
+    provider: 'council-architect', tool: 'council_architect', seat: 'council-architect',
     /**
      * 架构师 = **设计者**席位 ⇒ writeScope 不得为 production（L1 硬检查）。
      * 诚实的值是 workspace：v1 不削减 in-process driver 工具集（见 SeatProvider 注释），

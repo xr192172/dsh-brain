@@ -8,7 +8,11 @@
  *                    的**覆盖块**且 `seats` 含三席  ⇒ provider 才被注册
  *                    （包内默认只有 `seat: architect`！）
  *     ② preset       `~/.dsh/.agent-presets/council/agent.cordis.yml` 里有**三条工具行**
- *                    （council-architect / evo-dev / evo-review）⇒ 模型手里才有工具
+ *                    （council-architect / council-dev / council-review）⇒ 模型手里才有工具
+ *                    ★★★ 2026-09-27 迁移：provider 名从 `evo-dev`/`evo-review` 变成
+ *                    **席位唯一名** `council-dev`/`council-review`（真相源 = `seats/library/*.md`，
+ *                    经生成物 `packages/subagent-council/src/seat-registry.generated.ts`）。
+ *                    ⇒ **host plane 的 preset 必须同步改**，否则这两席变成**悬空 provider**。
  *     ③ 运行时       前门真起的代数里，boot.log 认得三席注册；且**工具面**里三个名字都在
  *
  *   ★ 三处里任一处对了、另一处没对，都是**最坏的形状**：
@@ -20,15 +24,16 @@
  *     A1 profile 有覆盖块且 seats 恰为三席（**不是** insert；insert 会 duplicate id，铁律 2）
  *     A2 profile 的覆盖块**重述了完整 config 四字段**（patch 是整体替换，不是深合并）
  *     A3 preset 有三条工具行，且 provider 名与 ① 注册的名字**对得上**
- *     A4 preset 的 `evo_dev`/`evo_review` **未被 disabled**（否则等于没挂）
- *     A5 ★★ **没有第四处**：两处文件里不存在指向 `evo-*` 的**额外** provider 名（防漂移）
+ *     A4 preset 的三条工具行**未被 disabled**（否则等于没挂）
+ *     A5 ★★ **没有第四处**：两路并查 —— ① `evo-*` 残留必须为 **0**（迁移没清干净的信号）
+ *                  ② `council-*` 里没有计划外的名字
  *   B 组 **交叉一致性**（最容易假绿的地方）
  *     B1 profile 里 `seats` 的**每一个**名字，在 preset 里都有对应工具行
- *     B2 preset 里指向 `evo-*`/`council-*` 的**每一个** provider，在 profile 的 seats 里都有
+ *     B2 preset 里指向席位风格的**每一个** provider，在 profile 的 seats 里都有
  *        ⇒ 两个方向都查，才叫"对得上"
  *   C 组 **消融自证**
  *     C1 撤掉 profile 的 seats（退回只注册一个）⇒ B1 必须变红
- *     C2 撤掉 preset 的一条工具行 ⇒ B1 必须变红
+ *     C2 撤掉 preset 的一条工具行（按 **provider 内容**找，不按 id 名）⇒ B1 必须变红
  *     ★ 不撤时必须**仍然全绿**（反自证，防"假红被当成通过"）
  *
  * ★ 本门**不需要服务在跑**（A/B/C 全是静态），所以能在 check-all 里稳定跑。
@@ -48,11 +53,21 @@ const HOME = process.env.DSH_HOME_FOR_SEATS ?? 'C:/Users/Admin/.dsh'
 const PROFILE = path.join(HOME, 'profiles', 'web', 'cordis.patch.yml')
 const PRESET = path.join(HOME, '.agent-presets', 'council', 'agent.cordis.yml')
 
-/** 三席的权威清单（与 packages/subagent-council/src/index.ts 的 SEAT_PERSONAS 对齐）。 */
+/** 三席的权威清单（键=短名；`seats/library/` 里的文件以 `council-` 前缀命名）。 */
 const SEATS = ['architect', 'dev', 'review']
-/** packge 里注册它们用的 provider 名（见 index.ts 的 SEAT_PROVIDER_NAMES）。 */
-const PROVIDER_OF = { architect: 'council-architect', dev: 'evo-dev', review: 'evo-review' }
-const TOOLNAME_OF = { architect: 'council_architect', dev: 'evo_dev', review: 'evo_review' }
+/**
+ * 包里注册它们用的 provider 名（见 `index.ts` 的 `SEAT_PROVIDER_NAMES`）。
+ *
+ * ★★★ 2026-09-27 迁移：provider 名**不再**是 `council-architect` / `evo-dev` / `evo-review`，
+ *   而是**席位唯一名**（= `seats/library/*.md` 的 `name` 字段）——
+ *   见 `packages/subagent-council/src/seat-registry.generated.ts`。
+ *   ★ 这是**判据过时**（源从"index.ts 硬编码字典"搬到"席位定义 md"），**不是**迁移做错了：
+ *   名字的真相源一直**在包里**，本文件只是**引用**它（铁律 21 的分辨）。
+ *   ★ 反证：`evo-` 这个前缀是旧的自进化命名遗物，迁移后**一个都不该剩**（见 A5）。
+ */
+const PROVIDER_OF = { architect: 'council-architect', dev: 'council-dev', review: 'council-review' }
+/** ★ tool 名 = 唯一名的下划线形式（`council-dev` → `council_dev`）。生成逻辑同 `gen-roster.mjs`。 */
+const TOOLNAME_OF = { architect: 'council_architect', dev: 'council_dev', review: 'council_review' }
 
 const results = []
 const check = (n, ok, detail) => {
@@ -166,12 +181,21 @@ const dangling = seatRows.filter((r) => r.provider && !seatsProviderOf.includes(
 check('B2 preset 的席位 provider 都能在 profile 的 seats 里找到', dangling.length === 0,
   dangling.length === 0 ? '无悬空 provider' : `★ 悬空 provider（工具指向没人注册的名字）：${dangling.join(',')}`)
 
-// ─── A5 防漂移：不存在其它 `evo-*` provider 名（第四处接线）──────────────────
+// ─── A5 防漂移：不存在其它席位风格的 provider 名（第四处接线）────────────────
+// ★★★ 2026-09-27 迁移：原来是查「计划外的 `evo-*`」。迁移后 provider 名 = 席位唯一名
+//   ⇒ `evo-*` **一个都不该剩**（残留 = 有地方没跟着迁移 ⇒ 悬空 provider）。
+//   ⇒ 判据改成两路：① `evo-*` 残留数必须为 **0**（与编码无关的正向清零）；
+//                  ② `council-*` 里没有计划外的。
+//   ★ 两路并存（铁律 13 的思想）：① 抓"旧名没清干净"，② 抓"新名乱加"。
 const allProviders = [...new Set([...presetCode.matchAll(/provider:\s*([A-Za-z0-9_-]+)/g)].map((m) => m[1]))]
-const evoLike = allProviders.filter((p) => /^evo-/.test(p))
-const unexpected = evoLike.filter((p) => !Object.values(PROVIDER_OF).includes(p))
-check('A5 preset 里没有【计划外】的 evo-* provider', unexpected.length === 0,
-  unexpected.length === 0 ? `evo-* 共 ${evoLike.length} 个，全部在三席清单内` : `★ 计划外：${unexpected.join(',')}`)
+const evoLike = allProviders.filter((p) => /^evo[-_]/.test(p))
+const councilLike = allProviders.filter((p) => /^council[-_]/.test(p))
+const plannedProviders = Object.values(PROVIDER_OF)
+const unexpected = councilLike.filter((p) => !plannedProviders.includes(p))
+check('A5a preset 里没有残留的 evo-* provider（迁移后应为 0）', evoLike.length === 0,
+  evoLike.length === 0 ? 'evo-* 残留 0 个 ✓' : `★ 残留 ${evoLike.length} 个：${evoLike.join(',')} —— 有地方没跟着迁移`)
+check('A5b preset 里没有【计划外】的 council-* provider', unexpected.length === 0,
+  unexpected.length === 0 ? `council-* 共 ${councilLike.length} 个，全部在三席清单内` : `★ 计划外：${unexpected.join(',')}`)
 
 // ─── C 组：消融自证 ─────────────────────────────────────────────────────────
 /** 纯函数化的判定入口：给定两处源码，返回 B1 是否通过。供消融复用。 */
@@ -200,12 +224,30 @@ const c1 = !b1Holds(profNoSeats, presetSrc)
 check('C1 消融：抹掉 profile 的 seats ⇒ B1 变红', c1,
   c1 ? '撤掉后确实判红 ⇒ B1 判据有效' : '★ 撤掉后仍绿 ⇒ B1 是空转（同义反复）')
 
-// C2 消融：抹掉 preset 的一条工具行（evo-review）⇒ B1 必须变红
-const presetNoReview = presetSrc
-  ? presetSrc.replace(/^\s*- id: tool-subagent-evo-review\n(?:\s+.*\n?)*?^\s+backgroundMode: continuable\n/m, '')
-  : ''
-const c2 = presetNoReview !== presetSrc && !b1Holds(profSrc, presetNoReview)
-check('C2 消融：抹掉 preset 的 evo-review 工具行 ⇒ B1 变红', c2,
+// C2 消融：抹掉 preset 的一条工具行（review 席）⇒ B1 必须变红
+// ★★★ 2026-09-27 迁移：原来正则硬编码 `tool-subagent-evo-review`。
+//   ★ 现在**从 PROVIDER_OF 派生 loader id**（`council-review` → `tool-subagent-council-review`）
+//     —— 但这样只覆盖"id 与 provider 同名"的情形，**够不着"id 名与 provider 名不一致"的漂移**。
+//   ⇒ 改成**按内容找**：在 delegation 组里找**provider 等于 review 席 provider** 的那一条，
+//     删掉它（无论 id 叫什么）。★ 这样消融**不依赖 id 命名**，只依赖"那一行存在且能被识别"。
+const reviewProvider = PROVIDER_OF.review
+const presetNoReview = (() => {
+  if (!presetSrc) return ''
+  const lines = presetSrc.split('\n')
+  // 找到 provider: <reviewProvider> 的行，往上找到它所属的 `- id:` 起始行，往下找到下一个 `- id:` 之前
+  let pIdx = lines.findIndex((l) => new RegExp(`^\\s+provider:\\s*${reviewProvider}\\s*$`).test(l))
+  if (pIdx < 0) return ''
+  let start = pIdx
+  while (start > 0 && !/^\s*- id:/.test(lines[start])) start--
+  if (!/^\s*- id:/.test(lines[start])) return ''
+  let end = pIdx + 1
+  while (end < lines.length && !/^\s*- id:/.test(lines[end])) end++
+  // 连同紧贴其上的注释一起删（保持文件可读，且确保 backgroundMode 那行也被移除）
+  lines.splice(start, end - start)
+  return lines.join('\n')
+})()
+const c2 = presetNoReview !== '' && presetNoReview !== presetSrc && !b1Holds(profSrc, presetNoReview)
+check('C2 消融：抹掉 preset 的 review 席工具行 ⇒ B1 变红', c2,
   c2 ? '撤掉后确实判红 ⇒ B1 判据有效' : '★ 撤掉后仍绿（或没匹配到）⇒ B1 是空转')
 
 // C3 反自证：不撤时 B1 必须仍绿（防"假红被当成通过"）

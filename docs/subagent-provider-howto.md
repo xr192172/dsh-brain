@@ -84,8 +84,13 @@ packages/<你的包>/
     - id: subagent-council
       name: '@dsh-brain/subagent-council'
       config:
-        seat: architect
+        seat: council-architect
 ```
+
+> ★★★ **2026-09-27 起推荐写【席位唯一名】`council-architect`**（即 `seats/library/council-architect.md` 的
+> `name` 字段）。**旧短名 `architect` 仍然可用**（包内有兼容垫片，命中时会在启动日志里大声提示），
+> 但它是**已废弃写法**，后续版本会移除。★ 两席一次挂上时用 `seats: [council-dev, council-review]`。
+> ★ 别在这里写 `provider:` —— provider 名**由包内从席位定义推导**（= 席位唯一名），写死了反而容易漂移。
 
 > **铁律**：不要在 profile 的 `cordis.patch.yml` 里再写同 id 的覆盖块
 > → `duplicate loader entry id` → 整棵插件树装配失败。

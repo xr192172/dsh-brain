@@ -245,7 +245,7 @@ export function judgeSelfCheck({ ports, front, admin, poolLogOk, ownerLogOk, sea
   // ④ ★ 隔离层**真的**在跑（且 deny 非空 —— 空的等于不拦）
   add('④ 隔离层 apply 且 deny ≥ 1', isolationLogOk && denyCount >= 1, `apply=${isolationLogOk} denyRoots=${denyCount}`)
   // ⑤ ★ 两席注册
-  add('⑤ 自进化两席已注册', seatsLogOk, seatsLogOk ? 'evo-dev + evo-review' : '★ 缺席（自进化不可用）')
+  add('⑤ 自进化两席已注册', seatsLogOk, seatsLogOk ? 'council-dev + council-review' : '★ 缺席（自进化不可用）')
   // ⑥ ★ 池在**本段内**（不是包内硬编码的 3101）
   add('⑥ 池端口在本段内', poolLogOk, `期望 ${ports.pool}`)
   // ⑦ 现役仍健康（隔离实例不许把现役搞掉）
@@ -789,7 +789,11 @@ if (isMain) {
   const t = boot?.text ?? ''
   const isolationLogOk = /\[arm-isolation\] apply running/.test(t)
   const denyCount = Number((t.match(/denyRoots=(\d+) 条/) ?? [])[1] ?? 0)
-  const seatsLogOk = /provider="evo-dev"/.test(t) && /provider="evo-review"/.test(t)
+  // ★★★ 2026-09-27 迁移：provider 名 = 席位唯一名（`seats/library/*.md` 的 `name`），
+  //   不再是 `evo-dev`/`evo-review`。boot.log 里包会打印 `provider="council-dev"` 等。
+  //   ★ 判据口径：本行只认**包真的打印了什么**（运行时的诚实读数），不看配置文件 ——
+  //     配置说对了但包没注册（或反过来）都必须被抓到，那正是"看起来上了、其实没有"。
+  const seatsLogOk = /provider="council-dev"/.test(t) && /provider="council-review"/.test(t)
   const poolLogOk = new RegExp(`\\[key-pool-proxy\\] listening 127\\.0\\.0\\.1:${ports.pool}\\b`).test(t)
   // 现役模式还要判"前端可取"（点了就有界面）—— 臂模式不判这条
   let htmlOk = null

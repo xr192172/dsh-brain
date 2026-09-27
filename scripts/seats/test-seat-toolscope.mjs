@@ -52,18 +52,48 @@ check(
 
 // ─── P2 阳性对照：dev 席必须不设限 ───────────────────────────────────────────
 // 这条与"只读席位被挡住"**正交**：它证明限制是"按席位"的，不是"一刀切"。
-const devFull = /dev\s*:\s*["']full["']/.test(codeOnly);
-const architectRo = /architect\s*:\s*["']readonly["']/.test(codeOnly);
-const reviewRo = /review\s*:\s*["']readonly["']/.test(codeOnly);
+//
+// ★★★ 2026-09-27 迁移：**判据的源换了**。
+//   **原先**：正则从 `index.ts` 找三行硬编码字典 `dev: "full"` / `architect: "readonly"`。
+//   **现在**：档位的真相源 = `seats/library/*.md` 的 frontmatter `tools:` 字段
+//     （`index.ts` 里那三行字典**已被删除** —— 那正是用户要清的"硬编码"）。
+//   ⇒ 文本判据锚在**已消失的写法**上会变红，而那是**假红**（铁律 21：判据过时，不是实现错了）。
+//
+//   ★★ 作用域限定（铁律 41，本门 P6 的核心纪律）：只在**每份 md 的 frontmatter 区**里取
+//      `tools:` —— **不许**在全文件里裸匹配（正文里出现 `tools:` 字样不算，那会假绿）。
+//      ★ 顺带消灭"跨席串味"：`council-dev.md` 的正文里若提到 `review` 席，不该影响判定。
+const LIB_DIR = path.join(WT, 'seats', 'library');
+/** 从一份席位定义里取出 frontmatter 的 `tools:` 值。取不到 ⇒ null（调用方判红）。 */
+function toolScopeOf(file) {
+  const p = path.join(LIB_DIR, file);
+  if (!fs.existsSync(p)) return null;
+  const raw = fs.readFileSync(p, 'utf8');
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(raw);
+  if (!m) return null;
+  for (const line of m[1].split(/\r?\n/)) {
+    const i = line.indexOf(':');
+    if (i < 0) continue;
+    if (line.slice(0, i).trim() === 'tools') return line.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+  }
+  return null;
+}
+const devScope = toolScopeOf('council-dev.md');
+const archScope = toolScopeOf('council-architect.md');
+const revScope = toolScopeOf('council-review.md');
+const devFull = devScope === 'full';
+const architectRo = archScope === 'readonly';
+const reviewRo = revScope === 'readonly';
 check(
   'P2 阳性对照：dev 席 = full（不被禁写）',
   devFull,
-  devFull ? 'dev: "full" ⇒ 施工席保留全部工具（若全禁 = 把能力掐死，不是修好）' : '★ dev 席也被限了 ⇒ 阳性对照缺失',
+  devFull
+    ? `council-dev.md 的 tools: "full" ⇒ 施工席保留全部工具（若全禁 = 把能力掐死，不是修好）`
+    : `★ dev 席也被限了（读到 tools=${JSON.stringify(devScope)}）⇒ 阳性对照缺失`,
 );
 check(
   'P2b 只读两侧：architect / review 都是 readonly',
   architectRo && reviewRo,
-  `architect=${architectRo} review=${reviewRo}`,
+  `architect=${architectRo}(${JSON.stringify(archScope)}) review=${reviewRo}(${JSON.stringify(revScope)})`,
 );
 
 // ─── P3 名字真的存在（拿真实工具面核）────────────────────────────────────────

@@ -40,13 +40,22 @@
 写本规格时我查了 `verification-contract.spec.md` 与 `skill-as-agent-spec.md`，
 **但没有查 `packages/subagent-council/`** ⇒ 导致本规格 §2 的部分裁决**与既有实现重复**。现更正如下。
 
-**既有三席**（单一真相源 = `packages/subagent-council/src/index.ts` 的 `SEAT_PERSONAS`）：
+**既有三席**（★★★ **2026-09-27 起真相源已迁移** ⇒ 见下方注记）：
 
-| 席位 | provider 名 | 产出段落（persona 逐字） | persona 里的既有硬约束 |
+> **★ 迁移注记（2026-09-27）**：本表**原先**的真相源是 `packages/subagent-council/src/index.ts` 里的
+> `SEAT_PERSONAS` 硬编码常量；现已迁到 **`seats/library/*.md`**（一席一文件，格式规格 `seats/schema.json`），
+> 经生成物 `packages/subagent-council/src/seat-registry.generated.ts` 注入包内。
+> ⇒ **provider 名从旧名 `evo-dev`/`evo-review` 改成席位唯一名 `council-dev`/`council-review`**
+> （`architect` 席**不受影响** —— 它迁移前后同名 `council-architect`）。
+> 下表已按新值更新；**旧值（`evo-*`）保留在本文件的历史段落里**，不追溯修改 ——
+> 那些是当时读到的事实。★ 相关门：`scripts/seats/check-seat-defs.mjs`（源形状）、
+> `scripts/seats/gen-seat-registry.mjs --check`（防漂移）、`scripts/seats/test-evo-seats-online.mjs`（三席真在线）。
+
+| 席位 | provider 名 | 产出段落（席位定义逐字） | 定义里的既有硬约束 |
 |---|---|---|---|
-| `architect` | `council-architect` | 问题重述／候选方案／取舍／推荐+风险／**我可能错在哪** | 只做设计不写实现；默认只读；不确定就写「不确定」；**禁止编造** API/路径/行号/数字 |
-| `dev` | `evo-dev` | 链路图／编排产物／融合说明／自证（贴**原始输出**与**真退出码**）／回值／**我可能错在哪** | 只做施工；**不裁"值不值得采纳"**；不许把"编排"偷懒成"把元工具列一遍" |
-| `review` | `evo-review` | 被审对象／独立复算／**裁决（通过/驳回/有条件通过）**／下一步／**我可能错在哪** | ★ **作者就是你自己 ⇒ 拒绝裁**；**独立性分级**（跨模型 > 跨会话 > 同会话换 prompt）且须**如实标注档位**；"作者说通过了"**不是**依据 |
+| `council-architect` | `council-architect` | 问题重述／候选方案／取舍／推荐+风险／**我可能错在哪** | 只做设计不写实现；默认只读；不确定就写「不确定」；**禁止编造** API/路径/行号/数字 |
+| `council-dev` | `council-dev` | 链路图／编排产物／融合说明／自证（贴**原始输出**与**真退出码**）／回值／**我可能错在哪** | 只做施工；**不裁"值不值得采纳"**；不许把"编排"偷懒成"把元工具列一遍" |
+| `council-review` | `council-review` | 被审对象／独立复算／**裁决（通过/驳回/有条件通过）**／下一步／**我可能错在哪** | ★ **作者就是你自己 ⇒ 拒绝裁**；**独立性分级**（跨模型 > 跨会话 > 同会话换 prompt）且须**如实标注档位**；"作者说通过了"**不是**依据 |
 
 **已经存在、我原本重复设计的条目**（本规格对应编号 ⇒ 现状）：
 

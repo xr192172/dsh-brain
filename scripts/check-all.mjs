@@ -125,6 +125,28 @@ const GATES = [
     cmd: ['node', 'scripts/seats/check-seat-defs.mjs'],
   },
   {
+    id: 'seat-registry-drift',
+    // ★★★ 2026-09-27 新增（用户："把我们现在硬编码的那些乱七八糟的东西向它那边迁移改造。"）。
+    //
+    //   为什么需要这道门（**与上一条 seat-definitions 是两件事，都不可少**）：
+    //     · seat-definitions 查的是**源自己的形状**（md 写得对不对）；
+    //     · 本门查的是**源与产物是否一致**（生成物有没有漂移）——
+    //       上一条**管不着**这件事：源完全合法，产物却可能是旧版/手改过。
+    //
+    //   ★ 这正是模仿 `wshobson/agents` 那条可移植原则：
+    //     "Native-install registries are generated and committed … **CI gates registry drift**"。
+    //     我们的对应物 = `seat-registry.generated.ts`（一份源 → 生成物 → 门防漂移）。
+    //
+    //   ★ 为什么是**构建期**生成而不是运行期读文件：
+    //     运行时读 fs ⇒ 多一个失败面（路径/编码/BOM/权限），且**无法被静态门覆盖**。
+    //     构建期生成 ⇒ 产物是纯 TS 常量 ⇒ **门可以逐字节比对**，漂移立刻红。
+    //
+    //   ★ 判据形状：`--check` 不写文件，只比对（CRLF 归一化后逐字节）：
+    //     不一致 ⇒ 退出 1 并打印"若你改的是源：重跑生成器。若你改的是生成物：别手改，去改源。"
+    what: '席位注册表：生成物 seat-registry.generated.ts 与源 seats/library/*.md 一致（防手改/防漂移）',
+    cmd: ['node', 'scripts/seats/gen-seat-registry.mjs', '--check'],
+  },
+  {
     id: 'plugin-hygiene',
     what: '插件卫生：包完整性 / 残留 / deps 与 bundles / lock 一致 / 遗留物',
     cmd: ['node', 'scripts/check-plugin-hygiene.mjs'],

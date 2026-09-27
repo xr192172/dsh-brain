@@ -540,10 +540,14 @@ function prepareEvolutionSeats(profileDst, { routeDev, routeReview } = {}) {
   const same =
     (routeDev?.provider ?? '') === (routeReview?.provider ?? '') &&
     (routeDev?.model ?? '') === (routeReview?.model ?? '')
+  // ★★★ 2026-09-27 迁移：**注入的 `id:` 仍是 `evo-dev`/`evo-review`，但那只是 loader 条目名**，
+  //   **不是** provider 名 —— provider 名由 `seat:` 短名经包内垫片解析成**席位唯一名**
+  //   （`seat: dev` ⇒ provider `council-dev`）。两者解耦，所以这段注入逻辑无需改。
+  //   ★ 文案按**【provider 名】**说（那才是模型调用时看到的名字），别让人以为能按 id 找 provider。
   return {
     evoSeats: same
-      ? '已注入 evo-dev / evo-review ★ 两席路由相同 ⇒ 独立性只到【跨会话】档（未到【跨模型】，文档 §6 三级阶梯）'
-      : '已注入 evo-dev / evo-review（两席路由不同 ⇒ 独立性更强）',
+      ? '已注入 self-evolve 两席（provider: council-dev / council-review）★ 两席路由相同 ⇒ 独立性只到【跨会话】档（未到【跨模型】，文档 §6 三级阶梯）'
+      : '已注入 self-evolve 两席（provider: council-dev / council-review）（两席路由不同 ⇒ 独立性更强）',
   }
 }
 

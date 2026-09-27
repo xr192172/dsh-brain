@@ -1672,3 +1672,120 @@ const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToP
   ⇒ 用 `s.replace(/
 /g,'
 ')` 恢复。
+
+---
+
+## ★★★ 2026-09-27 席位定义外置 + 向外部市场格式迁移（**从 MEMORY.md 下沉的全文**）
+
+### 用户原话链（逐字）
+
+1. 「市面上比如说 Coze 啊、TRAE 啊、WorkBuddy 啊……这些智能体它是怎样实现的？然后开源市场，就是 GitHub 上有没有什么这些相关的 skill 能不能去精炼一下？」
+2. 「我的意思不是让你装着 Skill，而是让你把这个**内化成席位**，或者说子 Agent。」
+3. 「你完全可以就是模仿它写，然后再把它里面已有的子 agent 调过来即可，反正它**精髓在于 MD** 嘛。」
+4. 「**谁说让你照抄了**，我们的范围不是比它更广吗？我们的 Skill Tree 的字段不是完全包括它吗？……我们还有**工具面**等的设定，我们是完全包含它的 ⇒ 我们要的是**兼容它**，兼容它不是抄它。」
+5. 「然后在兼容的同时**读清楚它的优点**，把我们现在**硬编码的那些乱七八糟的东西向它那边迁移改造**。」
+
+### 三处 prior-art（证据分级）
+
+| 检索 | 产物 | 等级 |
+|---|---|---|
+| ① 本地 VeRO（`D:\project_develop\_research\vero\`，MIT，arXiv 2602.22480） | `docs/prior-art-agent-as-a-seat-2026-09-27.md` | **一手**（读源码：`agents/protocol.py` 97 行，`CodingAgent(Protocol)` ⇒ 实现 `async def run(...)` 即可当一席） |
+| ② GitHub skill / superpowers | `docs/prior-art-github-agent-skills-2026-09-27.md` | **一手**（真搜 + WebFetch 读真身） |
+| ③ 子 Agent 市场（`wshobson/agents`） | `docs/prior-art-subagent-marketplace-2026-09-27.md` | **一手** |
+
+★ 用户点名的两个都确认存在：**"superpower" = `obra/superpowers`**（292,055★，15 个 SKILL.md，含独立 `subagent-driven-development`，MIT 已核 LICENSE 文件）；
+**"子 Agent 市场" = `wshobson/agents`**（94 plugins / **202 agents** / 183 skills / 105 commands / 16 orchestrators，MIT，一份 Markdown 源生成 **7 个底座**）。
+
+### 它的可移植五条写作原则（出自 OpenAI harness-engineering post，逐字）
+
+① "Context file is a table of contents, not an encyclopedia"（<150 行 / <500 token）
+② "Repository is the system of record" ③ "Enforce invariants, not implementation"
+④ "Boring tech preference" ⑤ "Native-install registries are generated and committed … **CI gates registry drift**"
+
+★ ⑤ **正是本棒要对应的那条** ⇒ 落成 `seat-registry-drift` 门。
+
+### 它的 agent 定义格式（只有 3 个 frontmatter 字段）
+
+`name` / `description` / `model`（+ 可选 `tools:` / `color:`）。
+正文块：`Purpose` / `Core Philosophy` / `Capabilities` / `Behavioral Traits` / **`Workflow Position`（After/Complements/Enables）** /
+`Knowledge Base` / `Response Approach` / `Example Interactions` / **`Key Distinctions`** / `Output Examples`。
+
+### ★ 兼容 ≠ 照抄：我们的超集在哪（用户论证，已落到 schema）
+
+- `seats/schema.json` 的字段是**超集**：`frontmatter.required` 四项 / `totalMaxChars` / `name.pattern` /
+  `description.mustIncludeOneOf`（中英文触发短语）/ `tools.enum = ["readonly","full"]` / `body.requiredSections` **八个** /
+  `libraryRules.provenanceRequiredKeys` **四项**（`sourceUrl`/`license`/`retrieved`/`modified`）
+  —— 这些**它一个都没有**（它只有 3 个 frontmatter 字段）。
+- ★ **工具面设定**是我们独有的：`tools:` 档位（`readonly`/`full`）→ `SEAT_TOOL_SCOPE` → `tools.restrict()`
+  —— 它**没有机制层**，它的 `tools:` 只是自由文本。
+- ★ **F5 门**（`toolScopeConsistency`）= 把"散文与机制必须自洽"落成机器判据 ⇒ 这是**它的格式里根本不存在**的一层。
+
+### 迁移落地面（★ 本轮全部改动清单）
+
+**新增（源 + 生成物 + 两道门）**
+
+| 文件 | 是什么 |
+|---|---|
+| `seats/schema.json` | 席位定义格式的**机器可读规格**（判据照它写，铁律 37）；★ 新增 `toolScopeConsistency` 块 |
+| `seats/README.md` | 目录约定 + 四条纪律（不整目录倒入 / 散文不是机制 / 名字唯一 / 候选必须带 provenance）+ **与外部市场的三处差异表** |
+| `seats/library/council-{architect,dev,review}.md` | 三席定义（**内化**，不是装 skill）；每份八个必需章节 |
+| `seats/candidates/external-backend-architect.md` | 首份外部候选融合实例（外部 12,000 字符 ⇒ 融合后 ≈1,600）；provenance 四项齐 |
+| `scripts/seats/gen-seat-registry.mjs` | 构建期生成器（`--check` 检漂移；`tools` 非法 ⇒ **生成即失败**） |
+| `packages/subagent-council/src/seat-registry.generated.ts` | 生成物（**勿手改**，第二道门会报"生成物与源不一致"） |
+| `scripts/seats/check-seat-defs.mjs` | 判据门（S1–S3 / D1–D11 / C1 / A1 / **F5a+F5b** / **A2 消融自证**）⇒ **45 PASS / 0 FAIL / 0 SKIP** |
+| `scripts/check-all.mjs` 的 `seat-registry-drift` 条目 | 把生成器 `--check` **接进门链**（对应它的原则⑤） |
+
+**改造（消掉硬编码 / 第二份真相）**
+
+- `packages/subagent-council/src/index.ts` 改 **5 处**：① 头部迁移注释块 ② `resolveSeat()` + 从生成物派生的四个导出
+  ③ **删除三段硬编码 persona**（547 / 903 / 1151 字符；文件 16,034 → 13,427）④ `SEAT_TOOL_SCOPE` 从生成物派生
+  ⑤ **`apply()` 全文重写**（认两种写法、未知席位 **fail-closed 跳过**、`on = EVOLUTION_SEATS.filter(...)` 用**归一后唯一名**比）。
+- `scripts/seats/gen-roster.mjs`：**删掉两张手写字典**，改从生成物读（消掉第二份真相）。
+- **provider 名 = 席位唯一名** = `council-architect` / `council-dev` / `council-review`（旧短名 `architect`/`dev`/`review` 走**垫片** + 大声 log）。
+- 调用方改写 12 项：`test-evo-seats-online.mjs` / `arm-up.mjs:792,248` / `isolated-instance.mjs:545`（**只改文案**，
+  因注入的是 loader 条目名 `evo-*` ≠ provider 名）/ `capability-registry.mjs:186` / `tool-pool.mjs`（**只加注释，不改值**）/
+  `seats-check.mjs` / `test-seat-toolscope.mjs`（修**判据过时**）/ `test-evo-seats-mount.mjs`（修**既存红**）/
+  `docs/agent-seats-spec-2026-09-26.md` / `docs/subagent-provider-howto.md` /
+  host plane preset `C:\Users\Admin\.dsh\.agent-presets\council\agent.cordis.yml`。
+
+**备份（不入库）**：`out/_seat-migration/`（`index.ts.before` / `legacy-personas.json` / `preset.agent.cordis.yml.before` / `library-md-before.txt`）。
+
+### 关键实测读数（可复算）
+
+- `node scripts/seats/check-seat-defs.mjs` ⇒ **45 PASS / 0 FAIL / 0 SKIP**
+- `node scripts/seats/gen-seat-registry.mjs --check` ⇒ `OK —— 3 份定义与生成物一致`
+- `node scripts/seats/test-seat-toolscope.mjs` ⇒ **10 passed, 0 failed**
+- `node scripts/seats/test-evo-seats-online.mjs` ⇒ **13 passed, 0 failed**
+- `node scripts/delegation/test-evo-seats-mount.mjs` ⇒ **判据 11/11，消融 通过 ⇒ PASS**（原为 **既存 6/11 红**，
+  已用 `git stash push -- scripts/delegation/isolated-instance.mjs` **证明与迁移无关**）
+- **md 指纹（迁移中不变）**：architect `61bff4c896af344d9386c779a1c8ddf5` / dev `d3c3acfca6b0a5c477898994b14a9877` /
+  review `66c005d526e27c4ee5a3626c249994e6`
+
+### 消融自证实例（已成功）
+
+- **F5a**：`council-architect.md` 的 `tools` 改 `full` ⇒ `[FAIL] F5a[...]`（正文声明写动作但 tools=full ⇒ 散文与机制脱节）⇒ `44 PASS / 1 FAIL`；恢复后 hash 一致。
+- **`seat-registry-drift`**：手改生成物 ⇒ 门红（"★ 生成物与源不一致（漂移）… 别手改，去改源"）。
+- **`test-evo-seats-online`**：preset 临时改回旧短名 ⇒ **4 条 FAIL**；恢复 ⇒ `13/0` 绿。
+- ★ **未完成**：**F5b 的消融上一次 sed 空转**（原行仍在）⇒ **不算通过**，待重做。
+
+### 未闭合（必须报）
+
+1. **`seat-contract.mjs` 的源切换仍在 DSH（`ZyXHyy`）手里**：`SEAT_SOURCE` 现指向 `packages/subagent-council/src/index.ts`（**旧源**），
+   迁移后 `SEAT_PERSONAS` 已从生成物派生 ⇒ `seatConstMap()` 抛 `找不到 SEAT_PERSONAS 定义`。
+   ★ DSH 已改到中间态：认了新锚点（`Key Distinctions` / `Output Contract`），但引入**新假设** `:361` —— **只认「段」**，
+   而 dev 写「固定五**项**」⇒ 会失败。已 steer 两条（`accepted=true`）。
+2. **`packages/subagent-council/test/seats-check.mjs` ②③ 红 + 消融未变红**：②③ 缺关键词（`职责边界`/`编排`/`融合`/`自证`/`回值`/`我可能错在哪`
+   / `独立复算`/`裁决`/`下一步`）。**根因已查明**：新 md 用新格式章节名（`## Purpose`/`## Key Distinctions`/`## Output Contract`/`## Red Flags`），
+   **没有**旧 persona 的章节名 ⇒ **这是"迁移真的改变了内容"，不是判据过时** ⇒ **需显式裁决**：
+   **改判据**（按新格式对应章节）还是**在 md 里补回契约词**。消融 `ablNames=["council-dev"]` 只 1 个（未变红）—— 待查。
+3. **`check-all.mjs` 当前**：迁移前 25 通过 / 2 失败（两道红 = `capability-gate` / `test:capability-gate` 的 L3 holdout，**既有、故意留红**）；
+   `seats-contract` 红（DSH 半成品）。
+4. **迁移的代码改动尚未提交**（`d661f8a` + `7b9db02` 已推送；远端 HEAD `7b9db02` == 本地）。
+   提交时预期判 R1（`scripts/**`）⇒ 需 `record --level R1 --paths <p> --note "<一句>"` → `approve` → 同一命令内 commit。
+5. **F1/F2 读数采集**：委派日志 → 每席调用次数 / 采纳率。**有读数后才谈"几个"**。
+
+### ★ 两条纪律（本棒新增认知）
+
+- **铁律 28 的应用**：用户最初说"把 200 多个整合成少数的几个" —— **202 个来自"人的判断"，按手写规则合并 = 把自进化降级成编辑**
+  ⇒ **"几个"必须是读数，不是设计目标**（我主动排掉）。
+- **铁律 41 的应用**：`test-seat-toolscope.mjs` 原来的判据是**文本正则锚在已删除的写法上** ⇒ 改成**从 md 的 frontmatter 读**（作用域限定在 frontmatter 区）。

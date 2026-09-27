@@ -42,26 +42,6 @@ export const Config = z.object({
 // 一个子代理最容易坏的地方不是能力不够，而是它做了不属于它的事。
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ARCHITECT_PERSONA = `你是「议事厅 · 架构师」席位。你不是执行者，你是提方案的人。
-
-## 职责边界（严格遵守）
-- 你【只做设计与判断】，不写实现代码。产出的是方案与取舍依据，不是补丁、不是 diff。
-- 默认只读。除非任务明确要求你取证，否则不要修改任何文件。
-- 你不负责"把它做出来"；你负责"说清楚该怎么做、以及为什么"。
-
-## 你的回答必须包含这六段
-1. **问题重述** —— 用你自己的话把要做的事说清楚，一句话。若任务本身有歧义，先把歧义点单独列出。
-2. **候选方案** —— 至少两个，各自写明它隐含假设了什么。
-3. **取舍** —— 每个方案在「能不能做到 / 代价 / 可逆性」三个维度上的差别。
-4. **推荐 + 风险** —— 明确说推荐哪一个，以及它会怎么坏、坏的时候怎么发现。
-5. **我可能错在哪** —— 单独一行，一句话。不许省略。
-6. **独立性档位** —— 不适用（本席位不做独立复核）。
-
-## 硬约束
-- 不确定就写「不确定」。**禁止编造** API、文件路径、行号、版本号、数字。
-- 不许为了让回答好看而删掉反面意见。
-- 不许用"建议进一步评估"这类空话收尾；要给可执行的下一步。`;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 自进化的两个固定席位（2026-09-25 用户口述；设计出处见
 // `docs/revised-architecture-2026-09-20.md` §7「进化脑 / 评审团 / 开发脑 的三段流水线」
@@ -74,78 +54,85 @@ const ARCHITECT_PERSONA = `你是「议事厅 · 架构师」席位。你不是�
 //   判据归属（§7.2 逐字）：**开发脑执行、评审团裁**。
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DEV_PERSONA = `你是「自进化 · 开发脑」席位（= 文档里的「生产脑」）。你是【动手的人】——
-既不是提方案的人，也不是裁"值不值得"的人。
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 席位定义已【外置】（2026-09-27，用户：「把我们现在硬编码的那些乱七八糟的东西
+//      向它那边迁移改造。」）
+//
+// 迁移前（硬编码的三份真相）：
+//   · persona  = 本文件里的三个 TS 模板字符串（ARCHITECT/DEV/REVIEW_PERSONA）
+//   · 工具档位 = `SEAT_TOOL_SCOPE` 三行字典
+//   · provider 名 = `SEAT_PROVIDER_NAMES` 三行字典
+//   ⇒ 换一席要改 3 处、无法被静态门覆盖、无法外部注册。
+//
+// 迁移后（一份源 + 生成物 + 漂移门）：
+//   源    = `seats/library/*.md`（格式规格 `seats/schema.json`）
+//   生成物 = `./seat-registry.generated.ts`（由 `scripts/seats/gen-seat-registry.mjs` 生成）
+//   门    = `scripts/seats/check-seat-defs.mjs`（源形状）+ 生成器 `--check`（防漂移）
+//
+// ★ 兼容策略（用户：「在兼容的同时…迁移」）：
+//   本文件的**对外导出**（SEAT_PERSONAS / SEAT_TOOL_SCOPE / SEAT_PROVIDER_NAMES /
+//   EVOLUTION_SEATS / READONLY_ALLOW / toolScopeForSeat / toolFilterForSeat）**逐字保留**，
+//   只是**取值改为从生成物推导** ⇒ 所有既有调用方（preset / 隔离实例 / 门）**零改动**。
+//
+// ★★ 但**键名语义变了，必须显式声明**（否则是静默的破坏性变更）：
+//   旧的键是**短名**（`architect` / `dev` / `review`），新的键是**席位唯一名**
+//   （`council-architect` / `council-dev` / `council-review`）。
+//   ⇒ `seat-registry.generated.ts` 里那个名字**同时是 provider 名**（它取代了两份字典）。
+//   ⇒ 兼容垫片把短名映射到新名，但**每次落到垫片都会打印一行提示**，提醒调用方迁移。
+// ─────────────────────────────────────────────────────────────────────────────
 
-## 职责边界（严格遵守）
-- 你【只做施工】：把给定的【原工具（元工具）】+【目标任务】**编排**成一条完整链路。
-  ★ 编排的产物必须是**一个工具**（一个入口包住整条链路），**不是**把一堆元工具列出来丢给调用方。
-- ★ **融合也是你的活**（文档 §7.0 逐字订正过）：当存在**同功能的更优实现**时，把两者**融合**
-  （**两个脚本融合**，或**两份设计融合**）。
-- 你**【不】裁"值不值得采纳"** —— 那是审批脑（评审团）的事。你要自证的是「**我做对了**」。
-- 你【不】提战略方案、【不】改别人的职责边界；边界之外的事，直接指出"这该由谁做"。
+// ★★★ 扩展名必须写 `.js`（**即使源文件是 `.ts`**）：
+//   本包 `"type": "module"` + 运行时是**真 ESM** ⇒ Node 解析相对 import **要求扩展名**。
+//   tsconfig 是 `moduleResolution: "Bundler"`，它**允许不写**（TS 不报错）⇒
+//   **编译过、跑起来 ERR_MODULE_NOT_FOUND**（实测踩过：迁移时漏了扩展名，
+//   `tsc` exit 0 但 `import` 直接崩）。TS 的 ESM 惯例就是源码写 `.js`，编译后同名对应。
+import { SEAT_DEFS, SEAT_BY_NAME, type SeatDef } from "./seat-registry.generated.js";
 
-## 产出必须包含这七段
-1. **链路图** —— 从输入到输出经过哪几步、每步用哪个原工具（一行一步）。
-2. **编排产物** —— 完整工具的定义：名 / 描述 / 参数 Schema / **它内部调用了哪些原工具**。
-3. **融合说明** —— 若本次含融合：融合了谁与谁、依据是什么（"更兼容 / 更合理 / 更科学"的**具体读数**）。
-4. **自证** —— ★★ **融合后的工具必须通过【原先两者】的全部用例**；贴**原始输出**与**真退出码**。
-5. **回值** —— 本次产出的可回写字段（成功率 / 调用次数 / 得分等），供**工具商城**记账。
-6. **我可能错在哪** —— 单独一行，一句话。不许省略。
-7. **独立性档位** —— 标注本次产出的独立性来源：跨模型 / 跨会话 / 同会话换 prompt / 无法核对。
-
-## 硬约束
-- 不确定就写「不确定」。**禁止编造** API、文件路径、行号、版本号、数字。
-- ★ **不许把"编排"偷懒成"把元工具列一遍"** —— 那正是本席位要消灭的形态。
-- 不许用"建议进一步评估"这类空话收尾；要给可执行的下一步。`;
-
-const REVIEW_PERSONA = `你是「自进化 · 审批脑」席位（= 文档里的「评审团 / 专家团」）。
-你【只裁值不值得采纳】—— 不做施工，不提战略方案。
-
-## 职责边界（严格遵守）
-- 你【不写实现】、【不改文件】（默认只读）；你【不】替开发脑设计。
-- ★★ **独立性**（这是"防串供"的**真实含义**，**不是**"两个 agent 私下通气" ——
-  依据 self-evolution-design.md §0.5 **无环原则**「被改的审批层不能自动批准自己的部署」
-  与 §6「**封驳权 = 独立否决权，且与中书省【不同机构】**」，"不同机构"在这里就落成"**不同 agent**"）：
-  · 你要**先核对：本次被审对象是谁产出的**。
-    ★★ **任务里没给作者信息 ⇒ 你【无法核对独立性】⇒ 必须在"裁决"那一段明确写「独立性无法核对」**，
-    并把它计入结论强度（这与本席位"拿不到依据就说拿不到"是同一条纪律）。
-  · 作者**就是你自己**（同席产、同席审）⇒ **拒绝裁**并说明理由。
-  · ★★ **上下文隔离 ≠ 独立**：你的会话与作者的会话天然不同，那是**前提**、不是**保证**。
-    独立性看的是**来源**：**跨模型 > 跨会话 > 同会话换 prompt**（文档 §6 逐字）——
-    你要在"被审对象"那一段**如实标注本次落在哪一档**（你不知道就写"不知道"）。
-- 你裁的是「**值不值得采纳**」，**不是**「能不能跑」——"能不能跑"由开发脑自证，你**复核**它。
-
-## 产出必须包含这六段
-1. **被审对象** —— 一句话说清你在审什么（一个变更 / 一个工具 / 一次融合）。
-2. **独立复算** —— ★ **不许把作者的结论当依据**：至少用一种**独立方法**重算它的关键读数；
-   做不到就**明确写「无法独立复算」并说明原因**（不许含糊带过）。
-3. **裁决** —— **通过 / 驳回 / 有条件通过**（三选一，不许含糊），并给**一条**最重要的理由。
-4. **下一步** —— 驳回或有条件通过时：具体到"**改哪里、验什么**"。
-5. **我可能错在哪** —— 单独一行，一句话。不许省略。
-6. **独立性档位** —— 标注本次裁决的独立性档位：跨模型 / 跨会话 / 同会话换 prompt / 无法核对。
-
-## 硬约束
-- ★ **"作者说通过了"不是依据**；拿不到独立依据就写「无法独立复算」。
-- 不确定就写「不确定」。**禁止编造**数字、路径、结论。
-- 不许用"建议进一步评估"这类空话收尾。`;
-
-export const SEAT_PERSONAS: Record<string, string> = {
-	architect: ARCHITECT_PERSONA,
-	// ★ 自进化两席（用户 2026-09-25：「两个固定的子 agent …… 专门处理自进化的事宜」）
-	dev: DEV_PERSONA,
-	review: REVIEW_PERSONA,
-};
-
-/** 每个席位注册的 provider 名（也就是 preset 里 `tool-subagent.config.provider` 要填的值）。 */
-export const SEAT_PROVIDER_NAMES: Record<string, string> = {
+/** ★ 兼容垫片：旧短名 → 新席位唯一名。**已废弃，将在后续版本移除。** */
+const LEGACY_ALIASES: Record<string, string> = {
 	architect: "council-architect",
-	dev: "evo-dev",
-	review: "evo-review",
+	dev: "council-dev",
+	review: "council-review",
 };
 
-/** 自进化两席：这两席就是"产/审"两侧（★ 独立性看【出发点是否不同】，用户 2026-09-25 裁决：开发期一律 AGNES）。 */
-export const EVOLUTION_SEATS = ["dev", "review"] as const;
+/**
+ * 把"调用方给的席位标识"解析成席位定义。
+ * ★ 返回 `undefined` = **未知席位** ⇒ 调用方必须显式处理（**不许静默降级**成别的席位 ——
+ *   那会给你一个"名字对、人格错"的席位，是最坏的假绿）。
+ */
+export function resolveSeat(seatOrAlias: string): SeatDef | undefined {
+	if (SEAT_BY_NAME[seatOrAlias]) return SEAT_BY_NAME[seatOrAlias];
+	const mapped = LEGACY_ALIASES[seatOrAlias];
+	if (mapped && SEAT_BY_NAME[mapped]) {
+		console.log(
+			`[subagent-council] ⚠️ 席位标识 "${seatOrAlias}" 是【旧短名】（兼容垫片）` +
+				` ⇒ 已解析为 "${mapped}"。请把调用方改成用【席位唯一名】"${mapped}"（本垫片将移除）。`,
+		);
+		return SEAT_BY_NAME[mapped];
+	}
+	return undefined;
+}
+
+/** 席位唯一名 → persona 正文（= 迁移前的 `SEAT_PERSONAS`，键名改为唯一名）。 */
+export const SEAT_PERSONAS: Record<string, string> = Object.fromEntries(
+	SEAT_DEFS.map((s) => [s.name, s.persona]),
+);
+
+/** 席位唯一名 → provider 名。★ 迁移后二者**恒等**（它就是席位唯一名，取代了旧的 `SEAT_PROVIDER_NAMES`）。 */
+export const SEAT_PROVIDER_NAMES: Record<string, string> = Object.fromEntries(
+	SEAT_DEFS.map((s) => [s.name, s.name]),
+);
+
+/** ★ 自进化两席（= "产/审"两侧）。迁移前这里硬编码成 `["dev","review"]`。 */
+export const EVOLUTION_SEATS: readonly string[] = SEAT_DEFS.map((s) => s.name).filter((n) =>
+	n.startsWith("council-") && n !== "council-architect",
+);
+
+/** 席位描述（来自 frontmatter，供未来的席位列表面板使用）。 */
+export const SEAT_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
+	SEAT_DEFS.map((s) => [s.name, s.description]),
+);
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ★★★ 席位工具限制（O8：约束必须落在【机制层】，不能只写在 persona 里）
@@ -219,16 +206,28 @@ export const READONLY_ALLOW: readonly string[] = [
 	"todo_write",
 ];
 
-/** 每席的工具档位。**默认 readonly**（新席位默认关，fail-closed）。 */
-export const SEAT_TOOL_SCOPE: Record<string, SeatToolScope> = {
-	architect: "readonly", // persona: "默认只读…不写实现代码"
-	review: "readonly", //    persona: "你不写实现、不改文件（默认只读）"
-	dev: "full", //           persona: "你只做施工" ⇒ **必须能写**（阳性对照）
-};
+/**
+ * ★★★ 每席的工具档位（2026-09-27 迁移）。
+ *
+ * **迁移前**：这里是一个**硬编码的三行字典**（`architect: "readonly"` / `dev: "full"` …），
+ *   与 persona 里写的"默认只读"**物理分离** ⇒ 改了一边不改另一边，没人会发现。
+ * **迁移后**：档位来自 `seats/library/*.md` 的 `tools:` frontmatter（经生成物）。
+ *   ⇒ ★ **散文与机制现在是同一个源**：改 persona 说"我改成只读了"而不改 `tools:`，
+ *     `scripts/seats/check-seat-defs.mjs` 会查出档位与声明不一致的风险面（见该门的 F5 计划）。
+ *
+ * 键是**席位唯一名**（= provider 名）。**默认 readonly**（新席位默认关，fail-closed）。
+ */
+export const SEAT_TOOL_SCOPE: Record<string, SeatToolScope> = Object.fromEntries(
+	SEAT_DEFS.map((s) => [s.name, s.tools as SeatToolScope]),
+);
 
-/** 名字 → 档位；未知席位按 `readonly`（fail-closed）。 */
+/**
+ * 名字 → 档位；未知席位按 `readonly`（fail-closed）。
+ * ★ 兼容：旧短名（`architect` / `dev` / `review`）经 `resolveSeat()` 垫片解析。
+ */
 export function toolScopeForSeat(seat: string): SeatToolScope {
-	return SEAT_TOOL_SCOPE[seat] ?? "readonly";
+	const def = resolveSeat(seat);
+	return (def?.tools as SeatToolScope) ?? "readonly";
 }
 
 /** 档位 → `toolFilter`（`full` 返回 `undefined` = 不设限）。 */
@@ -339,24 +338,38 @@ class SeatProvider {
 export function apply(ctx: any, config: any) {
 	// ★ 席位清单：给了 `seats` 就按它注册多个（自进化两席一次挂上）；
 	//   否则退回"只注册 `seat`" —— **向后兼容**，默认行为与改动前逐字一致。
-	const seats: string[] =
+	//
+	// ★★★ 2026-09-27 迁移（用户："把我们现在硬编码的那些乱七八糟的东西向它那边迁移改造。"）：
+	//   `seat` / `seats` 里现在**接受两种写法**：席位唯一名（`council-dev`）或旧短名（`dev`）。
+	//   两种都经 `resolveSeat()` 归一 —— ★ **不许在这里自己写映射表**（那就是新的硬编码，
+	//   而且与 `resolveSeat()` 里的垫片成为**第二份真相** —— 铁律 18 的遮蔽就是这么做出来的）。
+	//   ★ 顺带：`resolveSeat()` 命中垫片时会**大声 console.log 一次**，旧写法不会静默通过。
+	const requested: string[] =
 		Array.isArray(config?.seats) && config.seats.length > 0
 			? config.seats.map((s: unknown) => String(s))
-			: [config?.seat ?? "architect"];
+			: [config?.seat ?? "council-architect"];
 
 	const model = config?.model ?? "";
 	const provider = config?.provider ?? "";
 
-	for (const seat of seats) {
-		const persona = SEAT_PERSONAS[seat];
-		if (!persona) {
+	// ★ 解析成 SeatDef（含唯一名）。**未知席位 fail-closed**（显式跳过 + 打印已知集）。
+	const resolvedSeats: SeatDef[] = [];
+	for (const raw of requested) {
+		const def = resolveSeat(raw);
+		if (!def) {
 			// ★★ 不许静默降级成 architect —— 那会给你一个**名字对、人格错**的席位（最坏的假绿）。
 			console.log(
-				`[subagent-council] ⚠️ 未知席位 "${seat}" ⇒ **跳过**（已知：${Object.keys(SEAT_PERSONAS).join(", ")}）`,
+				`[subagent-council] ⚠️ 未知席位 "${raw}" ⇒ **跳过**（已知：${SEAT_DEFS.map((s) => s.name).join(", ")}）`,
 			);
 			continue;
 		}
-		const providerName = SEAT_PROVIDER_NAMES[seat] ?? `council-${seat}`;
+		resolvedSeats.push(def);
+	}
+
+	for (const def of resolvedSeats) {
+		const seat = def.name; // ★ 唯一名（与 provider 名同值）
+		const persona = def.persona;
+		const providerName = SEAT_PROVIDER_NAMES[seat] ?? seat;
 		const toolFilter = toolFilterForSeat(seat);
 		ctx.subagents.registerProvider(new SeatProvider(providerName, persona, model, provider, toolFilter));
 		// ★ O8：档位必须**在每个席位的启动行里可见可核** —— 不然"到底限没限"又要靠读源码推。
@@ -373,7 +386,13 @@ export function apply(ctx: any, config: any) {
 
 	// ★★ 防串供检查（`docs/revised-architecture-2026-09-20.md:218` 逐字：
 	//    **产变更方不能与审批方同源**）——两席都挂上时必须**可见可核**，不许悄悄过去。
-	const on = EVOLUTION_SEATS.filter((s) => seats.includes(s));
+	//
+	// ★★★ 2026-09-27 迁移：原来这里是 `seats.includes(s)` —— 拿**调用方给的原始串**去比
+	//   `EVOLUTION_SEATS`（现在是唯一名）。调用方写旧短名 `dev` 时**匹配不上** ⇒ 检查会
+	//   **静默不触发**（假绿：明明两席都挂了，却以为只挂了一席/或反过来）。
+	//   ⇒ 一律用**归一后的唯一名集合**比。
+	const resolvedNames = new Set(resolvedSeats.map((d) => d.name));
+	const on = EVOLUTION_SEATS.filter((s) => resolvedNames.has(s));
 	if (on.length === EVOLUTION_SEATS.length) {
 		console.log(
 			`[subagent-council] ★ 自进化两席已就位：${on.map((s) => `${s}(${SEAT_PROVIDER_NAMES[s]})`).join(" + ")}` +

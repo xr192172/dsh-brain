@@ -126,6 +126,11 @@ function selftest() {
   const res = []
   const check = (n, ok, detail) => { res.push({ n, ok, detail }); console.log(`${ok ? 'ok  ' : 'FAIL'}  ${n} — ${detail}`) }
 
+  // ★★ 注意：下面这些 `agent: 'evo-dev'` / `'evo-review'` 是**测试样本里的任意字符串**，
+  //   **不是** provider 名断言（`validateRating` 只要求非空；⑥ 靠的是两个值**互不相同**）。
+  //   ⇒ **2026-09-27 席位 provider 名迁移时这几处无需改**（改了反而误导读者以为它们是接线事实）。
+  //   ★ 判别的办法：问"它被拿去和谁比"。真接线事实会与 `SEAT_PROVIDER_NAMES` 或 preset 对账；
+  //     这里只与"另一个字符串"比 ⇒ 是样本。
   // ① / ② / ③ 校验
   check('① 合法回值 ⇒ 通过', validateRating({ tool: 'a', score: 0.8, agent: 'evo-dev' }).ok, '')
   const badScores = [-0.1, 1.1, NaN, '0.8', null, undefined]

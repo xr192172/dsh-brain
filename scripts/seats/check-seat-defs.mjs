@@ -153,6 +153,57 @@ if (!defs.length) {
     const kd = body.match(/## Key Distinctions([\s\S]*?)(?=\n## |$)/);
     if (kd && !/vs\s/.test(kd[1])) bad(tag('D11'), 'Key Distinctions 里没有任何 "vs X" 对照');
     else if (kd) ok(tag('D11'), 'Key Distinctions 有跨席对照');
+
+    // ── F5 ★★★ 档位与"我不做"声明的一致性（规格见 schema.json 的 toolScopeConsistency）──
+    // ★ 作用域限定（铁律 41）：**只**在 `## Key Distinctions` 节里、以 `你不做` 开头的**那一条**里找，
+    //   且只看冒号**之后**的枚举项。理由写在 schema.json 的 `declarationAnchor.why` 里。
+    //   ★ 不许退化成全文匹配 —— 实测全文里 `改方案`（合法）与 `改文件`（写动作）只差一个字。
+    const f5 = schema?.toolScopeConsistency;
+    if (!f5 || !kd) {
+      skip(tag('F5'), '规格里没有 toolScopeConsistency 或本节缺失（本门不判红）');
+    } else {
+      const anchor = f5.declarationAnchor ?? {};
+      const prefix = anchor.itemPrefix ?? '你不做';
+      // 从 Key Distinctions 节里取那条声明；`你不做` 后面到行尾/下一个列表项之间
+      const declRe = new RegExp(`[-*]\\s*[★\\s]*\\*\\*${prefix}\\*\\*\\s*[:：]([^\\n]*)`);
+      const dm = declRe.exec(kd[1]);
+      const declText = dm ? dm[1] : null;
+      // 该条里冒号之后的枚举项（顿号/逗号/分号分隔）
+      const items = declText
+        ? declText
+            .split(/[、,，;；]/)
+            .map((s) => s.replace(/[*`]/g, '').trim())
+            .filter(Boolean)
+        : [];
+      const writeTerms = f5.writeActions?.terms ?? [];
+      const declaredWriteRefusal = items.filter((it) => writeTerms.some((w) => it.includes(w)));
+      const isReadonly = fm.tools === 'readonly';
+
+      // F5-a：声明不做写动作 ⇒ 必须 readonly
+      if (declaredWriteRefusal.length > 0) {
+        if (isReadonly) ok(tag('F5a'), `声明不做[${declaredWriteRefusal.join(',')}]且 tools=readonly ⇒ 自洽`);
+        else
+          bad(
+            tag('F5a'),
+            `★ 正文【你不做】里声明了写动作式约束[${declaredWriteRefusal.join(',')}]，但 tools="${fm.tools}" ⇒ ` +
+              `散文与机制脱节（纸上约束）。要么把 tools 改成 readonly，要么从声明里去掉这些项`,
+          );
+      } else {
+        ok(tag('F5a'), `【你不做】里无写动作声明（不做该规则）`);
+      }
+
+      // F5-b：readonly ⇒ 必须显式声明了【你不做】的清单
+      if (isReadonly) {
+        if (declText && items.length > 0) ok(tag('F5b'), `tools=readonly 且【你不做】有 ${items.length} 项声明`);
+        else
+          bad(
+            tag('F5b'),
+            `★ tools=readonly 但正文【你不做】清单缺失/为空 ⇒ 下游读者会以为「忘了开权限」而不是「设计如此」`,
+          );
+      } else {
+        ok(tag('F5b'), `tools=${fm.tools}（本条只对 readonly 席生效）`);
+      }
+    }
   }
 }
 
@@ -181,6 +232,24 @@ if (schema?.body?.requiredSections?.includes('## Red Flags')) {
   ok('A1', '消融自证：Red Flags 在必需章节里 ⇒ 删掉它 D8 必红');
 } else {
   bad('A1', '★ 消融自证失败：Red Flags 不在必需章节 ⇒ 删掉它门不会红（本门是假的）');
+}
+
+// ── A2 ★★★ F5 的消融自证 ─────────────────────────────────────────────────────
+// 本门最该防的是"散文与机制脱节"。要证明 F5 真的在跑，得说清**什么输入会让它红**：
+//   · F5-a 变红的条件：某席正文【你不做】里声明了写动作（如"改文件"）而 tools 仍是 full；
+//   · F5-b 变红的条件：某席 tools=readonly 但【你不做】清单缺失。
+// ★ 这里做**只读**的等价检查：确认规格里的 writeActions 非空 **且** declarationAnchor 指到了
+//   `## Key Distinctions` —— 少了任一条，F5 就会退化成"恒绿"（假绿，比没有门更糟）。
+const f5spec = schema?.toolScopeConsistency;
+const f5Wired =
+  Array.isArray(f5spec?.writeActions?.terms) &&
+  f5spec.writeActions.terms.length > 0 &&
+  f5spec?.declarationAnchor?.section === '## Key Distinctions' &&
+  schema?.body?.requiredSections?.includes('## Key Distinctions');
+if (f5Wired) {
+  ok('A2', `消融自证：F5 有 ${f5spec.writeActions.terms.length} 个写动作词 + 锚在必需章节 Key Distinctions ⇒ 两条规则都能红`);
+} else {
+  bad('A2', '★ 消融自证失败：F5 的规格不完整（写动作词为空 / 锚点不是必需章节）⇒ F5 会恒绿');
 }
 
 // ── 输出 ─────────────────────────────────────────────────────────────────────

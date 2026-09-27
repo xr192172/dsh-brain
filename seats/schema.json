@@ -61,6 +61,52 @@
       "Red Flags": "★ superpowers 的招：给席位一份自我检查清单"
     }
   },
+  "toolScopeConsistency": {
+    "$comment": "★★★ F5 —— 本项目最该盯的一条（见 docs/seat-fusion-pipeline-2026-09-27.md:75-77）。",
+    "why": [
+      "事故先例（packages/subagent-council/src/index.ts:151-179）：架构师席的 persona 写着「默认只读。…不要修改任何文件」，",
+      "  但它**真的往仓库里写了一个脚本**（现场证据 out/seat-wrote-this-_analyze-personas.mjs）。",
+      "⇒ 教训：**写在 persona 里的约束不是约束** ⇒ 散文与机制必须能被机器对上账，否则改了一边没人发现。",
+      "★ 迁移后 `tools:` 与正文声明**同在** seats/library/*.md ⇒ 现在是同一个源，但**仍无东西在核对它们是否自洽**。"
+    ],
+    "declarationAnchor": {
+      "$comment": "★ 只认这一个结构化的声明锚点 —— 不做全文关键词轰炸（铁律 41：文本判据必须作用域限定）。",
+      "section": "## Key Distinctions",
+      "itemPrefix": "你不做",
+      "why": [
+        "正文里「写」「改」这类字**到处都有**（`你不重新论证方案` / `方案要改` / `改方案`）——",
+        "  全文匹配会把「改**方案**」（合法，那是它的活）误判成「改**文件**」⇒ 假红。",
+        "⇒ 只认 `## Key Distinctions` 节里以 `★ **你不做**：` 开头的那一**条**，",
+        "  且只看该条冒号**之后**的枚举项（顿号/逗号分隔）。这是**作者显式声明**的边界，不是我的猜测。"
+      ]
+    },
+    "writeActions": {
+      "$comment": "被认作【写动作】的枚举项（出现在【你不做】清单里时）。",
+      "terms": ["写实现", "改文件", "改仓库", "写文件", "动手改", "直接改"],
+      "why": "这些是**在盘上产生变更**的动作 ⇒ 声明不做它们的席位，`tools:` 必须是 readonly。"
+    },
+    "rules": [
+      {
+        "id": "F5-a",
+        "when": "正文的【你不做】清单里含任一 writeActions",
+        "then": "frontmatter.tools 必须是 readonly",
+        "why": "声明不动手 ⇒ 机制必须真的不给它写工具，否则是纸上约束"
+      },
+      {
+        "id": "F5-b",
+        "when": "frontmatter.tools == readonly",
+        "then": "正文的【你不做】清单必须存在且非空",
+        "why": "档位限了但它自己不说为什么 ⇒ 下游读者会以为「忘了给它开权限」而不是「设计如此」"
+      }
+    ],
+    "notApplicable": {
+      "$comment": "★ 明确【不】判的情形（写下来 = 承认这是有意的空白，不是漏了）。",
+      "cases": [
+        "`tools: full` 的席位**不要求**声明写动作 —— 它的活就是动手，声明的是【不做】别的（批准自己/审查自己）。",
+        "席位正文里对**别的席位**的描述（如 dev 说『架构师定做什么』）**一律不参与**判定 —— 只认本席的【你不做】。"
+      ]
+    }
+  },
   "libraryRules": {
     "uniqueNames": true,
     "candidatesRequireProvenance": true,
