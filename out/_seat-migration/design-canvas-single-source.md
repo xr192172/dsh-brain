@@ -123,7 +123,35 @@ git rev-list --left-right --count HEAD...origin/main
 
 ---
 
-## 七、待用户拍板的两件（不可逆 / 对外）
+## 七、★ 桥接该不该搬进公开的产品仓？（用户提问，已裁决：**不搬**）
+
+**背景事实（实测）**：
+
+| 事实 | 读数 |
+|---|---|
+| `xr192172/dsh-brain` 本身是否公开 | **Public，518 commits** ⇒ "让别人也能拿到这份 DSH 适配"**已被满足**，搬过去是重复 |
+| `@deepseek-ai/*` 是否公开发布在 npm | **是**（cordis `4.0.4`；dsh-tools / dsh-workspace / dsh-llm 均 `0.0.1-rc.1`；schemastery `3.18.4`）⇒ 原先"装不上"的反对理由**不成立**；但全是预发布、无稳定契约 ⇒ **装得上 ≠ 用得上** |
+| 本体 README 是否已有接入契约 | **已有**（第 53–89 行）：stdio 的 `mcpServers` JSON + `scripts/install_mcp.mjs` 一键分发 8 个 client（Claude/Cursor/VS Code/Codex/Copilot/Gemini/Windsurf/Cline） |
+
+**裁决理由（四条）**：
+
+1. **host 无关的部分早就在产品仓里了** —— 那段 `mcpServers` + 一键分发就是对接契约。要接的人看它就够，不需要 DSH 适配代码。
+2. **桥接的 69KB 不是"适配器样例"，是 DSH 宿主集成** —— 它靠 DSH 的 loader 把 bundle patch insert 进插件树、靠 `ctx.workspaceRegistry`/`ctx.tools` 才活着。离开 DSH 它 **inert**。
+3. **会稀释产品仓的核心性质** —— 现在"clone → npm i → build → 跑 stdio"四步干净；多一个"需要 DSH 宿主才懂"的包，读者会问"我该装哪个"。
+4. **维护成本不对称** —— 产品仓要为它背 CI（tsc + 三平台 + 工具数门禁）与依赖漂移。
+
+**关于"隔离 + README 写明可移除"**：隔离的**目的**是让产品仓不背它 ⇒ 最彻底的隔离就是**不放进产品仓**。放进去再写"不需要可删"，等于把判断成本转嫁给读者。**真哪天要放，隔离是必需的**（`adapters/dsh/` 独立 package、不进 `src/`、不进主 tsconfig、独立 CI job、DSH 依赖全 optional）——但那时你已经在维护第二个产品了。
+
+**★ 唯一值得做的小动作（成本≈零）**：本体 README 接入段末尾加**一行指针**——
+DSH 宿主侧的现成适配（选中工作区自动预热索引 + 内核深 import 的 `symbol_edit`）见 `github.com/xr192172/dsh-brain` 的 `packages/design-canvas-bridge`。
+想接的人知道去哪看；不需要的人零负担；**不用隔离、不用免责声明、不用背 CI**。
+
+**⚠️ 动 README 前必读**：本体有 README 工具数门禁 `scripts/readme_tools_gate.mjs`（提交 `235bf5b` 就是被它拦下的）。
+实测当前 **`README=67 → 真实=67 ✓` 通过** ⇒ 加指针安全，但**不要碰那个数字**。
+
+---
+
+## 八、待用户拍板的两件（不可逆 / 对外）
 
 | # | 动作 | 为什么需要你说一声 |
 |---|---|---|
