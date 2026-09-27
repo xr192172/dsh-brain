@@ -1789,3 +1789,100 @@ const isMain = !!process.argv[1] && path.resolve(process.argv[1]) === fileURLToP
 - **铁律 28 的应用**：用户最初说"把 200 多个整合成少数的几个" —— **202 个来自"人的判断"，按手写规则合并 = 把自进化降级成编辑**
   ⇒ **"几个"必须是读数，不是设计目标**（我主动排掉）。
 - **铁律 41 的应用**：`test-seat-toolscope.mjs` 原来的判据是**文本正则锚在已删除的写法上** ⇒ 改成**从 md 的 frontmatter 读**（作用域限定在 frontmatter 区）。
+
+---
+
+## ★★★ 2026-09-27 席位定义外置迁移 —— 索引细节（从 MEMORY.md 二次下沉）
+
+### 性质与落地形态
+
+★ **用户定的性质 = 兼容，不是照抄**：原话 *"我们的范围不是比它更广吗？我们的 Skill Tree 的字段不是完全包括它吗？……
+我们还有**工具面**等的设定 ⇒ 我们要的是**兼容它**。"*
+⇒ 落法 = 我们的 schema 是它的**超集**（它只有 3 个 frontmatter 字段；我们有 8 个必需章节 + 工具档位 + provenance 四项 + **F5 一致性门**）。
+
+★ **迁移目标 = 把硬编码换成"一份源 → 生成物 → CI gates drift"**（对齐它的可移植原则⑤）。
+★ **落地形态**：`seats/schema.json`（规格）+ `seats/library/*.md`（源）+ `scripts/seats/gen-seat-registry.mjs`（生成器）
++ `seat-registry.generated.ts`（生成物）+ **两道门**（`seat-definitions` + `seat-registry-drift`）。
+★ **provider 名 = 席位唯一名** = `council-architect` / `council-dev` / `council-review`（旧短名走**垫片**）。
+
+### 提交与门层（★ 远端 ref 已核）
+
+- 提交 `118ca04`（20 文件 / +1133 / -339）。
+- 门层判 **R1**（`R1-CAPABILITY-FAMILY` + `R1-CHECK-SCRIPTS`）⇒ 自动挂票 `pa-20260927-89a166`
+  ⇒ `approve --by witness:agent-workbuddy`，**note 逐字写明"批准者与作者是同一个 agent"**，`sealedSeq=79`（带封条）。
+- **推送判据（唯一可信）= `git ls-remote origin refs/heads/master`** ⇒ `118ca04ea68fdb4a748298ca94ff7fe9fd7e8b1b` == 本地 HEAD ✓
+- ★ 暂存时**按铁律 27 排除**三类不属于本棒的改动：① DSH 正在改的 `seat-contract.mjs` + `test-seat-contract.mjs`；
+  ② 别的会话的 `scripts/build-experiment-kernel.mjs`（**读 diff 确认不是我的**）；③ `AGENTS.md`（DSH 生成坏的中间态）。
+
+### 门读数（迁移件，全部可复跑）
+
+| 门 | 读数 |
+|---|---|
+| `scripts/seats/check-seat-defs.mjs` | **45 PASS / 0 FAIL / 0 SKIP**（含 F5a+F5b + A2 消融自证） |
+| `scripts/seats/gen-seat-registry.mjs --check` | **OK —— 3 份定义与生成物一致** |
+| `packages/subagent-council/test/seats-check.mjs` | **判据 7/7，消融 通过 ⇒ PASS** |
+| `scripts/seats/test-seat-toolscope.mjs` | **10 passed / 0 failed** |
+| `scripts/seats/test-evo-seats-online.mjs` | **13 passed / 0 failed** |
+| `scripts/delegation/test-evo-seats-mount.mjs` | **判据 11/11，消融 通过 ⇒ PASS**（原为既存 6/11 红） |
+
+### 消融自证（三条已成立，且都先证明替换真的落地）
+
+1. **F5a**：architect 的 `tools` 改 `full` ⇒ `[FAIL] F5a` ⇒ `44 PASS / 1 FAIL`；恢复后 md5 一致。
+2. **F5b**：删掉 review 的【你不做】整条 ⇒ `[FAIL] F5b` ⇒ `44 PASS / 1 FAIL`；恢复后 md5 = `66c005d5…` 一致。
+   ★ 第一次用 `sed` 空转（**静默 exit 0**）⇒ **不算通过**；重做加了"回读断言 + 独立 grep 复核"（见铁律 47）。
+3. **seats-check 消融**：锚点从 `resolvedSeats.push(def)` 改成**真正的决策点** `continue`。
+   ★ 第一版锚点选错（`continue` 在它之前短路 ⇒ 消融永不触发），实测 `ablNames` 只 1 个即铁证。
+
+### `seats-check.mjs` ②③ 的显式裁决（**不是"判据过时所以放宽"**）
+
+| 旧锚点 | 新锚点 | 语义 |
+|---|---|---|
+| `## 职责边界（严格遵守）` | `## Key Distinctions` | ✅ 正文仍是"你不做 X / 你的边界是 Y" |
+| "六段 / 五段产出要素" | `## Output Contract` | ✅ 逐项编号的产出契约 |
+| "我可能错在哪" | `## Rationalization Table` + `## Red Flags` | ✅ 借口对照表 + 红旗清单 |
+
+⇒ 判据**改成锚新章节名 + 新增两条更硬的**：① 必须写死段数（量词容忍 段/项/条/点）；
+② review 席必须有三态裁决（`UNKNOWN` + `不许给总评`，对应铁律 33）。
+
+### ★★★ 核验 DSH 半成品时抓出的两条新故障（**它的自报里一条都没提**）
+
+**故障 A —— G11「独立性档位」是【规格里不存在的必需段落】⇒ 系统性假红**
+
+- 实测：`W1/W2/W3a/W3b/W5/W6` **全部**带 `G11-MISSING`（`必需段落「独立性档位」缺失`）。
+- 根因：`seat-contract.mjs:708-715` 把它设成**三席共同的必需段落**，但三份 md 的 Output Contract
+  （六段/五项/四段）**没有任何一份**含它。
+- ★ 最坏的连带伤害：**W2 那两条**（本意"缺「方案」/「推荐」⇒ FAIL 并**指名那个段**"）
+  现在返回 `G11-MISSING（独立性档位）` ⇒ **指名指错了段**，W2 已失去它要测的东西。
+- ⇒ 铁律 37（判据照规格写、不照实现写）的反面教材。已 steer 04。
+
+**故障 B —— `★ **你不做**：` 的内容被塞进「负责」栏 ⇒ `AGENTS.md` 三席全部反向**
+
+实测三席（逐字）：
+- architect 负责 = `定「做什么、为什么这」；提「方案」；写实现、改仓库、批准自己的方案`
+  ⇒ ★ 后三项**正是它【你不做】里的内容**！而同一段下面紧跟「工具域：只读 …… 它**写不了**文件」⇒ **自相矛盾**。
+- dev 负责 = `…；批准自己的变更、审查自己的产物、把"我改了"当成"改好了"` ⇒ 全是它被**明令禁止**的事。
+- review 负责 = `反驳方案；一旦动手改；改文件、写实现、批准自己参与产出的东西` ⇒ 同上。
+- ★ **三席的 `- **不接**：` 整行全部消失**。
+
+根因（`seat-contract.mjs:236-241`）：拿到 `ADMITS_STARS` 后**不看 `starMatch[1]` 的极性**，
+一律 `admits.push(starMatch[2])`。而 `★ **你不做**：` 与 `★ **你只裁**：` **语义相反**。
+且那条 `continue` 把整行吃掉 ⇒ 后面基于 `REFUSES` 的扫描跑不到 ⇒ `refuses` 为空
+⇒ `gen-roster.mjs:141` 的 `if (c.boundary.refuses?.length)` 不成立 ⇒ 「不接」整行消失。
+
+★ **严重性**：花名册是**顶层 AI 派活的唯一依据** ⇒ 派错方向 ⇒ 每次派错、每次退回。
+且 `AGENTS.md` 头部逐字写着 `DO NOT EDIT BY HAND` ⇒ 必须**修生成器再重跑**，不许手改。已 steer 05。
+
+### ★ 方法论价值（这一轮最值钱的东西）
+
+- **"子 agent 报'改好了'" ≠ "改好了"**（铁律 29）：DSH 修对了 ① 并让崩溃消失，
+  但**同时引入两条更隐蔽的故障** —— 因为它只看了"不崩了"，没**照规格**核"产出对不对"。
+- ★★ **"不崩" ≠ "判据有效"**：故障 A 让判据从"崩"变成"逢错必报的噪音机"（铁律 13），
+  这比崩**更坏** —— 崩了你会去查，**噪音你会开始忽略**。
+- ★ **核验手法**：不是重跑它跑过的门（那只复现它的读数），而是
+  ① **读产物原文**（`AGENTS.md`，派生物 → 铁律 40）；② **拿规格（三份 md）逐条比**（铁律 37）。
+  ⇒ 两条故障都是这样看出来的。
+
+### 备份（不入库）
+
+`out/_seat-migration/`：`index.ts.before` / `legacy-personas.json` / `preset.agent.cordis.yml.before` /
+`library-md-before.txt` / `probe-admits.mjs`（admits 正则探针）/ `f5b-ablate.mjs` / `sink.mjs` / `lesson47.mjs`。
