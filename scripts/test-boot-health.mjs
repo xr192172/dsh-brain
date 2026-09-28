@@ -106,7 +106,7 @@ const READY_LINE = 'dsh web: http://127.0.0.1:3095'
 
 const HEALTHY_SEGMENT = [
   '===== BOOT gen=gen-3095 port=3095 mode=staging at=2026-09-14T09:1x:xx.xxxZ =====',
-  '[design-canvas-bridge] apply running; 预热工具=mcp__design-canvas__import_project enabled=true',
+  '[agent-io-bridge] apply running; 预热工具=mcp__agent-io__import_project enabled=true',
   '[design-canvas v0.1.3] MCP server started (stdio)',
   READY_LINE,
   '',

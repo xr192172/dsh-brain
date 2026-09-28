@@ -193,7 +193,7 @@ else { Say '已进回收站（可还原）。确认一段时间无异常后，�
 Say ''
 Say '随后请确认：'
 Say '  1) node D:\project_develop\design-canvas\dist\src\server.js   （DSH 侧仍能拉起）'
-Say '  2) 换代/重启后 mcp__design-canvas__* 工具仍在（58 个）'
+Say '  2) 换代/重启后 mcp__agent-io__* 工具仍在（58 个）'
 Say '  3) 归档在 D:\project_develop\_from-downloads\20260914\ 可正常浏览'
 Say ''
 Say '若将来要继续做 dsl-workbench（远端是唯一来源，本地不保留旧副本）：'

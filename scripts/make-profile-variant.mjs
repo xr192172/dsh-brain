@@ -31,7 +31,7 @@ const drops = argv.reduce((acc, a, i) => (a === '--drop' ? [...acc, argv[i + 1]]
 /** `--drop-insert <loader-id>`：从 `cordis.patch.yml` 里删掉某个 `- insert:` 块。
  *  ★ 为什么必须有它（2026-09-20 实测）：能力可能有**两条**进工具的路径 ——
  *    包（bundle）+ profile 里 `- insert: id: mcp-client`（指向外部 MCP server）。
- *    只 drop bundle ⇒ 那个能力的工具**照样在**（实测：B 臂仍有 mcp__design-canvas__*）。 */
+ *    只 drop bundle ⇒ 那个能力的工具**照样在**（实测：B 臂仍有 mcp__agent-io__*）。 */
 const dropInserts = argv.reduce((acc, a, i) => (a === '--drop-insert' ? [...acc, argv[i + 1]] : acc), []).filter(Boolean)
 
 if (argv.includes('--list')) {

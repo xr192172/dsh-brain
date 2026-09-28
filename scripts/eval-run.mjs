@@ -236,7 +236,7 @@ function extractMetrics(recs) {
   //   B=39605 字符、命中 0 ⇒ 用 `dcHits` 判臂，而不是 `toolsCount`。
   const systemText = String(hdr?.data?.header?.system ?? '')
   const systemChars = systemText.length
-  const dcHits = (systemText.match(/design_canvas_|mcp__design-canvas__/g) ?? []).length
+  const dcHits = (systemText.match(/design_canvas_|mcp__agent-io__/g) ?? []).length
 
   return {
     events: recs.length,
@@ -1212,17 +1212,17 @@ const CTRL = process.env.DSH_CTRL ?? 'http://127.0.0.1:31800'
 /** 各 profile **必须看不见**的工具家族（缺失型臂的判据；否则 102 个工具也会被判"就绪"）。 */
 const PROFILE_TOOL_FORBID = {
   web: [],
-  'web-nodc': ['mcp__design-canvas__*', 'design_canvas_*', 'self_evolve'],
+  'web-nodc': ['mcp__agent-io__*', 'design_canvas_*', 'self_evolve'],
   'web-notev': [],
   "exp-base": [],
-  "exp-base-nodc": ['mcp__design-canvas__*', 'design_canvas_*', 'self_evolve'],
+  "exp-base-nodc": ['mcp__agent-io__*', 'design_canvas_*', 'self_evolve'],
 }
 
 const PROFILE_TOOL_MUST = {
-  web: ['mcp__design-canvas__*'],
+  web: ['mcp__agent-io__*'],
   'web-nodc': [],
-  'web-notev': ['mcp__design-canvas__*'],
-  "exp-base": ['mcp__design-canvas__*'],
+  'web-notev': ['mcp__agent-io__*'],
+  "exp-base": ['mcp__agent-io__*'],
   "exp-base-nodc": [],
 }
 

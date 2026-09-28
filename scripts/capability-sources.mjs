@@ -4,7 +4,7 @@
  * 为什么要抽成共享模块：这个扫描**曾经有两个副本**，而且副本还是**过期**的。
  *
  *   旧版 `capability-registry.mjs` 里的 `scanMcpSource` 用正则去源码里找
- *   `{ name: '...' }` 与 `id: '...'` —— 那是 design-canvas 2026-09-14 改造**之前**的格式。
+ *   `{ name: '...' }` 与 `id: '...'` —— 那是 agent-io 2026-09-14 改造**之前**的格式。
  *   改造后「工具集合由注册表 `TOOL_DEFS` 运行时派生、人工只维护 `LANE_OF` 归属」，
  *   于是旧正则必然失效，并把「67 个工具全部未归线」这种**假漂移**报出来。
  *
@@ -20,18 +20,18 @@ import { pathToFileURL } from 'node:url'
 /**
  * 外部能力源登记表。
  *
- * 为什么必须登记它们：**模型手里大部分工具来自 MCP** —— design-canvas 一家就 60+ 个。
+ * 为什么必须登记它们：**模型手里大部分工具来自 MCP** —— agent-io 一家就 60+ 个。
  * 只登记 subagent provider 的能力库，给模型的是**半个答案**。
  *
- * 而且 design-canvas 自带 `capability_map`（6 条能力线 / direct 直调白名单），
+ * 而且 agent-io 自带 `capability_map`（6 条能力线 / direct 直调白名单），
  * **它已经在做工具层的能力导航** ⇒ 我们**对接而不是重复造**：
  *   · 我们的 `list_capabilities` 给**跨源总览**（委派能力 + 工具能力源）
  *   · 它的 `capability_map` 给它自己**内部的线级导航**
- *   · 桥接：总览里点名"design-canvas：6 条能力线，细节调 capability_map"
+ *   · 桥接：总览里点名"agent-io：6 条能力线，细节调 capability_map"
  */
 export const MCP_SOURCES = [
   {
-    id: 'design-canvas',
+    id: 'agent-io',
     kind: 'mcp-server',
     label: '设计画布（人机共享可视化 MCP：DSL → 自包含 HTML）',
     repo: 'D:/project_develop/design-canvas',
@@ -75,7 +75,7 @@ export async function scanMcpSource(m) {
   try {
     if (!m?.regEntry || !m?.cmEntry) throw new Error('能力源未声明 regEntry / cmEntry')
     if (!fs.existsSync(m.regEntry) || !fs.existsSync(m.cmEntry)) {
-      throw new Error(`找不到编译产物（先在 design-canvas 里 build）：${m.regEntry}`)
+      throw new Error(`找不到编译产物（先在 agent-io 里 build）：${m.regEntry}`)
     }
     const reg = await import(pathToFileURL(m.regEntry).href)
     const cm = await import(pathToFileURL(m.cmEntry).href)

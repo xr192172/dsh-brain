@@ -188,7 +188,7 @@
  *
  * **它是谁生成的（w58 实测，不是推测）**：**会话期**的 design-canvas MCP server（内核 v0.1.3）。
  *   · 铁证（只读解压 `~/.dsh/sessions/--C-_abB-experiment-root-wt--/` 里的 B 臂会话 `session-b1807c50`）：
- *     `mcp__design-canvas__find_references {project_dir:"C:\\_abB-experiment-root\\wt"}` 的时间是
+ *     `mcp__agent-io__find_references {project_dir:"C:\\_abB-experiment-root\\wt"}` 的时间是
  *     `2026-09-22T16:14:06.475Z`，而 `C:/_abB-experiment-root/wt/.design-canvas/cache.db` 的 mtime 是
  *     `16:14:06.578Z`（**+103 ms**）、数据库自记的 `schema_versions.applied_at` = `16:14:06.626Z`
  *     ⇒ **就是这个工具调用把目录建出来的**。
