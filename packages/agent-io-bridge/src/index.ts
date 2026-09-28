@@ -1,10 +1,10 @@
 /**
- * design-canvas-bridge — design-canvas 原生接入桥（@dsh-brain/design-canvas-bridge）。
+ * agent-io-bridge — agent-io 原生接入桥（@dsh-brain/agent-io-bridge）。
  *
  * 分工：
- *   - MCP 承载：DSH 原生 @deepseek-ai/dsh-mcp-client 以 stdio 连 design-canvas，
+ *   - MCP 承载：DSH 原生 @deepseek-ai/dsh-mcp-client 以 stdio 连 agent-io，
  *     把 67 个工具注册到 ctx.tools，命名空间 `mcp__<serverName>__<rawName>`
- *     （如 `mcp__design-canvas__import_project` / `explore_code` / `impact_analysis`）。
+ *     （如 `mcp__agent-io__import_project` / `explore_code` / `impact_analysis`）。
  *   - 本插件：在用户“选中/新建工作区”时，自动调用 `import_project` 对工作区做
  *     前置解析 —— tree-sitter 建立符号/import/调用边/类型引用索引并持久化 DSL，
  *     之后 explore_code / find_references / impact_analysis 等直接走已建索引（AST 前置工作）。
@@ -48,7 +48,7 @@ function canForceGc(): boolean {
   return typeof (globalThis as { gc?: unknown }).gc === 'function'
 }
 
-export const name = 'design-canvas-bridge'
+export const name = 'agent-io-bridge'
 // 顶层声明这两个关节：apply 时已就绪；mcp-client 的 ToolRuntime 同属 ctx.tools，
 // 但其工具注册是异步的，故预热前仍需 get() 判在。
 export const inject: string[] = ['workspaceRegistry', 'tools']
@@ -68,7 +68,7 @@ export interface Config {
   designMode: boolean
   /**
    * 深度注入的内核仓库根目录（含 dist/src/tools/）。非空则启用 `symbol_edit`
-   * 复合工具：本进程直接 `import` design-canvas 内核的 editCode / findReferences
+   * 复合工具：本进程直接 `import` agent-io 内核的 editCode / findReferences
    * 纯函数串联（不走 stdio MCP 子进程）。这也绕开了"工具内再 execute 其它 MCP
    * 工具"的嵌套调度问题——深度注入没有经 ctx.tools 的二次工具调用。
    */
@@ -88,7 +88,7 @@ function tolerantConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
 export const Config = tolerantConfig(
   z.object({
     enabled: z.boolean().default(true),
-    serverName: z.string().default('design-canvas'),
+    serverName: z.string().default('agent-io'),
     maxFiles: z.number().int().min(1).max(10000).default(300),
     includeTests: z.boolean().default(false),
     includeArchive: z.boolean().default(false),
@@ -112,7 +112,7 @@ function warm(ctx: Context, inFlight: Set<string>, imported: Set<string>, toolNa
   if (!config.enabled) return
   if (imported.has(canonicalPath) || inFlight.has(canonicalPath)) return
   if (!ctx.tools.get(toolName)) {
-    console.log(`[design-canvas-bridge] '${toolName}' 尚未就绪，跳过 ${canonicalPath} 预热（mcp-client 连接中？）`)
+    console.log(`[agent-io-bridge] '${toolName}' 尚未就绪，跳过 ${canonicalPath} 预热（mcp-client 连接中？）`)
     return
   }
   const feature = featureNameFrom(canonicalPath)
@@ -133,10 +133,10 @@ function warm(ctx: Context, inFlight: Set<string>, imported: Set<string>, toolNa
     })
     .then(() => {
       imported.add(canonicalPath)
-      console.log(`[design-canvas-bridge] 已预热 ${canonicalPath} -> feature "${feature}"`)
+      console.log(`[agent-io-bridge] 已预热 ${canonicalPath} -> feature "${feature}"`)
     })
     .catch((err: unknown) => {
-      console.log(`[design-canvas-bridge] 预热失败 ${canonicalPath}: ${err instanceof Error ? err.message : String(err)}`)
+      console.log(`[agent-io-bridge] 预热失败 ${canonicalPath}: ${err instanceof Error ? err.message : String(err)}`)
     })
     .finally(() => inFlight.delete(canonicalPath))
   // 不 await：预热是后台工作，不阻塞 create。run 内部的 catch 已吞掉错误。
@@ -190,7 +190,7 @@ interface KernelModule {
   moveSymbol: (args: Record<string, unknown>) => Promise<MoveSymbolResultLite>
 }
 
-/** 动态加载 design-canvas 内核（进程内，非 stdio 子进程）。失败即抛，由调用方兜底。 */
+/** 动态加载 agent-io 内核（进程内，非 stdio 子进程）。失败即抛，由调用方兜底。 */
 async function loadKernel(kernelDir: string): Promise<KernelModule> {
   const toolsDir = path.join(kernelDir, 'dist', 'src', 'tools')
   const ec = (await import(pathToFileURL(path.join(toolsDir, 'edit_code.js')).href)) as {
@@ -216,7 +216,7 @@ function shortErr(e: unknown): string {
 // ── 沙箱 seam：本插件的「写」必须先过 seam（O92 缺口二）──────────────────────────
 //
 // 为什么需要：`symbol_edit` / `safe_rename` / `move_symbol` 把落盘交给**进程内**加载的
-// design-canvas 内核（`loadKernel` ⇒ `import()` design-canvas/dist/src/tools/*.js），
+// agent-io 内核（`loadKernel` ⇒ `import()` agent-io/dist/src/tools/*.js），
 // 而内核自己 `import fs from 'node:fs'`（`edit_code.js:16` / `rename_symbols.js:14` /
 // `symbol_move.js:15`）⇒ 它的写**不经过 `ctx.fs`**，于是绕过了本该走的 fs seam
 // （`ctx.fs` 默认就是 `@deepseek-ai/dsh-fs-sandbox`，见
@@ -224,7 +224,7 @@ function shortErr(e: unknown): string {
 // 管得住 `ctx.fs`，却管不住这条进程内的写 —— 这正是 cli-0005 A 臂改判据根的那条路。
 //
 // 为什么不是「给内核注入受限 fs」：内核是**外仓产物**，三个入口只接业务参数、
-// 顶层就绑定了 `node:fs`，没有任何 fs 注入点 ⇒ 在不改 design-canvas 的前提下注入不了。
+// 顶层就绑定了 `node:fs`，没有任何 fs 注入点 ⇒ 在不改 agent-io 的前提下注入不了。
 // 所以走**调用前过 seam**：把本次要落的每个目标先交给 fs seam 判一次，被拒就
 // **根本不调内核**（因此不存在"改了一半"的中间态）。
 //
@@ -294,7 +294,7 @@ async function fenceThroughFsSeam(ctx: Context, exec: ToolRunContext | undefined
   if (fsSvc === undefined || fsSvc.sandboxMode === undefined) return
   const policySvc = ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
   if (policySvc === undefined) {
-    throw new Error('design-canvas-bridge: 挂载的文件系统受沙箱约束，但 ctx.sandboxPolicy 缺失 —— 拒绝落盘')
+    throw new Error('agent-io-bridge: 挂载的文件系统受沙箱约束，但 ctx.sandboxPolicy 缺失 —— 拒绝落盘')
   }
   const session = exec?.agent?.session
   const policy = policySvc.resolve(session === undefined ? {} : { session })
@@ -316,7 +316,7 @@ async function fenceThroughFsSeam(ctx: Context, exec: ToolRunContext | undefined
 /** 读项目 cache.db 的索引规模（文件/符号/边/导入数）；未预热返回 null。 */
 function indexCounts(projectDir: string): { files: number; nodes: number; edges: number; imports: number } | null {
   try {
-    const p = path.join(projectDir, '.design-canvas', 'cache.db')
+    const p = path.join(projectDir, '.agent-io', 'cache.db')
     if (!fs.existsSync(p)) return null
     const db = new DatabaseSync(p, { readOnly: true })
     const count = (t: string): number => {
@@ -338,7 +338,7 @@ function isFileIndexed(projectDir: string, file?: string): boolean {
   try {
     const abs = path.isAbsolute(file) ? file : path.resolve(projectDir, file)
     const rel = path.relative(projectDir, abs).split(path.sep).join('/')
-    const dbPath = path.join(projectDir, '.design-canvas', 'cache.db')
+    const dbPath = path.join(projectDir, '.agent-io', 'cache.db')
     if (!fs.existsSync(dbPath)) return false
     const db = new DatabaseSync(dbPath, { readOnly: true })
     try {
@@ -360,7 +360,7 @@ export function apply(ctx: Context, config: Config): void {
   }
   const importToolName = `mcp__${config.serverName}__import_project`
   const capMapToolName = `mcp__${config.serverName}__capability_map`
-  console.log(`[design-canvas-bridge] config: serverName=${config.serverName} kernelDir=${JSON.stringify(config.kernelDir)} enabled=${config.enabled}`)
+  console.log(`[agent-io-bridge] config: serverName=${config.serverName} kernelDir=${JSON.stringify(config.kernelDir)} enabled=${config.enabled}`)
   const imported = new Set<string>()
   const inFlight = new Set<string>()
   // 记录已索引的项目（feature → 状态），供轻量工具按需返回，不把 AST 全量回灌模型上下文。
@@ -382,7 +382,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'design_canvas_index',
     description:
-      '查询所有已被 design-canvas 预热/索引完成的工作区，以及 design-canvas 全量能力线和工具导航地图（轻量、按需），用于在需要符号/关系检索前先定位该用哪个工具。',
+      '查询所有已被 agent-io 预热/索引完成的工作区，以及 agent-io 全量能力线和工具导航地图（轻量、按需），用于在需要符号/关系检索前先定位该用哪个工具。',
     parameters: {
       lane: {
         type: 'string',
@@ -401,7 +401,7 @@ export function apply(ctx: Context, config: Config): void {
       const header = `### Design Canvas 索引状态\n\n已预热索引的工作区：\n${featureList || '  (暂无，选中/新建工作区后自动预热)'}\n\n### 能力导航地图\n\n`
 
       if (!ctx.tools.get(capMapToolName)) {
-        return `${header}[design-canvas-bridge] capability_map 工具未就绪（MCP server 未启动/连接中），请稍后重试。`
+        return `${header}[agent-io-bridge] capability_map 工具未就绪（MCP server 未启动/连接中），请稍后重试。`
       }
       const capResult = (await ctx.tools.execute({
         name: capMapToolName,
@@ -416,7 +416,7 @@ export function apply(ctx: Context, config: Config): void {
   }))
 
   // ── 深度注入 / 精准编辑（symbol_edit）──────────────────────────────────────
-  // 探针与 V1 合一：不走 stdio MCP 子进程，而是本进程动态 `import` design-canvas
+  // 探针与 V1 合一：不走 stdio MCP 子进程，而是本进程动态 `import` agent-io
   // 内核的 editCode / findReferences 纯函数直接串联（见 loadKernel）。因此不存在
   // "工具内再 ctx.tools.execute 其它 MCP 工具"的嵌套调度坑——深度注入天然绕开。
   // 不引内嵌 LLM：模型先给出结构化 file/op/symbol/code，工具负责"影响面→精准落盘→回报"。
@@ -549,7 +549,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
       }))
-      console.log(`[design-canvas-bridge] symbol_edit 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+      console.log(`[agent-io-bridge] symbol_edit 已注册（深度注入，kernelDir=${config.kernelDir}）`)
 
       // ── 安全重命名（safe_rename）：符号层跨文件 AST 重命名 + 文本层字面量引用一并改 ──
       // 编排壳包 renameSymbols：两点原子（任一阻断整体不落盘）；report_literals 扫描旧符号
@@ -668,7 +668,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
       }))
-      console.log(`[design-canvas-bridge] safe_rename 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+      console.log(`[agent-io-bridge] safe_rename 已注册（深度注入，kernelDir=${config.kernelDir}）`)
 
       ctx.tools.register(defineTool({
         name: 'move_symbol',
@@ -751,7 +751,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         },
       }))
-      console.log(`[design-canvas-bridge] move_symbol 已注册（深度注入，kernelDir=${config.kernelDir}）`)
+      console.log(`[agent-io-bridge] move_symbol 已注册（深度注入，kernelDir=${config.kernelDir}）`)
 
       ctx.tools.register(defineTool({
         name: 'self_evolve',
@@ -759,11 +759,11 @@ export function apply(ctx: Context, config: Config): void {
           '自进化·单指令闭环（实验脑）：把一组改动(patch=文件+新内容)建进独立实验内核产物，' +
           '让本次 staging 单独加载它并跑验证闸，通过才 flip、失败回滚且生产无损。' +
           '内部复用 scripts/build-experiment-kernel.mjs + scripts/evolve.mjs。' +
-          '入参：patch（[{file,content}]，源在 src/src 下）、src（design-canvas 源码根，缺省用内核 kernelDir）、' +
+          '入参：patch（[{file,content}]，源在 src/src 下）、src（agent-io 源码根，缺省用内核 kernelDir）、' +
           'verify（可选验证脚本，须在控制面启动 env 的 VERIFY_ALLOW 白名单内）。返回交接结果。',
         parameters: {
           patch: { type: 'array', description: '改动列表 [{file:"src/tools/xxx.ts", content:"整文件新内容"}]' },
-          src: { type: 'string', description: 'design-canvas 源码根（缺省 kernelDir）' },
+          src: { type: 'string', description: 'agent-io 源码根（缺省 kernelDir）' },
           verify: { type: 'string', description: '可选验证脚本绝对路径（须在 VERIFY_ALLOW 白名单内）' },
           out: { type: 'string', description: '可选实验内核产物目录（缺省自动临时目录）' },
           admin: { type: 'string', description: '可选 switchboard admin 端口（默认 31800）' },
@@ -833,9 +833,9 @@ patch = [
           }
         },
       }))
-      console.log(`[design-canvas-bridge] self_evolve 已注册（深度注入）`)
+      console.log(`[agent-io-bridge] self_evolve 已注册（深度注入）`)
     } else {
-      console.log(`[design-canvas-bridge] 深度注入跳过：内核入口缺失 ${editEntry}`)
+      console.log(`[agent-io-bridge] 深度注入跳过：内核入口缺失 ${editEntry}`)
     }
   }
 
@@ -846,7 +846,7 @@ patch = [
   ctx.tools.register(defineTool({
     name: 'design_canvas_prewarm_scan',
     description:
-      '扫描已知路径，列出候选项目目录（含 .design-canvas 索引状态），' +
+      '扫描已知路径，列出候选项目目录（含 .agent-io 索引状态），' +
       '供模型在 safe_rename/find_references/symbol_edit 前明确选择目标。' +
       '扫描路径：workspaceDir、home 下级常见源码目录、session 工作目录。' +
       '返回格式：[{path, feature, indexed, fileCount, suggestion}]，' +
@@ -874,8 +874,8 @@ patch = [
           const rp = path.resolve(p)
           if (seen.has(rp) || !fs.existsSync(rp)) return
           seen.add(rp)
-          // 检查是否为项目根（含 .design-canvas 或 package.json/go.mod）
-          const hasDS = fs.existsSync(path.join(rp, '.design-canvas'))
+          // 检查是否为项目根（含 .agent-io 或 package.json/go.mod）
+          const hasDS = fs.existsSync(path.join(rp, '.agent-io'))
           const hasPM = fs.existsSync(path.join(rp, 'package.json')) || fs.existsSync(path.join(rp, 'go.mod'))
           if (!hasDS && !hasPM) return
           const idx = indexCounts(rp)
@@ -899,7 +899,7 @@ patch = [
         }
         // 扫描额外目录
         for (const d of scanDirs) addCandidate(d)
-        if (candidates.length === 0) return '未发现候选项目（扫描路径均无 package.json/go.mod/.design-canvas）'
+        if (candidates.length === 0) return '未发现候选项目（扫描路径均无 package.json/go.mod/.agent-io）'
         const lines = ['### 候选项目目录\n']
         for (const c of candidates) {
           const tag = c.indexed ? '✅' : (c.suggestion === 'prewarm' ? '⚠️' : '❓')
@@ -914,7 +914,7 @@ patch = [
       }
     },
   }))
-  console.log(`[design-canvas-bridge] design_canvas_prewarm_scan 已注册`)
+  console.log(`[agent-io-bridge] design_canvas_prewarm_scan 已注册`)
 
   // ── 显式预热工具：design_canvas_prewarm ──
   // DSH 不经 workspaceRegistry.create 建工作区（全仓无该调用），原 create 拦截的自动预热
@@ -924,7 +924,7 @@ patch = [
   ctx.tools.register(defineTool({
     name: 'design_canvas_prewarm',
     description:
-      '对指定项目根目录执行 design-canvas import_project 全量建立符号/import 索引（AST 前置）。' +
+      '对指定项目根目录执行 agent-io import_project 全量建立符号/import 索引（AST 前置）。' +
       '之后 find_references / safe_rename / symbol_edit 影响面会走索引、明显变快。' +
       '未预热的大仓跑 find/rename 会即时全闭包扫描、极慢——先在动作前对该 project_dir 预热一次。',
     parameters: {
@@ -940,7 +940,7 @@ patch = [
         const p = args.project_dir ? path.resolve(String(args.project_dir)) : ''
         if (!p) return '需要 project_dir（项目根目录绝对路径）'
         if (!ctx.tools.get(importToolName)) {
-          return 'import_project 工具未就绪（design-canvas MCP 连接中/未启动），请稍后重试；depth-inject 内核不承担建索引，需经 MCP 子进程。'
+          return 'import_project 工具未就绪（agent-io MCP 连接中/未启动），请稍后重试；depth-inject 内核不承担建索引，需经 MCP 子进程。'
         }
         const feature = featureNameFrom(p)
         console.log(`[dsb-prewarm] start ${p} feature=${feature}`)
@@ -970,7 +970,7 @@ patch = [
       }
     },
   }))
-  console.log(`[design-canvas-bridge] design_canvas_prewarm 已注册`)
+  console.log(`[agent-io-bridge] design_canvas_prewarm 已注册`)
 
   // ── 内存观测：memory_observe（跨运行时通用的检测壳：基线→追踪→触发→快照）──
   // 思路对 GC 与非 GC 运行时通用，换的只是"驱动诊断器"那一层。在 Node/V8 下用
@@ -1119,7 +1119,7 @@ patch = [
         lines.push(`t+${Math.round((now.t - t0) / 1000)}s RSS=${mb(now.rss)}MB heapUsed=${mb(now.heapUsed)}MB`)
         if (memoryBase.get(key)) lines.push('已有基线；此快照可与基线期场景对照，或两次快照之间做 heap diff 定位持有者。')
         try {
-          const dir = args.project_dir ? path.join(path.resolve(String(args.project_dir)), '.design-canvas') : process.cwd()
+          const dir = args.project_dir ? path.join(path.resolve(String(args.project_dir)), '.agent-io') : process.cwd()
           fs.mkdirSync(dir, { recursive: true })
           const file = path.join(dir, `heap-${Date.now()}.heapsnapshot`)
           const wrote = v8.writeHeapSnapshot(file)
@@ -1139,8 +1139,8 @@ patch = [
       return out(lines.join('\n'), deltas, verdict)
     },
   }))
-  console.log(`[design-canvas-bridge] memory_observe 已注册`)
-  console.log(`[design-canvas-bridge] apply running; 预热工具=${importToolName} enabled=${config.enabled}`)
+  console.log(`[agent-io-bridge] memory_observe 已注册`)
+  console.log(`[agent-io-bridge] apply running; 预热工具=${importToolName} enabled=${config.enabled}`)
 }
 
 /** 便于拦截的类型别名（真正的实例由 @deepseek-ai/dsh-workspace 提供，类型上不透出可变 create）。 */

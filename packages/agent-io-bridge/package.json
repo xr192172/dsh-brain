@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-brain/design-canvas-bridge",
+  "name": "@dsh-brain/agent-io-bridge",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     },
     "./package.json": "./package.json"
   },
-  "description": "design-canvas 原生接入桥：DSH 通过 @deepseek-ai/dsh-mcp-client 把 design-canvas 的 MCP 工具注册到 ctx.tools（mcp__design-canvas__*），本插件在选中工作区时自动调用 import_project 预热 tree-sitter AST + 符号索引。",
+  "description": "agent-io 原生接入桥：DSH 通过 @deepseek-ai/dsh-mcp-client 把 agent-io 的 MCP 工具注册到 ctx.tools（mcp__agent-io__*），本插件在选中工作区时自动调用 import_project 预热 tree-sitter AST + 符号索引。",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

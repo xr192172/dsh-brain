@@ -190,7 +190,7 @@ export type SeatToolScope = "readonly" | "full";
  *
  * ★ 被**故意排除**的（以及为什么）：
  *   · `write` / `edit` / `pwsh` / `bash` —— 直接改盘/执行
- *   · `mcp__design-canvas__*` —— 里面有 `edit_code` / `rename_*` / `move_symbol` 等
+ *   · `mcp__agent-io__*` —— 里面有 `edit_code` / `rename_*` / `move_symbol` 等
  *     一整套改代码的工具。**整个前缀都不给**（比逐个 deny 稳）。
  *   · `subagent` / `subagent_fork` / `workflow` / `ralph` —— 席位**不再向下委派**：
  *     那会造出"审阅席又生了一层子代理"，独立性彻底不可核对。

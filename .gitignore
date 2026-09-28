@@ -15,6 +15,9 @@ node_modules/
 out/
 logs/
 .design-canvas/
+# ★ 2026-09-28：主仓改名 design-canvas → agent-io，运行时数据目录随之改名。
+#   两个都留：旧名在既有数据布局里仍可能出现（如 .agent-io/.design-canvas/）。
+.agent-io/
 **/dist/
 **/lib/
 *.tsbuildinfo
