@@ -8,6 +8,8 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
     "web": "dsh web",
     "plugin": "dsh plugin",
     "postinstall": "patch-package && node scripts/patch-web-app-public-url.mjs && node scripts/patch-app-boot-bom.mjs && node scripts/patch-goal-round-driver.mjs && node scripts/patch-agent-loop-hardening.mjs && node scripts/patch-profile-deps.mjs",
@@ -33,6 +35,7 @@
   },
   "devDependencies": {
     "patch-package": "^8.0.1",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
   }
 }

@@ -151,16 +151,11 @@ const GATES = [
     what: '插件卫生：包完整性 / 残留 / deps 与 bundles / lock 一致 / 遗留物',
     cmd: ['node', 'scripts/check-plugin-hygiene.mjs'],
   },
-  {
-    id: 'undeclared-deps',
-    // ★ 为什么单开一道、而不并进 plugin-hygiene（防"判据分叉"）：
-    //   那道门判的是**装/卸是否干净**（profile 的 bundles ↔ packages 磁盘 ↔ lock），
-    //   **不判 import ↔ 声明**。2026-10-07 实测：`agent-io-bridge` 少声明
-    //   `@deepseek-ai/dsh-llm`、`key-pool-proxy` 少声明 `zod`，plugin-hygiene 一条都没报
-    //   ⇒ 判据不重叠，这里是补盲区，不是第二份副本。
-    what: '未声明依赖（幻影依赖）：源码里 import 了、但该包 package.json 四个键都没声明',
-    cmd: ['node', 'scripts/check-undeclared-deps.mjs'],
-  },
+  // ★ 2026-10-07：「未声明依赖」不再是一道**门**，搬去了 Vitest（`tests/undeclared-deps.test.ts`）。
+  //   依据（用户裁定）：*"我其实很讨厌这些门……我觉得有日志就够了"*、
+  //   *"拿那个套件来用，而不是自己去手搓门"*。
+  //   判据没变，**存在形式**变了 —— 跑 `npx vitest run`，不再进本门层。
+  //   （`scripts/check-undeclared-deps.mjs` 保留为纯逻辑 + 可选 CLI，供测试 import 与手工排查。）
   {
     id: 'profile',
     // ★ 2026-09-20 基线 582 → 575：582 是**含 `@dsh-brain/conveyor-context` 时**的行数，
@@ -401,11 +396,6 @@ const GATES = [
     id: 'test:plugin-hygiene',
     what: '插件卫生门自证（两方向）',
     cmd: ['node', 'scripts/test-plugin-hygiene.mjs'],
-  },
-  {
-    id: 'test:undeclared-deps',
-    what: '未声明依赖门自证（消融：干净必绿 / 植入 lodash 必红 / 停用词表 from 不误报 / 子路径归并）',
-    cmd: ['node', 'scripts/check-undeclared-deps.mjs', '--selftest'],
   },
   {
     id: 'test:message-shape',
