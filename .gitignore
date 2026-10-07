@@ -53,3 +53,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+# ───── 实验内核构建产物（不入库） ─────
+# `scripts/build-experiment-kernel.mjs --out <此目录>` 的输出：复制 src + patch + junction + tsc 出 dist。
+# ★ 脚本每次重建前会先 rmSync 它 ⇒ 它是**可随时重建的产物**，入库会让下一个人误以为是源码。
+/expt-kernel/
