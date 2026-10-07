@@ -152,6 +152,16 @@ const GATES = [
     cmd: ['node', 'scripts/check-plugin-hygiene.mjs'],
   },
   {
+    id: 'undeclared-deps',
+    // ★ 为什么单开一道、而不并进 plugin-hygiene（防"判据分叉"）：
+    //   那道门判的是**装/卸是否干净**（profile 的 bundles ↔ packages 磁盘 ↔ lock），
+    //   **不判 import ↔ 声明**。2026-10-07 实测：`agent-io-bridge` 少声明
+    //   `@deepseek-ai/dsh-llm`、`key-pool-proxy` 少声明 `zod`，plugin-hygiene 一条都没报
+    //   ⇒ 判据不重叠，这里是补盲区，不是第二份副本。
+    what: '未声明依赖（幻影依赖）：源码里 import 了、但该包 package.json 四个键都没声明',
+    cmd: ['node', 'scripts/check-undeclared-deps.mjs'],
+  },
+  {
     id: 'profile',
     // ★ 2026-09-20 基线 582 → 575：582 是**含 `@dsh-brain/conveyor-context` 时**的行数，
     //   而该包由用户**有意删除**（自研的上下文层被放弃，改用回**上游自带的**上下文管理）
@@ -391,6 +401,11 @@ const GATES = [
     id: 'test:plugin-hygiene',
     what: '插件卫生门自证（两方向）',
     cmd: ['node', 'scripts/test-plugin-hygiene.mjs'],
+  },
+  {
+    id: 'test:undeclared-deps',
+    what: '未声明依赖门自证（消融：干净必绿 / 植入 lodash 必红 / 停用词表 from 不误报 / 子路径归并）',
+    cmd: ['node', 'scripts/check-undeclared-deps.mjs', '--selftest'],
   },
   {
     id: 'test:message-shape',

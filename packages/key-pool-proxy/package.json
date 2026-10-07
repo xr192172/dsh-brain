@@ -22,7 +22,8 @@
     "build": "tsc -p tsconfig.json"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*"
+    "@deepseek-ai/cordis": "*",
+    "zod": "*"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
