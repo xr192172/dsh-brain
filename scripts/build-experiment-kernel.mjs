@@ -96,7 +96,12 @@ async function main() {
   }
 
   // 4) tsc 产出 dist（exclusive rootDir=out → dist/src/** 与 bridge 期望对齐）
-  const tsc = path.join(src, 'node_modules', 'typescript', 'bin', 'tsc');
+  // 优先使用 src/node_modules 中的 tsc，回退到根项目的 typescript
+  let tsc = path.join(src, 'node_modules', 'typescript', 'lib', 'tsc.js');
+  if (!fs.existsSync(tsc)) {
+    tsc = path.join(process.cwd(), 'node_modules', 'typescript', 'lib', 'tsc.js');
+  }
+  if (!fs.existsSync(tsc)) fail('tsc 未找到（请确保 typescript 已安装）');
   const r = spawnSync(process.execPath, [tsc, '-p', 'tsconfig.json'], {
     cwd: out,
     encoding: 'utf8',
