@@ -50,10 +50,17 @@ async function control(cmd, extra = {}) {
   }
 }
 
-/** 从 `?cmd=status` 里取"活跃代"。★ 取值刻意宽松：控制面字段名可能演化，取不到就如实说取不到。 */
+/**
+ * 从 `?cmd=status` 里取"活跃代"。
+ * ★★ 2026-10-07 **实测收紧**：控制面真实响应里活跃代在 **`lease.activeGen.gen`**，
+ *   而 `lease.activeGen` 是一个**对象** `{gen, port, pid}` ⇒ 早先的宽松取法会把它读成 `[object Object]`。
+ * ★ 保留后两行回退只为"字段再演化时不至于完全取不到"；取不到仍**如实返回 undefined**（不猜）。
+ */
 function activeGenOf(j) {
   if (!j || typeof j !== 'object') return undefined
-  const cand = j.activeGen ?? j.active ?? j.generation ?? j.lease?.activeGen ?? j.lease?.generation
+  const a = j.lease?.activeGen
+  if (a && typeof a === 'object' && a.gen) return String(a.gen)
+  const cand = j.activeGen ?? j.active ?? j.lease?.generation
   return typeof cand === 'string' || typeof cand === 'number' ? String(cand) : undefined
 }
 
