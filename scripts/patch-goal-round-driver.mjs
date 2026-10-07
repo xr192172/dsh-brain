@@ -5,12 +5,13 @@
 // ★ 2026-09-15：改用严格锚点应用器。旧版用 split/join 替换后只**打印计数** ——
 //   上游若已加 `?.`、或改了字段名，计数为 0 也照样"成功"退出，等于静默失效。
 //   现在锚点两态都不在 ⇒ 非 0 退出（`DSH_PATCH_STRICT=0` 可降级）。
-import { applyAnchors, reportAndExit } from './patch-anchors.mjs'
+import { applyAnchors, reportAndExit, resolveEntities } from './patch-anchors.mjs'
 
-const paths = [
-  'D:/project_develop/dsh-brain/node_modules/@deepseek-ai/dsh-goal-round-driver/lib/index.js',
-  'C:/Users/Admin/.dsh/profiles/node_modules/@deepseek-ai/dsh-goal-round-driver/lib/index.js',
-]
+// ★ 2026-10-07：改用**寻址**（`resolveEntities`）而非硬编码顶层路径 ——
+//   pnpm 换成链接模式后，实体只在 `.pnpm/` 里，顶层 `node_modules/@deepseek-ai/<包>/…` **不存在**
+//   ⇒ 旧写法会让整脚本走"该包未安装？跳过"⇒ **静默空转**（实测：升级后 5 个脚本全部如此）。
+//   ★ 只面向新版布局（按用户裁定 2026-10-07：旧版兼容性不考虑）。
+const paths = resolveEntities('@deepseek-ai/dsh-goal-round-driver')
 
 // 该处有**两处**出现 ⇒ all: true（替换全部）。
 const EDITS = [

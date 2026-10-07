@@ -39,9 +39,48 @@
  * ```
  */
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 /** 严格模式：锚点 missing ⇒ 非 0 退出。设 `DSH_PATCH_STRICT=0` 显式降级为仅告警。 */
 export const STRICT = process.env.DSH_PATCH_STRICT !== '0'
+
+/** pnpm 链接模式的实体根（`.pnpm/<目录名>/node_modules/<包>/…`）。 */
+function defaultRoots() {
+  return [
+    path.join(process.cwd(), 'node_modules', '.pnpm'),
+    path.join(os.homedir(), '.dsh', 'profiles', 'node_modules', '.pnpm'),
+  ]
+}
+
+/**
+ * ★★★ 2026-10-07 新增（升级到 pnpm **链接模式**后必需）：**在 `.pnpm` 里按包名解析实体**。
+ *
+ * ## 为什么需要它（本轮实测的静默失效）
+ * 旧写法把目标路径**硬编码**成 `node_modules/@deepseek-ai/<包>/lib/index.js` ——
+ * 那是 **hoisted 布局**下的路径。pnpm 换成链接模式后，**实体只在 `.pnpm/` 里**，
+ * 顶层那个路径**根本不存在** ⇒ `applyAnchors` 报 `exists:false` ⇒
+ * `reportAndExit` 走「该包未安装？跳过（不算失败）」⇒ **整脚本静默空转**。
+ * ★ 实测：升级后 **5 个 patch 脚本全部空转，而 `postinstall` 退出码是 0**。
+ *
+ * ★ 只面向**新版布局**（按用户裁定 2026-10-07：旧版兼容性不考虑）。
+ *
+ * @param {string} pkg 包名，如 `@deepseek-ai/dsh-goal-round-driver`
+ * @param {string} [rel] 包内相对路径
+ * @returns {string[]} 命中的实体文件绝对路径（可能多个：本仓树 + profile 树）
+ */
+export function resolveEntities(pkg, rel = 'lib/index.js', roots = defaultRoots()) {
+  const out = []
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue
+    for (const d of fs.readdirSync(root)) {
+      const p = path.join(root, d, 'node_modules', pkg, rel)
+      if (fs.existsSync(p)) out.push(p)
+    }
+  }
+  return out
+}
+
 
 /**
  * 对单个文件应用一组锚点改动。
