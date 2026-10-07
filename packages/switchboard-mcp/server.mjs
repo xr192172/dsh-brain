@@ -95,6 +95,7 @@ const TOOLS = [
     },
     run: async (a) => {
       const before = activeGenOf((await control('status')).json)
+      const beforeResult = (await control('status')).json?.result ?? null
       const trig = await control('handover', {
         profile: a.profile,
         fail: a.fail,
@@ -104,19 +105,36 @@ const TOOLS = [
       const t0 = Date.now()
       let after = before
       let lastStage
+      let settledBy = 'timeout'
       while (Date.now() - t0 < timeoutMs) {
         await new Promise((r) => setTimeout(r, 1500))
         const s = await control('status')
         after = activeGenOf(s.json) ?? after
         lastStage = s.json?.stage ?? s.json?.lease?.stage ?? lastStage
-        if (before !== undefined && after !== undefined && after !== before) break
-        if (before === undefined && after !== undefined) break
+        if (before !== undefined && after !== undefined && after !== before) {
+          settledBy = 'gen-changed'
+          break
+        }
+        if (before === undefined && after !== undefined) {
+          settledBy = 'gen-appeared'
+          break
+        }
+        // ★★ 早退判据（2026-10-07 实测补）：**代数不变时也必须能停**。
+        //   ★ 首次真跑实测：注入 fail=spawn ⇒ abort 发生在**秒级**，而本工具白等了 45s（满超时预算）。
+        //   ★ 判据 = `status.result` **发生变化**（它是"本轮换代的结论"落点；失败注入走 abort ⇒ 也会落结论）。
+        //     ★ 为什么比"变化"而不是比"非空"：它可能**本来就有值**（上一次换代的结论）⇒ 只看非空会立即误判 settled。
+        const nowResult = s.json?.result ?? null
+        if (JSON.stringify(nowResult) !== JSON.stringify(beforeResult)) {
+          settledBy = 'result-changed'
+          break
+        }
       }
       const moved = before !== after
       return (
         `${moved ? '✅ 代数变了' : '❌ 代数没动 —— 按 F2 判据这算**失败**（不许报成功）'}\n` +
         `  换代前：${before ?? '（取不到）'}\n  换代后：${after ?? '（取不到）'}\n` +
         `  阶段：${lastStage ?? '（取不到）'} · 耗时 ${Math.round((Date.now() - t0) / 1000)}s · 超时预算 ${timeoutMs}ms\n` +
+        `  结束方式：${settledBy}（gen-changed=代数变了 · result-changed=本轮出了结论 · timeout=白等到超时）\n` +
         `  触发响应：${JSON.stringify(trig.json ?? trig.text).slice(0, 600)}`
       )
     },
