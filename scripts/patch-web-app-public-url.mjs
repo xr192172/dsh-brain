@@ -17,12 +17,12 @@
 // ★ 2026-09-15：改用严格锚点应用器。旧版锚点找不到只打印 ⚠️ 然后继续，
 //   而这个脚本挂在 postinstall ⇒ 上游一变，补丁静默失效、无人被告知。
 //   现在锚点两态都不在 ⇒ 非 0 退出（`DSH_PATCH_STRICT=0` 可降级）。
-import { applyAnchors, reportAndExit } from './patch-anchors.mjs'
+import { applyAnchors, reportAndExit, resolveEntities } from './patch-anchors.mjs'
 
 const MARKER = 'DSH_PUBLIC_WEB_URL'
 const paths = [
-  'D:/project_develop/dsh-brain/node_modules/@deepseek-ai/dsh-web-app/lib/index.js',
-  'C:/Users/Admin/.dsh/profiles/node_modules/@deepseek-ai/dsh-web-app/lib/index.js',
+  // ★ 2026-10-07：改用**寻址**（pnpm 链接模式下实体只在 `.pnpm/` 里，顶层路径不存在）
+  ...resolveEntities('@deepseek-ai/dsh-web-app'),
 ]
 
 const OLD = `function localWebUrl(ctx) {

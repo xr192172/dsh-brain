@@ -19,13 +19,13 @@
 //   重复执行安全：已打补丁时直接跳过。
 //
 // 注意：这是直接改 node_modules，npm install 会被冲掉 —— 已挂到 package.json 的 postinstall。
-import { applyAnchors, reportAndExit } from './patch-anchors.mjs'
+import { applyAnchors, reportAndExit, resolveEntities } from './patch-anchors.mjs'
 
 // profiles/node_modules/@deepseek-ai/* 是指向 dsh-brain/node_modules 的 junction，
 // 内容同一份文件；两个路径都探一下只是为了在 junction 布局变化时也能命中。
 const PATHS = [
-  'D:/project_develop/dsh-brain/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-  'C:/Users/Admin/.dsh/profiles/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+  // ★ 2026-10-07：改用**寻址**（pnpm 链接模式下实体只在 `.pnpm/` 里，顶层路径不存在）
+  ...resolveEntities('@deepseek-ai/dsh-app-boot'),
 ]
 
 const MARK = 'function parseJsonNoBom('

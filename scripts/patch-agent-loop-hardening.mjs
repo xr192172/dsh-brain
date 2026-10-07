@@ -33,11 +33,11 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { applyAnchors, reportAndExit } from './patch-anchors.mjs'
+import { applyAnchors, reportAndExit, resolveEntities } from './patch-anchors.mjs'
 
 const PATHS = [
-  'D:/project_develop/dsh-brain/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js',
-  'C:/Users/Admin/.dsh/profiles/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js',
+  // ★ 2026-10-07：改用**寻址**（pnpm 链接模式下实体只在 `.pnpm/` 里，顶层路径不存在）
+  ...resolveEntities('@deepseek-ai/dsh-agent-loop'),
 ]
 const BACKUP_DIR = 'C:/Users/Admin/.dsh/.backup'
 
