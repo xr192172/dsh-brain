@@ -28,7 +28,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { openHub, genId } from '../spike/hubconn.mjs'
+import { openHub, genId } from '../scripts/spike/hubconn.mjs'
 
 // ── 可选依赖（缺了不崩，降级并如实标注）────────────────────────────────
 let decompressZstd = null
@@ -40,7 +40,7 @@ try {
 
 let handoffValidator = null
 try {
-  handoffValidator = await import('../../../scripts/seats/handoff-contract.mjs')
+  handoffValidator = await import('../scripts/seats/handoff-contract.mjs')
 } catch {
   /* 交接包校验降级为放行+notice（handoff-validator-unavailable） */
 }
