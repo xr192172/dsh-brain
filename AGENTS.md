@@ -6,7 +6,7 @@
 **派之前先读它们的「负责」与「不接」两栏**，派错了它们会把活退回来。
 
 > 本段由 `scripts/seats/gen-roster.mjs` 从 `seats/library/*.md`（席位定义，经生成物）自动生成。
-> 源码指纹 `833e3d98c873` —— 若 persona 改了而本段没重生成，`gen-roster.mjs --check` 会报红。
+> 源码指纹 `6d2fecc91709` —— 若 persona 改了而本段没重生成，`gen-roster.mjs --check` 会报红。
 
 ### architect · 架构师（提方案的人）
 
