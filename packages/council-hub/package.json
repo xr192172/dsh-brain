@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-brain/council-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/server.js",
+  "exports": {
+    ".": "./lib/server.js",
+    "./protocol": "./lib/protocol.js",
+    "./queue": "./lib/queue.js",
+    "./registry": "./lib/registry.js",
+    "./package.json": "./package.json"
+  },
+  "description": "评审团编排基座（council-hub/1）：席位注册/寻址/任务下发/产物回收/交接包通道/队列与并发。无 left/right/sandbox 老角色、无 genService、无 dsh.swap 业务、无前端。规格见 docs/PROJECT-MAP.md §四。",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

@@ -17,6 +17,7 @@
 | **wb2api** | `secretary/wb2api`（:7863） | 模型网关（国内账号池） | ✅ |
 | **NapCat** | `secretary/napcat` | QQ 协议网关（小鲸 QQ 3512668998） | ✅ |
 | **keeper** | `secretary/keeper.bat` | 服务守护（wb2api/memoryd 巡逻拉起） | ✅ |
+| **council-hub** | `dsh-brain/packages/council-hub` | 评审团编排基座（council-hub/1）：六基角色白名单（hub/ui/secretary/review-board/executor/sentinel）+ 五通道 + 队列与 `config.maxConcurrent` + 交接包 fail-closed 校验（复用 handoff-contract.mjs） | ✅ 骨架（2026-10-25：5 文件/21 用例全 PASS，tsc 0 错） |
 
 ## 二、存档参考（旧 · 不接入，仅设计思路）
 
@@ -30,8 +31,8 @@
 
 | # | 组件 | 规格 | 依赖 |
 |---|---|---|---|
-| 1 | **council-hub**（评审团编排基座） | 见下 §规格 | 无（从零） |
-| 2 | 队列+并发上限 | 内建于 council-hub（config.maxConcurrent） | 1 |
+| 1 | **council-hub**（评审团编排基座） | ✅ 已落位（见「一、活体系」）：骨架 + 五通道 + 交接包校验完成；**待接**：task.verdict 的语义判定（归评审席）、REST 只读管理面 | — |
+| 2 | 队列+并发上限 | ✅ 已内建于 council-hub：`TaskQueue`（优先级 + 同优先级 FIFO + dependsOn 依赖序）+ `config.maxConcurrent` 硬闸（含端到端与单元两组用例） | 1 |
 | 3 | 编号自动化 | agent-io claim 机制 + 启动自动分配 agent:席名-序号 | 1 |
 | 4 | 预授权额度 | 调度席下发 {N 步/M token/禁区}，sentinel 抽验 | 1,3 |
 | 5 | L6 回写通路 | 子代理产物→判据→记忆图谱 | 1 |
