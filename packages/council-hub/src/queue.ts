@@ -30,6 +30,8 @@ export interface QueuedTask {
   to: TaskEndpoint
   payload: Record<string, unknown>
   enqueuedAt: number
+  /** 派发时写入的被指派编号（★ 编号即身份：之后只有它才能了结这个任务） */
+  assignee?: string
 }
 
 export interface EnqueueInput {
@@ -130,6 +132,19 @@ export class TaskQueue {
     const [task] = this.pending.splice(best, 1)
     this.running.set(task.id, task)
     return task
+  }
+
+  /** 派发时登记被指派者（★ 编号即身份：之后只有它才能了结这个任务） */
+  setAssignee(id: string, clientId: string): boolean {
+    const task = this.running.get(id) ?? this.pending.find((t) => t.id === id)
+    if (!task) return false
+    task.assignee = clientId
+    return true
+  }
+
+  /** 这个任务被指派给了谁（不在队列视野内 ⇒ undefined） */
+  assigneeOf(id: string): string | undefined {
+    return this.running.get(id)?.assignee ?? this.pending.find((t) => t.id === id)?.assignee
   }
 
   /**

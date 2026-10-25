@@ -145,6 +145,7 @@ export function createCouncilHub(config: HubConfig = {}): CouncilHub {
         }
         continue
       }
+      queue.setAssignee(task.id, seat.clientId)
       seat.send(
         makeEnvelope({
           type: CHANNELS.taskAssign,
@@ -227,6 +228,12 @@ export function createCouncilHub(config: HubConfig = {}): CouncilHub {
     const p = env.payload
     const taskId = String(p['task_id'] ?? env.correlation_id ?? '')
     const ok = p['ok'] !== false
+    // ★ §15.6：编号不符**不让接此任务** —— 产物回报只认被指派者（同级不可互接的运行时版）
+    const assignee = taskId ? queue.assigneeOf(taskId) : undefined
+    if (assignee && assignee !== seat.clientId) {
+      notice(seat, 'task_not_yours', `任务 ${taskId} 指派给 ${assignee}；你（${seat.clientId}）不是被指派者 ⇒ 不予了结`)
+      return
+    }
     const known = taskId ? queue.finish(taskId, ok ? 'completed' : 'failed') : false
 
     const relayed = relayToRole(
@@ -297,7 +304,8 @@ export function createCouncilHub(config: HubConfig = {}): CouncilHub {
     const alertId = `alert_${alerts.length + 1}`
     alerts.push({
       at: Date.now(),
-      from: `${seat.rawRole}#${seat.clientId}`,
+      // ★ 卡 3a：编号即身份 —— 留编号本身（编号已自带席名）
+      from: seat.clientId,
       payload: env.payload,
     })
     const outbound = makeEnvelope({

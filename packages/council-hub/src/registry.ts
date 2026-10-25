@@ -6,15 +6,17 @@
  * 分成两个 Map 各自维护 = 迟早一边删了另一边还在（幽灵席位），而幽灵席位的症状是
  * 「任务下发成功但没人回」—— 最难查的一类。
  *
- * ## 编号自动化（待建队列 #3）本卡不做，但**生成点收在这里**
- * 现在 `client_id` 是进程内自增（`c_001`…）；将来要换成 `agent:席名-序号` 的分配策略，
- * 只改 `nextClientId()` 一处，不碰调用方。
+ * ## 编号自动化（§15.6，卡 3a 已落地）
+ * `client_id` = `agent:<席名>-<序号>`，序号**按席名独立自增**（executor-1 / executor-2 /
+ * review-board-1 …）。生成点只有 `nextClientId()` 一处 —— 换策略只改这里。
  */
 
 import type { Role } from './protocol.js'
 
 export interface Seat {
   clientId: string
+  /** 席名（编号的头部：executor-alpha / review-board …） */
+  seatName: string
   /** 基角色（白名单内的六者之一） */
   role: Role
   /** 客户端自称的原始角色串（如 executor-alpha）—— 回执与审计要能看出它到底是谁 */
@@ -34,18 +36,38 @@ export interface RegisterInput {
 
 export class SeatRegistry {
   private readonly byId = new Map<string, Seat>()
-  private seq = 0
+  /** 每个席名各自计数（executor-1 / executor-2 / review-board-1 …） */
+  private readonly seqBySeat = new Map<string, number>()
 
-  /** 生成下一个 client_id（★ 编号策略的唯一落点） */
-  private nextClientId(): string {
-    this.seq += 1
-    return `c_${String(this.seq).padStart(3, '0')}`
+  /**
+   * 生成下一个编号 `agent:<席名>-<序号>`（★ 编号策略的唯一落点）。
+   * ★ 序号**按席名独立自增**：同一具席位的第 2 个实例是 executor-2，不是全局第 7 号 ——
+   *   §15.6 的「编号 = 席名 + 序号」，跨席共用一个计数器会让「第 2 号执行器」变成「第 7 号」，
+   *   编号就失去了「这具席位的第几个实例」这个信息。
+   */
+  private nextClientId(seatName: string): string {
+    const n = (this.seqBySeat.get(seatName) ?? 0) + 1
+    this.seqBySeat.set(seatName, n)
+    return `agent:${seatName}-${n}`
+  }
+
+  /** 席名 = 原始角色串去掉 `agent:` 前缀并清洗（`agent:executor-alpha` → `executor-alpha`） */
+  static seatNameOf(raw: string, role: Role): string {
+    const cleaned = String(raw ?? '')
+      .replace(/^agent:/, '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+    return cleaned || role
   }
 
   register(input: RegisterInput): Seat {
     const rawRole = input.rawRole ?? input.role
+    const seatName = SeatRegistry.seatNameOf(rawRole, input.role)
     const seat: Seat = {
-      clientId: this.nextClientId(),
+      clientId: this.nextClientId(seatName),
+      seatName,
       role: input.role,
       rawRole,
       name: input.name ?? rawRole,
@@ -68,6 +90,15 @@ export class SeatRegistry {
   /** 同基角色的全部席位（评审席/执行席都可能多实例） */
   byRole(role: Role): Seat[] {
     return [...this.byId.values()].filter((s) => s.role === role)
+  }
+
+  /**
+   * actor 是否就是这个席位的编号（★ 编号即身份）。
+   * 容忍 `agent:` 前缀缺省 —— 调度席写人话时会写 `executor-1`，强制全名只会制造摩擦。
+   */
+  isSeatNumber(seat: Seat, actor: string): boolean {
+    const a = String(actor ?? '').trim()
+    return a === seat.clientId || a === seat.clientId.replace(/^agent:/, '')
   }
 
   list(): Seat[] {

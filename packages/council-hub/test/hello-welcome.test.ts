@@ -25,7 +25,7 @@ describe('session.hello → session.welcome', () => {
     const { url } = await hub.start()
 
     const seat = await connectSeat(url, 'executor-alpha', 'dsh-alpha')
-    expect(seat.clientId).toMatch(/^c_\d{3}$/)
+    expect(seat.clientId).toMatch(/^agent:executor-alpha-\d+$/)
 
     const registered = hub.registry.byClientId(seat.clientId)
     expect(registered?.role).toBe('executor')
@@ -107,7 +107,7 @@ describe('session.hello → session.welcome', () => {
       }, 10)
     })
 
-    expect(welcome.payload.client_id).toMatch(/^c_\d{3}$/)
+    expect(welcome.payload.client_id).toMatch(/^agent:executor-alpha-\d+$/)
     expect(welcome.payload.protocol).toBe('council-hub/1')
     // 出站同时带 ts 与 timestamp（bridge 读后者）
     expect(typeof welcome.ts).toBe('number')

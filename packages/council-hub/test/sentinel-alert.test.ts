@@ -49,7 +49,7 @@ describe('sentinel.alert 路由', () => {
 
     // hub 自己留痕：监督席的警报不能"路由完就没了"
     expect(hub.alerts.length).toBe(1)
-    expect(hub.alerts[0].from).toBe('sentinel#c_001')
+    expect(hub.alerts[0].from).toBe('agent:sentinel-1')
     expect(hub.alerts[0].payload.kind).toBe('budget_exceeded')
 
     sentinel.close()
