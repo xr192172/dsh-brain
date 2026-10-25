@@ -81,7 +81,7 @@ function providerToolNamePair() {
 const { providerOf: PROVIDER_OF, toolNameOf: TOOLNAME_OF, names: SEAT_NAMES } = providerToolNamePair()
 
 /** 席位短名 → 唯一名（★ 兼容垫片；与 `index.ts` 的 `LEGACY_ALIASES` 同义）。 */
-const UNIQUE_OF = { architect: 'council-architect', dev: 'council-dev', review: 'council-review', secretary: 'council-secretary', 'review-board': 'council-review-board', scout: 'council-scout', dispatch: 'council-dispatch', acceptance: 'council-acceptance' }
+const UNIQUE_OF = { architect: 'council-architect', dev: 'council-dev', review: 'council-review', secretary: 'council-secretary', 'review-board': 'council-review-board', scout: 'council-scout', dispatch: 'council-dispatch', acceptance: 'council-acceptance', sentinel: 'council-sentinel' }
 
 /** 席位的**显示名**（中文职能名 —— 给人看，不是判据）。 */
 const DISPLAY_OF = { architect: '架构师（提方案的人）', dev: '开发脑（动手的人）', review: '审批脑（裁值不值得的人）' }
@@ -110,6 +110,7 @@ const SEAT_SCOPE_NOTE = {
   scout: '只读——细席一·侦察：证据两源（环境索引+外部），评审与分发的弹药',
   dispatch: '全量——细席二·调度：拆分/选执行器/额度下发/排队',
   acceptance: '只读——细席三·验收：对照完成预期判定，三席合议压轴',
+  sentinel: '只读——监督席：监察其他子代理（额度/越界/跳审抽验），警报上报不执行',
 }
 
 /**
@@ -133,7 +134,7 @@ export function renderRoster(opts = {}) {
   lines.push(`> 源码指纹 \`${fp}\` —— 若 persona 改了而本段没重生成，\`gen-roster.mjs --check\` 会报红。`)
   lines.push('')
 
-  for (const seat of ['architect', 'dev', 'review', 'secretary', 'scout', 'dispatch', 'acceptance', 'review-board']) {
+  for (const seat of ['architect', 'dev', 'review', 'secretary', 'scout', 'dispatch', 'acceptance', 'sentinel', 'review-board']) {
     const c = scripts[seat]
     if (!c) continue
     // ★ 接线事实用【唯一名】查（PROVIDER_OF/TOOLNAME_OF 的键是唯一名）；

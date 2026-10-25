@@ -6,7 +6,7 @@
 **派之前先读它们的「负责」与「不接」两栏**，派错了它们会把活退回来。
 
 > 本段由 `scripts/seats/gen-roster.mjs` 从 `seats/library/*.md`（席位定义，经生成物）自动生成。
-> 源码指纹 `6d2fecc91709` —— 若 persona 改了而本段没重生成，`gen-roster.mjs --check` 会报红。
+> 源码指纹 `907f5df9d78b` —— 若 persona 改了而本段没重生成，`gen-roster.mjs --check` 会报红。
 
 ### architect · 架构师（提方案的人）
 
@@ -34,14 +34,14 @@
 
 ### secretary · secretary
 
-- **派活用这个工具**：`council-secretary`（provider `council-secretary`）
+- **派活用这个工具**：`council_secretary`（provider `council-secretary`）
 - **负责**：判活并转派
 - **交付形状**（它会被要求按这些段落回答）：复述 / 动作 / 结果 / 存档
 - **工具域**：全量（继承父会话）—— 统筹与对话入口，记忆图谱读写（memoryd :7870）
 
 ### scout · scout
 
-- **派活用这个工具**：`council-scout`（provider `council-scout`）
+- **派活用这个工具**：`council_scout`（provider `council-scout`）
 - **负责**：一件事——把证据找齐并标明来源；裁「的是「证据的可信」
 - **不接**：动任何文件
 - **交付形状**（它会被要求按这些段落回答）：环境索引 / 外部证据 / 信息缺口 / 证据→判断的映射建议
@@ -49,7 +49,7 @@
 
 ### dispatch · dispatch
 
-- **派活用这个工具**：`council-dispatch`（provider `council-dispatch`）
+- **派活用这个工具**：`council_dispatch`（provider `council-dispatch`）
 - **负责**：一件事——把任务拆成可派发的子任务并选好执行器；裁「的是「谁去干、干」
 - **不接**：执行任何任务
 - **交付形状**（它会被要求按这些段落回答）：任务拆分表 / 额度 / 执行器选择理由 / 排队序 / 不确定
@@ -57,15 +57,23 @@
 
 ### acceptance · acceptance
 
-- **派活用这个工具**：`council-acceptance`（provider `council-acceptance`）
+- **派活用这个工具**：`council_acceptance`（provider `council-acceptance`）
 - **负责**：一件事——对照完成预期判定交付；裁「的是「做完没、做」
 - **不接**：执行器说话
 - **交付形状**（它会被要求按这些段落回答）：判定 / 证据 / 疑虑 / 下一步
 - **工具域**：只读——细席三·验收：对照完成预期判定，三席合议压轴
 
+### sentinel · sentinel
+
+- **派活用这个工具**：`council-sentinel`（provider `council-sentinel`）
+- **负责**：一件事——监察；裁「的是「有没有偏离」
+- **不接**：执行被监察者的任务
+- **交付形状**（它会被要求按这些段落回答）：监察范围 / 警报 / 抽验记录 / 上报
+- **工具域**：只读——监督席：监察其他子代理（额度/越界/跳审抽验），警报上报不执行
+
 ### review-board · review-board
 
-- **派活用这个工具**：`council-review-board`（provider `council-review-board`）
+- **派活用这个工具**：`council_review_board`（provider `council-review-board`）
 - **负责**：一件事——评审与交接；裁「的是「任务怎么分」
 - **不接**：放行没有完成预期的任务
 - **交付形状**（它会被要求按这些段落回答）：判定 / 证据 / 合议 / 存档
