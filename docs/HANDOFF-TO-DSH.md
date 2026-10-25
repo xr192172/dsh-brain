@@ -41,7 +41,7 @@
 
 | 服务 | 端口/位置 | 用途 |
 |---|---|---|
-| wb2api | :7863，key `sk-VK1moIA0n_KEEuhNjlh6qAIC` | WorkBuddy 模型网关（OpenAI 兼容 /v1）——DSH 模型已配 deepseek-v4.1-flash 走它 |
+| wb2api | :7863，key 见 `secretary/wb2api/config.json`（仓库外，不进 git） | WorkBuddy 模型网关（OpenAI 兼容 /v1）——DSH 模型已配 deepseek-v4.1-flash 走它 |
 | memoryd | :7870 | 记忆图谱（/recall /remember /health，env MEMORYD_LLM_API_KEY 同上 key） |
 | agent-io MCP | `design-canvas/dist/src/presentation/mcp/server.js`（stdio） | 设计册+任务闸（**你的主工具**） |
 | NapCat | 小鲸 QQ 3512668998（QQ 网关） | 秘书席 QQ 入口 |
