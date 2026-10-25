@@ -81,7 +81,7 @@ function providerToolNamePair() {
 const { providerOf: PROVIDER_OF, toolNameOf: TOOLNAME_OF, names: SEAT_NAMES } = providerToolNamePair()
 
 /** 席位短名 → 唯一名（★ 兼容垫片；与 `index.ts` 的 `LEGACY_ALIASES` 同义）。 */
-const UNIQUE_OF = { architect: 'council-architect', dev: 'council-dev', review: 'council-review' }
+const UNIQUE_OF = { architect: 'council-architect', dev: 'council-dev', review: 'council-review', secretary: 'council-secretary' }
 
 /** 席位的**显示名**（中文职能名 —— 给人看，不是判据）。 */
 const DISPLAY_OF = { architect: '架构师（提方案的人）', dev: '开发脑（动手的人）', review: '审批脑（裁值不值得的人）' }
@@ -105,6 +105,7 @@ const SEAT_SCOPE_NOTE = {
   architect: '只读（7 个取证工具）—— 它**写不了**文件，所以别派它去改代码',
   dev: '全量（继承父会话）—— 它是**唯一能动手写**的部门',
   review: '只读（7 个取证工具）—— 它**不改**文件，只裁',
+  secretary: '全量（继承父会话）—— 统筹与对话入口，记忆图谱读写（memoryd :7870）',
 }
 
 /**
@@ -128,7 +129,7 @@ export function renderRoster(opts = {}) {
   lines.push(`> 源码指纹 \`${fp}\` —— 若 persona 改了而本段没重生成，\`gen-roster.mjs --check\` 会报红。`)
   lines.push('')
 
-  for (const seat of ['architect', 'dev', 'review']) {
+  for (const seat of ['architect', 'dev', 'review', 'secretary']) {
     const c = scripts[seat]
     if (!c) continue
     // ★ 接线事实用【唯一名】查（PROVIDER_OF/TOOLNAME_OF 的键是唯一名）；
