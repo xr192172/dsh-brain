@@ -63,7 +63,16 @@ const DEFAULTS = {
   handoffEnforce: true, // 交接包校验不合格则不下发（fail-closed）
   replayJournal: false, // true = 首次轮询重放 journal 全史（默认跳过历史）
   log: (...a) => console.log('[bridge]', ...a),
+  // ★ 卡 2（council-hub 席位适配）：协议档 —— hubv2 = 老 Hub 形态（默认，在役 QQ 链路）；
+  //   council-hub = 评审团编排基座（三向翻译，见 handleTaskAssign / toCouncilHub）。
+  protocol: 'hubv2',
 }
+
+/** 协议档 → 信封上的 protocol 字段（★ 唯一映射处，bridge 不自造第三种说法） */
+const HUB_PROTOCOLS = { hubv2: '2.0', 'council-hub': 'council-hub/1' }
+
+/** council-hub 档下**上向**允许发往 hub 的通道（其余一律不发，避免 unknown_type 噪音） */
+const COUNCIL_HUB_UP = new Set(['task.result', 'handoff.submit', 'permission.request', 'permission.response'])
 
 // ── CLI ───────────────────────────────────────────────────────────────
 export function parseArgs(argv) {
@@ -83,6 +92,7 @@ export function parseArgs(argv) {
   pick('--poll-ms', 'POLL_MS', 'pollMs')
   pick('--event-to', 'EVENT_TO', 'eventTo')
   pick('--bridge-port', 'BRIDGE_PORT', 'bridgePort')
+  pick('--protocol', 'BRIDGE_PROTOCOL', 'protocol')
   if (out.pollMs !== undefined) out.pollMs = Number(out.pollMs)
   if (out.bridgePort !== undefined) out.bridgePort = Number(out.bridgePort)
   if (argv.includes('--replay-journal')) out.replayJournal = true
@@ -207,6 +217,8 @@ export function createBridge(userCfg = {}) {
     lastSeq: 0,
     journalSeen: false,
     currentTurnId: '', // 最近受理的 hub turn_id
+    // ★ 卡 2：最近受理的 council-hub 任务（回合结束时 task.result 要把它带回去）
+    currentTask: null,
     pendingPerms: new Map(), // correlation_id → {resolve, timer}
     httpServer: null,
   }
@@ -218,6 +230,9 @@ export function createBridge(userCfg = {}) {
   // permission.* / 其它走 {role:'hub'}（permissionService 只认 hub 入口）。
   function toHub(type, payload, correlationID, to) {
     if (!state.host?.send) return false
+    // ★ 卡 2：council-hub 档只放行它认得的通道 —— 否则每条 event.notice 都会换来
+    //   一条 unknown_type 回执（噪音，不是信息）。permission 两条保留（L7 要用）。
+    if (cfg.protocol === 'council-hub' && !COUNCIL_HUB_UP.has(type)) return false
     const target =
       to ??
       (type.startsWith('event.') ? { role: cfg.eventTo, broadcast: true } : { role: 'hub' })
@@ -285,11 +300,70 @@ export function createBridge(userCfg = {}) {
     }
   }
 
+  // ── council-hub 席位适配（卡 2）：三向翻译 ───────────────────────────
+  /**
+   * 下向：hub 的 task.assign → dsh 前门的 command.input。
+   * ★ 记下 task_id：回合结束时 task.result 要把它带回去，否则评审团认不出这是哪个任务的产物。
+   */
+  async function handleTaskAssign(m) {
+    const p = m.payload ?? {}
+    const taskId = String(p.task_id ?? m.correlation_id ?? '')
+    const text =
+      String(p.instruction ?? p.title ?? p.prompt ?? p.text ?? '') ||
+      `（任务 ${taskId || '未命名'}：payload 里没有 instruction / title / prompt / text）`
+    state.currentTask = { task_id: taskId, correlation_id: m.correlation_id ?? '' }
+    log(`task.assign task=${taskId || '-'} → command.input`)
+    await handleCommandInput({
+      payload: { text, session_id: p.session_id ?? '', turn_id: taskId },
+      correlation_id: m.correlation_id,
+    })
+  }
+
+  /**
+   * 上向：journal 事件 → council-hub 通道。
+   * ★ 只发评审团真正消费的两类：task.result（回合结束=产物就绪）与 handoff.submit（交接包）。
+   *   工具级事件（tool_call/tool_result）在 council-hub 档**不转发** —— 评审团要的是产物与
+   *   交接包，不是每一步的工具调用（全转发只会变成一串 unknown_type）。
+   */
+  function toCouncilHub(ev) {
+    if (ev.type === 'event.turn_done') {
+      const task = state.currentTask
+      return {
+        type: 'task.result',
+        payload: {
+          task_id: task?.task_id ?? '',
+          ok: true,
+          turn_id: ev.payload.turn_id ?? '',
+          reason: ev.payload.reason ?? null,
+        },
+        correlation_id: task?.correlation_id,
+      }
+    }
+    if (ev.type === 'event.message') {
+      const text = String(ev.payload?.content ?? '')
+      if (/^#\s*交接包/.test(text.trim())) {
+        return {
+          type: 'handoff.submit',
+          payload: { markdown: text, task_id: state.currentTask?.task_id ?? '' },
+          correlation_id: state.currentTask?.correlation_id,
+        }
+      }
+    }
+    return null
+  }
+
   // ── hub 消息入口 ──
   async function handleHubMessage(m) {
     switch (m.type) {
       case 'command.input':
         await handleCommandInput(m)
+        break
+      // ★ 卡 2：council-hub 下发的 task.assign 翻成 dsh 前门的 command.input
+      case 'task.assign':
+        await handleTaskAssign(m)
+        break
+      case 'task.verdict':
+        log(`task.verdict 到账 task=${m.payload?.task_id ?? '-'} verdict=${m.payload?.verdict ?? '-'}`)
         break
       case 'command.cancel': {
         const sid = state.sessionMap.get(m.payload?.session_id ?? '') || state.autoSid || cfg.sessionId
@@ -396,6 +470,13 @@ export function createBridge(userCfg = {}) {
       if (ev.type === 'event.turn_done' && state.currentTurnId && !ev.payload.turn_id) {
         ev.payload.turn_id = state.currentTurnId
       }
+      if (cfg.protocol === 'council-hub') {
+        const mapped = toCouncilHub(ev)
+        if (!mapped) continue
+        toHub(mapped.type, mapped.payload, mapped.correlation_id)
+        log(`↑ ${mapped.type} (seq=${rec.seq})`)
+        continue
+      }
       toHub(ev.type, ev.payload)
       log(`↑ ${ev.type} (seq=${rec.seq})`)
     }
@@ -426,6 +507,7 @@ export function createBridge(userCfg = {}) {
           role: cfg.role,
           id: cfg.name,
           name: cfg.name,
+          protocol: HUB_PROTOCOLS[cfg.protocol] ?? HUB_PROTOCOLS.hubv2,
           extra: { project_root: process.cwd() },
           onMsg: (m) => {
             void handleHubMessage(m)

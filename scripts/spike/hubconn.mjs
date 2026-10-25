@@ -15,7 +15,7 @@ export function addr(role, id = '') {
 }
 
 /** 连接 Hub /ws 并完成 session.hello→welcome 握手。 */
-export function openHub({ hub = 'ws://127.0.0.1:15813/ws', role, id, name, extra = {}, onMsg }) {
+export function openHub({ hub = 'ws://127.0.0.1:15813/ws', role, id, name, extra = {}, onMsg, protocol = '2.0' }) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(hub)
     const connected = { ws, clientID: '', send: null }
@@ -31,7 +31,7 @@ export function openHub({ hub = 'ws://127.0.0.1:15813/ws', role, id, name, extra
         connected.clientID = m.payload?.client_id ?? ''
         connected.send = (type, to, payload, correlationID) => {
           const msg = {
-            protocol: '2.0',
+            protocol,
             id: genId(),
             correlation_id: correlationID,
             type,
@@ -52,7 +52,7 @@ export function openHub({ hub = 'ws://127.0.0.1:15813/ws', role, id, name, extra
     ws.on('open', () => {
       ws.send(
         JSON.stringify({
-          protocol: '2.0',
+          protocol,
           id: genId(),
           type: 'session.hello',
           from: addr(role, id),
