@@ -5,6 +5,7 @@
 | 资产 | 新家 |
 |---|---|
 | 席位定义（九席） | `agentio/dev/seats/` |
+| provider 注册（subagent-council） | `agentio/dev/subagent-council/` |
 | 席位工具链（gen-roster/seat-contract/handoff-contract） | `agentio/dev/seats-tools/scripts-seats/` |
 | WS 桥（bridge） | `agentio/dev/bridge/` |
 | 评审团编排基座（council-hub→review-hub） | `agentio/dev/review-hub/` |
